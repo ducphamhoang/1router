@@ -33,7 +33,7 @@ pub async fn spawn_app() -> TestApp {
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
     let http = router::core::http_client::build_client(&cfg);
     let snapshot = router::core::state::load_snapshot(&db).await.unwrap();
-    let (log_tx, _rx) = tokio::sync::mpsc::channel(1024);
+    let log_tx = router::telemetry::request_log::spawn_writer(db.clone(), 1024, 50);
 
     let state = router::core::state::AppState {
         db: db.clone(),

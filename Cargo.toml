@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 default-run = "1router"
 
+[lib]
+name = "router"
+path = "src/lib.rs"
+
 [[bin]]
 name = "1router"
 path = "src/main.rs"

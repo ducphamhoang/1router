@@ -1,3 +1,4 @@
+pub mod codex;
 pub mod passthrough;
 
 use axum::http::{HeaderMap, StatusCode};

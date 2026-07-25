@@ -6173,14 +6173,34 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cfg.listen_addr).await?;
     tracing::info!(addr = %cfg.listen_addr, "1router listening");
 
+    // [Fixed after Phase 4 review-equivalent check] the original version of this
+    // brief slept for `drain` *inside* the shutdown future before returning,
+    // which delayed axum from refusing new connections until the whole drain
+    // window had already elapsed, then waited UNBOUNDED for in-flight requests -
+    // backwards from "stop accepting new work immediately, bound how long you
+    // wait for what's already in flight." Corrected: the shutdown future
+    // resolves the instant a signal arrives; a separate watchdog force-exits
+    // the process if graceful drain hasn't finished within drain_timeout.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let drain = cfg.drain_timeout;
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        tracing::info!("shutdown signal received, draining (up to {:?})", drain);
+        let _ = shutdown_tx.send(());
+        tokio::time::sleep(drain).await;
+        tracing::warn!("drain timeout exceeded, forcing process exit");
+        std::process::exit(1);
+    });
+
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal(drain))
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal(drain: std::time::Duration) {
+async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.expect("failed to install ctrl-c handler");
     };
@@ -6198,9 +6218,6 @@ async fn shutdown_signal(drain: std::time::Duration) {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!(drain_secs = drain.as_secs(), "shutdown signal received, draining");
-    // Give in-flight SSE streams a bounded window to finish.
-    tokio::time::sleep(drain).await;
 }
 ```
 

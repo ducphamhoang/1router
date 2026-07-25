@@ -3229,7 +3229,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
   pub fn adapter_for(provider: &Provider, http: reqwest::Client) -> Box<dyn ProviderAdapter>;
   ```
   **[AMBIGUITY resolved]** `classify_error(status, headers)` (not `&Response`) so the HTTP-level class is decided before the body streams — a borrowed `reqwest::Response` can't be inspected without consuming its body. Codex's SSE-body error peek is internal to `transform_response` (P3-3).
-  PassthroughAdapter: `build_request` rewrites `body.model` → `provider.upstream_model` and sets `Authorization: Bearer <api_key>`; `transform_response` streams the upstream body through unchanged; `classify_error` uses the shared backoff `classify()` (P1-12); `needs_refresh` = false; `refresh_credentials` = `Err(Transient("passthrough has no refresh"))`.
+  PassthroughAdapter: `build_request` rewrites `body.model` → `provider.upstream_model` and sets the auth header **by `provider.wire_format`**: `WireFormat::OpenAi` → `Authorization: Bearer <api_key>`; `WireFormat::Anthropic` → `x-api-key: <api_key>` + `anthropic-version: 2023-06-01` (fixed during implementation — the first-drafted brief only specified Bearer regardless of wire_format, which would send the wrong auth scheme to Anthropic-compatible upstreams). `transform_response` streams the upstream body through unchanged; `classify_error` uses the shared backoff `classify()` (P1-12); `needs_refresh` = false; `refresh_credentials` = `Err(Transient("passthrough has no refresh"))`.
 
 - [ ] **Step 1: Write the failing test**
 

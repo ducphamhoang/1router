@@ -75,11 +75,14 @@ providers (
   created_at, updated_at
 )
 
-provider_oauth_state (            -- only present for kind = 'oauth_codex'
+provider_oauth_state (            -- present for any oauth_* kind, not Codex-specific
   provider_id TEXT PRIMARY KEY REFERENCES providers(id),
-  access_token TEXT, refresh_token TEXT,
+  access_token TEXT, refresh_token TEXT, id_token TEXT,
   access_expires_at TIMESTAMP,
-  chatgpt_account_id TEXT, workspace_id TEXT,
+  provider_data TEXT NOT NULL DEFAULT '{}',  -- JSON blob: chatgpt_account_id/workspace_id for
+                                              -- Codex, project_id for a future Gemini adapter, etc.
+                                              -- kept generic (matches 9router's providerSpecificData
+                                              -- pattern) so a second adapter needs no schema change
   pkce_verifier TEXT, oauth_state TEXT,   -- only populated mid-flow, cleared after completion
   updated_at
 )
@@ -193,16 +196,33 @@ is a trivial identity implementation, `oauth_codex` is the one real one:
 ```rust
 trait ProviderAdapter {
     async fn build_request(&self, client_body: &Body, creds: &Credentials) -> reqwest::Request;
-    async fn transform_response(&self, upstream: Response) -> ClientResponse; // incl. SSE transform
+    async fn transform_response(&self, upstream: Response, client_wanted_stream: bool) -> ClientResponse;
     fn classify_error(&self, resp: &Response) -> ErrorClass;
+    // Refresh is inherently per-provider (Codex sends JSON, others form-encoded, others AWS-signed) —
+    // this seam is what makes a second adapter (Gemini-CLI, Antigravity) a real drop-in later,
+    // not a rework of the trait.
+    fn needs_refresh(&self, creds: &Credentials) -> bool;
+    async fn refresh_credentials(&self, creds: &Credentials) -> Result<Credentials, RefreshError>;
 }
 ```
 
 Codex's implementation, matching 9router's `CodexExecutor`:
 - Targets OpenAI's Responses API (`https://chatgpt.com/backend-api/codex/responses`), not Chat
-  Completions — `system` role → `developer`, strips server-generated item IDs (`store: false`),
-  filters tool schemas against an allowlist, parses reasoning-effort suffixes off model names,
-  injects `ChatGPT-Account-ID` header from `provider_oauth_state`.
+  Completions. Request transform: `system` role → `developer`, strips server-generated item IDs,
+  forces `store: false` and `stream: true` upstream regardless of what the client asked for,
+  injects `prompt_cache_key`/session id, defaults `reasoning.effort` and
+  `include: ["reasoning.encrypted_content"]`, and — critically — **applies a strict allowlist that
+  deletes any field Codex's backend rejects**: `temperature`, `top_p`, `max_tokens`,
+  `max_output_tokens`, `user`, and others. Ordinary OpenAI-SDK clients (Cursor, etc.) send these
+  fields normally; forwarding them unfiltered to Codex produces a 400/`routing_unsupported`. This
+  allowlist is not optional polish, it's required for any real request to succeed.
+- Sets identity headers `originator: codex_cli_rs` and `User-Agent: codex_cli_rs/<version>`, plus
+  `ChatGPT-Account-ID` from `provider_oauth_state.provider_data`.
+- **Streaming mismatch:** because Codex is forced to `stream: true` upstream even when the client
+  did not request streaming, `transform_response` must aggregate the upstream SSE into a single
+  JSON response when `client_wanted_stream == false`. The general passthrough path (client
+  stream-flag == upstream stream-flag) does not hold for this adapter — it's handled entirely
+  inside `transform_response`, not by the shared proxy request flow.
 - Peeks inside 200-OK SSE bodies for embedded `usage_limit_reached`/transient-error events (Codex
   reports some failures inside the stream body, not via HTTP status) — feeds `classify_error`.
 
@@ -218,15 +238,24 @@ POST /admin/providers/:id/oauth/start
    right in the browser's address bar)
 
 POST /admin/providers/:id/oauth/complete   { "code": "..." }
-  → exchanges code + stored verifier for access/refresh tokens against auth.openai.com,
-    persists them, provider becomes usable
+  → exchanges code + stored verifier for tokens (form-urlencoded body, per OpenAI's token
+    endpoint) against auth.openai.com; the response's id_token is a JWT whose
+    `https://api.openai.com/auth` claim contains chatgpt_account_id/workspace_id — this MUST be
+    decoded at this step and written into provider_data, it is not returned as a plain field.
+    Persists access/refresh/id token, provider becomes usable.
 ```
 
-**Background refresh task** (one tokio task in `providers/`): proactively refreshes any
-`oauth_codex` provider's tokens ~5 days before the refresh token's ~8-day max age (9router's
-numbers), reusing the same retryable/non-retryable error classification as the regular failover
-backoff — an unrecoverable refresh error (e.g. `invalid_grant`) marks the provider `Misconfigured`
-and requires the user to redo the OAuth flow.
+**Background refresh** (one tokio task in `providers/`, JSON-bodied refresh request per Codex's
+token endpoint — note this differs from the form-urlencoded code exchange): proactively refreshes
+any `oauth_codex` provider's tokens ~5 days before the refresh token's ~8-day max age (9router's
+numbers). This is a *supplement* to, not a replacement for, reactive refresh-on-401: a token can
+be revoked between background ticks, so the regular request path must still check
+`needs_refresh`/attempt a refresh on a 401 before falling over to the next provider. Both paths
+share a **refresh lock keyed by `provider_id`** so a background tick and a request-triggered
+refresh can't race and both attempt to exchange the same (single-use) refresh token — the second
+one to arrive must wait for and reuse the first's result rather than refreshing again. An
+unrecoverable refresh error (e.g. `invalid_grant`) marks the provider `Misconfigured` and requires
+the user to redo the OAuth flow.
 
 **Pool composition:** a Codex provider's `wire_format` is `openai`, so it can sit in the same pool
 as ordinary OpenAI-passthrough providers and fail over between them transparently — the adapter's

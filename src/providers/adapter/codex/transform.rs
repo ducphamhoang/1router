@@ -62,6 +62,64 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
     out
 }
 
+/// Parse an SSE body into (event, data-json) pairs.
+fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for block in sse_body.split("\n\n") {
+        let mut event = String::new();
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event:") {
+                event = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data.push_str(rest.trim());
+            }
+        }
+        if data.is_empty() {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<Value>(&data) {
+            out.push((event, json));
+        }
+    }
+    out
+}
+
+pub fn aggregate_sse(sse_body: &str) -> Value {
+    let mut content = String::new();
+    let mut resp_id = String::new();
+    for (event, data) in sse_events(sse_body) {
+        if event.ends_with("output_text.delta") {
+            if let Some(d) = data["delta"].as_str() {
+                content.push_str(d);
+            }
+        } else if event.ends_with("completed") {
+            if let Some(id) = data["response"]["id"].as_str() {
+                resp_id = id.to_string();
+            }
+        }
+    }
+    json!({
+        "id": resp_id,
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": content },
+            "finish_reason": "stop"
+        }]
+    })
+}
+
+pub fn sse_embedded_error(sse_body: &str) -> Option<String> {
+    for (event, data) in sse_events(sse_body) {
+        if event.contains("failed") || event.contains("error") || !data["error"].is_null() {
+            let t = data["error"]["type"].as_str().unwrap_or("upstream_error");
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +163,23 @@ mod tests {
         let input = json!({ "messages": [], "input": [{"id": "msg_abc", "type": "message"}] });
         let out = transform_request(&input, "s");
         assert!(out["input"][0].get("id").is_none());
+    }
+
+    #[test]
+    fn aggregate_sse_concatenates_output_text_deltas() {
+        let sse = "event: response.output_text.delta\ndata: {\"delta\":\"Hello \"}\n\n\
+                   event: response.output_text.delta\ndata: {\"delta\":\"world\"}\n\n\
+                   event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}\n\n";
+        let out = aggregate_sse(sse);
+        let text = out["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn sse_embedded_error_detects_usage_limit() {
+        let sse = "event: response.failed\ndata: {\"error\":{\"type\":\"usage_limit_reached\"}}\n\n";
+        assert!(sse_embedded_error(sse).is_some());
+        let clean = "event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n";
+        assert!(sse_embedded_error(clean).is_none());
     }
 }

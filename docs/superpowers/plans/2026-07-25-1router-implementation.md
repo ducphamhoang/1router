@@ -4368,10 +4368,16 @@ Add `pub mod flow;` to `src/proxy/mod.rs`.
 Run: `cargo test --lib proxy::flow`
 Expected: PASS — the inline unit test. (The wiremock integration tests in `tests/proxy_failover.rs` go green after P2-3 wires the route; run them there.)
 
+> **Plan gap (found during execution):** this step's commit line lists
+> `tests/proxy_streaming.rs`, but this brief never actually provides its
+> content anywhere above. Its real content lives in P2-3's brief instead
+> (that task does specify it fully) — don't commit an empty/invented file
+> here; the streaming test lands with P2-3.
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/proxy/flow.rs src/proxy/mod.rs tests/proxy_failover.rs tests/proxy_streaming.rs
+git add src/proxy/flow.rs src/proxy/mod.rs tests/proxy_failover.rs
 git commit -m "feat: proxy failover loop and streaming orchestration
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"

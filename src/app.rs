@@ -1,12 +1,11 @@
-use axum::routing::get;
 use axum::Router;
 
 use crate::core::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
-    // Placeholder health route; P1-10 replaces this with telemetry::health::routes().
     Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .merge(crate::telemetry::health::routes())
+        .merge(crate::telemetry::stats::routes())
         .with_state(state)
 }
 

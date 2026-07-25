@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod oauth_routes;
 pub mod queries;
 pub mod routes;
 

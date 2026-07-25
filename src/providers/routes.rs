@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use crate::core::error::AppError;
 use crate::core::model::{Provider, ProviderKind, WireFormat};
+use crate::core::runtime::ProviderStatus;
 use crate::core::state::{reload_snapshot, AppState};
 use crate::providers::queries;
 
@@ -113,11 +114,46 @@ async fn delete(State(s): State<AppState>, Path(id): Path<String>) -> Result<Sta
     Ok(StatusCode::NO_CONTENT)
 }
 
-// Filled in later: provider connectivity test + runtime state exposure.
-async fn test_stub() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+async fn test_stub(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    let url = match &provider.base_url {
+        Some(u) => u.clone(),
+        None => return Ok(Json(json!({ "ok": false, "reason": "no base_url (oauth provider)" }))),
+    };
+    let res = s.http.get(&url).send().await;
+    match res {
+        Ok(r) => Ok(Json(json!({ "ok": true, "status": r.status().as_u16() }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "reason": e.to_string() }))),
+    }
 }
 
-async fn state_stub() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+async fn state_stub(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    queries::get_provider(&s.db, &id).await?;
+    let entry = s.runtime.get(&id);
+    let (level, status, until_secs) = match entry {
+        Some(st) => {
+            let secs = st
+                .unavailable_until
+                .map(|u| u.saturating_duration_since(std::time::Instant::now()).as_secs());
+            let status = match st.status {
+                ProviderStatus::Healthy => "healthy",
+                ProviderStatus::Cooling => "cooling",
+                ProviderStatus::Misconfigured => "misconfigured",
+            };
+            (st.backoff_level, status, secs)
+        }
+        None => (0u8, "healthy", None),
+    };
+    Ok(Json(json!({
+        "provider_id": id,
+        "backoff_level": level,
+        "status": status,
+        "unavailable_in_secs": until_secs,
+    })))
 }

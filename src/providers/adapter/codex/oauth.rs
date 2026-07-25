@@ -55,6 +55,13 @@ pub struct TokenSet {
     pub expires_in: Option<i64>,
 }
 
+fn token_url() -> String {
+    // Test hook: allow overriding the token endpoint for wiremock (mirrors
+    // refresh.rs's CODEX_TOKEN_URL, since exchange and refresh hit the same
+    // endpoint with different content-types).
+    std::env::var("CODEX_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string())
+}
+
 pub async fn exchange_code(
     http: &reqwest::Client,
     code: &str,
@@ -69,7 +76,7 @@ pub async fn exchange_code(
         ("code_verifier", verifier),
     ];
     let resp = http
-        .post(TOKEN_URL)
+        .post(token_url())
         .form(&form)
         .send()
         .await

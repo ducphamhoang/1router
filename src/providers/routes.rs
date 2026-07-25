@@ -15,11 +15,11 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/providers", get(list).post(create))
         .route(
-            "/admin/providers/{id}",
+            "/admin/providers/:id",
             get(get_one).patch(patch).delete(delete),
         )
-        .route("/admin/providers/{id}/test", post(test_stub))
-        .route("/admin/providers/{id}/state", get(state_stub))
+        .route("/admin/providers/:id/test", post(test_stub))
+        .route("/admin/providers/:id/state", get(state_stub))
 }
 
 fn mask(p: &Provider) -> Value {

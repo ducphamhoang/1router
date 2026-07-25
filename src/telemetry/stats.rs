@@ -9,7 +9,7 @@ use crate::core::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/stats", get(overall))
-        .route("/admin/stats/pools/{id}", get(per_pool))
+        .route("/admin/stats/pools/:id", get(per_pool))
 }
 
 async fn overall(State(s): State<AppState>) -> Result<Json<Value>, AppError> {

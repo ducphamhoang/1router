@@ -3850,6 +3850,13 @@ async fn import(
 }
 
 /// Idempotent upsert import; reused verbatim by first-boot seeding (P4-2).
+///
+/// [Fixed after Phase 4 review] wrap the whole body in `db.begin()`/
+/// `tx.commit()` and execute every statement against the transaction, not
+/// `db` directly. Without this, a crash or bad row partway through leaves a
+/// half-seeded state that first-boot seeding's "providers non-empty" guard
+/// then treats as already-seeded and never retries - silently and
+/// permanently. Must be all-or-nothing.
 pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), AppError> {
     for p in &dump.providers {
         sqlx::query(

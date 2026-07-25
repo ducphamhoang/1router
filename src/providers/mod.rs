@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod queries;
 pub mod routes;
 

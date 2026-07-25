@@ -1,11 +1,20 @@
 use axum::Router;
 
+use crate::auth::middleware::require_bearer;
 use crate::core::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
+    // Guarded surface: /v1/* and /admin/* module routes are merged here by later tasks.
+    let guarded = Router::new()
+        .merge(crate::telemetry::stats::routes())
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
+
     Router::new()
         .merge(crate::telemetry::health::routes())
-        .merge(crate::telemetry::stats::routes())
+        .merge(guarded)
         .with_state(state)
 }
 

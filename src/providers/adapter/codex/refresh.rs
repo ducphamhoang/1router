@@ -4,7 +4,14 @@ use crate::core::error::RefreshError;
 use crate::providers::adapter::codex::oauth::{TokenSet, CODEX_CLIENT_ID, TOKEN_URL};
 use crate::providers::adapter::Credentials;
 
-const REFRESH_WINDOW_DAYS: i64 = 5;
+// `access_expires_at` tracks the short-lived ACCESS token (~1h for Codex,
+// per `expires_in` on both exchange and refresh), not the ~8-day refresh
+// token. A multi-day lead window here would make needs_refresh always true
+// (an hour-scale expiry is always "within 5 days"), so the background task
+// would re-refresh every tick regardless of actual need - fixed per the
+// Phase 3 review to a lead window scaled to the access token's own
+// lifetime instead.
+const REFRESH_LEAD: Duration = Duration::minutes(5);
 
 fn token_url() -> String {
     // Test hook: allow overriding the token endpoint for wiremock.
@@ -13,7 +20,7 @@ fn token_url() -> String {
 
 pub fn needs_refresh(creds: &Credentials, now: DateTime<Utc>) -> bool {
     match creds.access_expires_at {
-        Some(exp) => exp - now <= Duration::days(REFRESH_WINDOW_DAYS),
+        Some(exp) => exp - now <= REFRESH_LEAD,
         None => true, // unknown expiry -> refresh proactively
     }
 }
@@ -64,18 +71,23 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn creds_expiring_in(days: i64) -> Credentials {
+    fn creds_expiring_in_minutes(minutes: i64) -> Credentials {
         Credentials {
-            access_expires_at: Some(Utc::now() + Duration::days(days)),
+            access_expires_at: Some(Utc::now() + Duration::minutes(minutes)),
             refresh_token: Some("rt".into()),
             ..Default::default()
         }
     }
 
     #[test]
-    fn needs_refresh_true_when_within_5_days() {
-        assert!(needs_refresh(&creds_expiring_in(3), Utc::now()));
-        assert!(!needs_refresh(&creds_expiring_in(7), Utc::now()));
+    fn needs_refresh_true_when_within_5_minutes() {
+        assert!(needs_refresh(&creds_expiring_in_minutes(3), Utc::now()));
+        assert!(!needs_refresh(&creds_expiring_in_minutes(30), Utc::now()));
+    }
+
+    #[test]
+    fn needs_refresh_true_when_already_expired() {
+        assert!(needs_refresh(&creds_expiring_in_minutes(-10), Utc::now()));
     }
 
     #[test]

@@ -1,11 +1,30 @@
 use serde_json::{json, Value};
 
+// Fields Codex's backend rejects. This is a denylist rather than the spec's
+// ideal "strict allowlist" (keep-known-fields), which means any future
+// OpenAI-SDK field not covered here leaks through by default - but a true
+// allowlist would need to enumerate everything a real client legitimately
+// sends, which risks silently dropping fields Codex *does* support. Extended
+// per the Phase 3 review with the other common Chat Completions params real
+// clients (Cursor, Claude Code, the OpenAI SDK) routinely send.
 const DISALLOWED: &[&str] = &[
     "temperature",
     "top_p",
     "max_tokens",
     "max_output_tokens",
     "user",
+    "n",
+    "presence_penalty",
+    "frequency_penalty",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "seed",
+    "stop",
+    "response_format",
+    "stream_options",
+    "parallel_tool_calls",
+    "service_tier",
 ];
 
 fn strip_ids(value: &mut Value) {
@@ -139,6 +158,28 @@ mod tests {
         assert!(out.get("max_tokens").is_none());
         assert!(out.get("max_output_tokens").is_none());
         assert!(out.get("user").is_none());
+    }
+
+    #[test]
+    fn allowlist_deletes_common_openai_sdk_fields() {
+        // Regression test for the Phase 3 review: real clients (Cursor, Claude
+        // Code, the OpenAI SDK) routinely send these too, and Codex rejects them.
+        let input = json!({
+            "model": "gpt-4o", "messages": [],
+            "n": 1, "presence_penalty": 0.1, "frequency_penalty": 0.1,
+            "logprobs": true, "top_logprobs": 3, "logit_bias": {"50256": -100},
+            "seed": 42, "stop": ["\n"], "response_format": {"type": "json_object"},
+            "stream_options": {"include_usage": true}, "parallel_tool_calls": false,
+            "service_tier": "default"
+        });
+        let out = transform_request(&input, "sess-2");
+        for field in [
+            "n", "presence_penalty", "frequency_penalty", "logprobs", "top_logprobs",
+            "logit_bias", "seed", "stop", "response_format", "stream_options",
+            "parallel_tool_calls", "service_tier",
+        ] {
+            assert!(out.get(field).is_none(), "{field} should have been stripped");
+        }
     }
 
     #[test]

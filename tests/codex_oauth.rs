@@ -79,17 +79,30 @@ async fn oauth_complete_exchanges_code_and_persists_account_claims() {
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
 
-    client
+    let start_resp: serde_json::Value = client
         .post(format!("{}/admin/providers/cx/oauth/start", app.base_url))
         .header(&k, &v)
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Extract the state param from the authorize_url, exactly as a caller
+    // would parse it from the real redirect URL's query string.
+    let authorize_url = start_resp["authorize_url"].as_str().unwrap();
+    let issued_state = authorize_url
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
         .unwrap();
 
     let resp = client
         .post(format!("{}/admin/providers/cx/oauth/complete", app.base_url))
         .header(&k, &v)
-        .json(&json!({ "code": "auth-code-abc" }))
+        .json(&json!({ "code": "auth-code-abc", "state": issued_state }))
         .send()
         .await
         .unwrap();
@@ -110,6 +123,33 @@ async fn oauth_complete_exchanges_code_and_persists_account_claims() {
         json!("acct_test123")
     );
     assert_eq!(os.provider_data["workspace_id"], json!("ws_test456"));
+}
+
+// Regression test for the Phase 3 review: /oauth/complete stored oauth_state
+// but never validated it, so it provided no real CSRF binding.
+#[tokio::test]
+async fn oauth_complete_rejects_state_mismatch() {
+    let app = spawn_app().await;
+    make_codex_provider(&app).await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+
+    client
+        .post(format!("{}/admin/providers/cx/oauth/start", app.base_url))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/admin/providers/cx/oauth/complete", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "code": "auth-code-abc", "state": "wrong-state" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
 }
 
 #[tokio::test]

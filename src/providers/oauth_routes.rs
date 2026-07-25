@@ -35,6 +35,11 @@ async fn start(
 #[derive(Deserialize)]
 struct CompleteBody {
     code: String,
+    // Required: the `state` param from the same redirect URL the `code` came
+    // from. Validated against what /oauth/start issued for this provider -
+    // without this, `state` is stored but never checked, so it provides no
+    // real CSRF binding (found in the Phase 3 review).
+    state: String,
 }
 
 async fn complete(
@@ -48,6 +53,12 @@ async fn complete(
     let verifier = os
         .pkce_verifier
         .ok_or_else(|| AppError::BadRequest("missing pkce verifier".into()))?;
+    let expected_state = os
+        .oauth_state
+        .ok_or_else(|| AppError::BadRequest("missing oauth state; call start first".into()))?;
+    if b.state != expected_state {
+        return Err(AppError::BadRequest("state mismatch".into()));
+    }
 
     let tokens = oauth::exchange_code(&s.http, &b.code, &verifier)
         .await

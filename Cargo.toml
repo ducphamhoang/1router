@@ -39,5 +39,6 @@ rand = "0.8"
 urlencoding = "2"
 
 [dev-dependencies]
+http-body-util = "0.1"
 wiremock = "0.6"
 tempfile = "3"

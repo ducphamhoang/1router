@@ -1410,17 +1410,29 @@ pub struct TestApp {
 }
 
 pub async fn spawn_app() -> TestApp {
+    // Build Config directly rather than through Config::from_env() + std::env::set_var.
+    // Integration tests within one file run concurrently by default; std::env is
+    // process-global, so concurrent spawn_app() calls setting ROUTER_* would race
+    // each other exactly like the Task P0-5 config-test bug (see that task's fix
+    // note) - constructing the struct directly removes the shared mutable state
+    // instead of just serializing access to it.
     let secret = "test-secret".to_string();
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path().to_str().unwrap().to_string();
     // leak the temp file so it lives for the whole test
     std::mem::forget(db_file);
 
-    std::env::set_var("ROUTER_LISTEN_ADDR", "127.0.0.1:0");
-    std::env::set_var("ROUTER_SQLITE_PATH", &db_path);
-    std::env::set_var("ROUTER_SHARED_SECRET", &secret);
-
-    let cfg = router::core::config::Config::from_env().unwrap();
+    let cfg = router::core::config::Config {
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        sqlite_path: db_path,
+        shared_secret: secret.clone(),
+        seed_path: None,
+        connect_timeout: std::time::Duration::from_secs(10),
+        ttfb_timeout: std::time::Duration::from_secs(60),
+        idle_timeout: std::time::Duration::from_secs(120),
+        max_body_bytes: 10 * 1024 * 1024,
+        drain_timeout: std::time::Duration::from_secs(30),
+    };
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
     let http = router::core::http_client::build_client(&cfg);
     let snapshot = router::core::state::load_snapshot(&db).await.unwrap();
@@ -3988,6 +4000,17 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
 
 ### Task P2-2: Failover loop + streaming orchestration
+
+> **Note from Phase 0 review:** `core::http_client::build_client` (P0-7) sets
+> `reqwest::ClientBuilder::read_timeout(cfg.ttfb_timeout)`. reqwest's
+> `read_timeout` is an *inter-read idle* timeout that resets on every read, not
+> a headers-only TTFB cap — so this same 60s value will also govern gaps
+> between SSE chunks during streaming, not just time-to-first-byte. That's
+> stricter than `cfg.idle_timeout` (120s, currently unused by the client and
+> intended for exactly this inter-chunk-gap role per the spec). Before wiring
+> streaming here, either build a second client with `read_timeout(idle_timeout)`
+> for use once headers have arrived, or otherwise reconcile the two timeouts so
+> a valid slow stream isn't killed by the tighter TTFB value.
 
 **Files:**
 - Create: `src/proxy/flow.rs`

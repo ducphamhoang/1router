@@ -9,6 +9,8 @@ use router::core::state::{load_snapshot, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    router::telemetry::logging::init_tracing();
+
     let cfg = Config::from_env()?;
     let db = init_pool(&cfg.sqlite_path).await?;
     let http = build_client(&cfg);

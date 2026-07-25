@@ -55,9 +55,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // std::env is process-global; cargo runs #[test] fns on multiple threads by
+    // default, so tests that set/remove env vars must serialize on this lock or
+    // they race each other's ROUTER_* variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn from_env_reads_required_and_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ROUTER_LISTEN_ADDR", "127.0.0.1:9999");
         std::env::set_var("ROUTER_SQLITE_PATH", "/tmp/x.db");
         std::env::set_var("ROUTER_SHARED_SECRET", "s3cret");
@@ -70,10 +77,13 @@ mod tests {
         assert!(c.seed_path.is_none());
         assert_eq!(c.connect_timeout, std::time::Duration::from_secs(10));
         assert_eq!(c.max_body_bytes, 10 * 1024 * 1024);
+
+        std::env::remove_var("ROUTER_SHARED_SECRET");
     }
 
     #[test]
     fn from_env_errors_without_secret() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ROUTER_SQLITE_PATH", "/tmp/x.db");
         std::env::remove_var("ROUTER_SHARED_SECRET");
         assert!(Config::from_env().is_err());

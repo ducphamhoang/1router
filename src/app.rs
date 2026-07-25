@@ -1,0 +1,66 @@
+use axum::routing::get;
+use axum::Router;
+
+use crate::core::state::AppState;
+
+pub fn build_router(state: AppState) -> Router {
+    // Placeholder health route; P1-10 replaces this with telemetry::health::routes().
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::Config;
+    use crate::core::db::init_pool;
+    use crate::core::http_client::build_client;
+    use crate::core::state::{AppState, ConfigSnapshot};
+    use arc_swap::ArcSwap;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        std::mem::forget(dir); // keep temp dir alive for the test process
+        let db = init_pool(":memory:").await.unwrap();
+        let cfg = Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            sqlite_path: ":memory:".into(),
+            shared_secret: "s".into(),
+            seed_path: None,
+            connect_timeout: Duration::from_secs(1),
+            ttfb_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(1),
+            max_body_bytes: 1024,
+            drain_timeout: Duration::from_secs(1),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        AppState {
+            http: build_client(&cfg),
+            config: Arc::new(cfg),
+            snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
+                providers: vec![],
+                pools: vec![],
+            })),
+            runtime: Arc::new(dashmap::DashMap::new()),
+            log_tx: tx,
+            refresh_locks: Arc::new(dashmap::DashMap::new()),
+            db,
+        }
+    }
+
+    #[tokio::test]
+    async fn health_route_is_wired() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}

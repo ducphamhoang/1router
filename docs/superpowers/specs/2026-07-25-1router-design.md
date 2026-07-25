@@ -10,8 +10,12 @@ API gateway that unifies many providers behind one endpoint. Reasons for the rew
 - **Single static binary** — trivial to distribute (Docker `scratch`/distroless, or bare binary).
 
 Scope is deliberately narrower than 9router: no per-client virtual keys/billing, no combo/fusion
-multi-model panels, no OAuth/token-refresh flows, no built-in web UI. A "provider" is a pure
-config row (base URL + credential + upstream model name), not compiled/dynamic plugin code.
+multi-model panels, no built-in web UI. A "provider" is, by default, a pure config row (base URL
++ credential + upstream model name), not compiled/dynamic plugin code — **with exactly one
+deliberate, scoped exception**: a Codex (ChatGPT-account) adapter, since Claude Code and other
+coding-agent tool use is the primary motivating use case and Codex is a popular free/subscription
+backend for it. See "Codex Adapter" below — this is the only provider in v1 with OAuth, token
+refresh, or request/response transformation; every other provider stays pure passthrough config.
 
 ## Wire formats supported
 
@@ -63,11 +67,21 @@ edits to existing ones.
 providers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
-  wire_format TEXT NOT NULL,      -- 'openai' | 'anthropic'
-  base_url TEXT NOT NULL,
-  api_key TEXT NOT NULL,          -- plaintext at rest; 0600 file perms; masked in admin responses
+  wire_format TEXT NOT NULL,      -- client-facing format this provider satisfies: 'openai' | 'anthropic'
+  kind TEXT NOT NULL DEFAULT 'passthrough',  -- 'passthrough' | 'oauth_codex'
+  base_url TEXT,                  -- NULL for oauth_codex (fixed upstream, set by the adapter)
+  api_key TEXT,                   -- NULL for oauth_codex (uses provider_oauth_state instead)
   upstream_model TEXT NOT NULL,
   created_at, updated_at
+)
+
+provider_oauth_state (            -- only present for kind = 'oauth_codex'
+  provider_id TEXT PRIMARY KEY REFERENCES providers(id),
+  access_token TEXT, refresh_token TEXT,
+  access_expires_at TIMESTAMP,
+  chatgpt_account_id TEXT, workspace_id TEXT,
+  pkce_verifier TEXT, oauth_state TEXT,   -- only populated mid-flow, cleared after completion
+  updated_at
 )
 
 pools (
@@ -163,6 +177,61 @@ body; since this is pure passthrough (no body inspection), that surfaces to the 
 truncated response rather than a clean error. This is inherent to the no-translation design —
 log it distinctly so it's diagnosable, don't try to fix it by parsing SSE bodies.
 
+## Codex Adapter
+
+The one deliberate exception to "provider = config only." Codex (OpenAI's ChatGPT-account-based
+coding backend) requires OAuth login, proactive token refresh, and real request/response
+transformation to present as a normal OpenAI-shaped provider to clients — none of which fits the
+passthrough model. This was scoped in specifically because it directly serves the primary use
+case (coding-agent tool use), based on precedent studied directly from 9router's implementation
+(`open-sse/providers/registry/codex.js`, `open-sse/executors/codex.js`,
+`open-sse/services/tokenRefresh.js`, `src/lib/oauth/services/codex.js`).
+
+**`ProviderAdapter` trait** — the extension point. Every provider goes through this; `passthrough`
+is a trivial identity implementation, `oauth_codex` is the one real one:
+
+```rust
+trait ProviderAdapter {
+    async fn build_request(&self, client_body: &Body, creds: &Credentials) -> reqwest::Request;
+    async fn transform_response(&self, upstream: Response) -> ClientResponse; // incl. SSE transform
+    fn classify_error(&self, resp: &Response) -> ErrorClass;
+}
+```
+
+Codex's implementation, matching 9router's `CodexExecutor`:
+- Targets OpenAI's Responses API (`https://chatgpt.com/backend-api/codex/responses`), not Chat
+  Completions — `system` role → `developer`, strips server-generated item IDs (`store: false`),
+  filters tool schemas against an allowlist, parses reasoning-effort suffixes off model names,
+  injects `ChatGPT-Account-ID` header from `provider_oauth_state`.
+- Peeks inside 200-OK SSE bodies for embedded `usage_limit_reached`/transient-error events (Codex
+  reports some failures inside the stream body, not via HTTP status) — feeds `classify_error`.
+
+**OAuth flow — two admin calls, no local callback server required** (OpenAI's OAuth client has a
+fixed registered redirect URI, `http://localhost:1455/auth/callback`, so the router can't just
+redirect to itself; this works whether 1router runs locally or on a remote box):
+
+```
+POST /admin/providers/:id/oauth/start
+  → generates PKCE verifier + state, stores in provider_oauth_state, returns { authorize_url }
+  (user opens authorize_url in any browser, consents; OpenAI redirects to the fixed localhost:1455
+   URL, which fails to load since nothing's listening there — but the `code` param is visible
+   right in the browser's address bar)
+
+POST /admin/providers/:id/oauth/complete   { "code": "..." }
+  → exchanges code + stored verifier for access/refresh tokens against auth.openai.com,
+    persists them, provider becomes usable
+```
+
+**Background refresh task** (one tokio task in `providers/`): proactively refreshes any
+`oauth_codex` provider's tokens ~5 days before the refresh token's ~8-day max age (9router's
+numbers), reusing the same retryable/non-retryable error classification as the regular failover
+backoff — an unrecoverable refresh error (e.g. `invalid_grant`) marks the provider `Misconfigured`
+and requires the user to redo the OAuth flow.
+
+**Pool composition:** a Codex provider's `wire_format` is `openai`, so it can sit in the same pool
+as ordinary OpenAI-passthrough providers and fail over between them transparently — the adapter's
+whole job is making Codex *look like* a normal OpenAI-shaped provider from the client's side.
+
 ## Admin API
 
 All under `/admin/*`, same shared-secret auth (v1 has one secret for both proxy and admin).
@@ -170,6 +239,8 @@ All under `/admin/*`, same shared-secret auth (v1 has one secret for both proxy 
 ```
 POST/GET/PATCH/DELETE  /admin/providers            (api_key masked in responses)
 POST                   /admin/providers/:id/test    connectivity/credential check
+POST                   /admin/providers/:id/oauth/start     Codex OAuth: returns authorize_url
+POST                   /admin/providers/:id/oauth/complete  Codex OAuth: exchanges code for tokens
 POST/GET/PUT/DELETE    /admin/pools , /admin/pools/:id/members
 GET                    /admin/export                full config dump (providers+pools) as JSON
 POST                   /admin/import                 load config from JSON (also used for first-boot seed)
@@ -223,15 +294,22 @@ for first boot (paired with `/admin/import`).
   money, can be rate-limited) — but is required before calling a release done. Exercises both
   `/v1/chat/completions` and `/v1/messages` passthrough against at least one real provider each,
   plus a real failover scenario (e.g. an intentionally invalid key in a pool ahead of a valid one).
+  Also exercises the Codex adapter end-to-end against a real ChatGPT account: the OAuth
+  start/complete flow, one real chat request through the Responses-API transformation, and
+  (if feasible without waiting days) a manual trigger of the refresh path.
 
 ## Explicit non-goals for v1
 
 - Per-client virtual API keys / usage-based billing (schema already leaves room via a future
   `keys` feature module, but not built now)
 - Format translation between OpenAI/Anthropic/Gemini/etc. shapes — both supported routes are
-  pure passthrough; a pool must be homogeneous in wire format
+  pure passthrough for `kind = 'passthrough'` providers; a pool must be homogeneous in
+  client-facing wire format. The Codex adapter is the sole, deliberate exception.
 - Combo/fusion multi-model panel requests
-- OAuth/token-refresh flows for providers requiring it
+- OAuth/token-refresh flows for any provider other than Codex (e.g. Gemini-CLI, Antigravity,
+  Qwen — 9router supports these via the same generalized pattern Codex uses, but they're
+  explicitly deferred; the `ProviderAdapter` trait leaves room to add them later without
+  touching the passthrough path)
 - Built-in web dashboard UI (admin is API-only for v1)
 - More routing strategies beyond priority-ordered failover (round-robin/least-latency deferred;
   `pool_members.priority` already leaves room)

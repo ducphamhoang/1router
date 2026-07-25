@@ -8,6 +8,7 @@ pub fn build_router(state: AppState) -> Router {
     let guarded = Router::new()
         .merge(crate::telemetry::stats::routes())
         .merge(crate::providers::routes())
+        .merge(crate::pools::routes::routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_bearer,

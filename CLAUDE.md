@@ -61,6 +61,13 @@ cargo, don't run git commands, report DONE/DONE_WITH_CONCERNS/BLOCKED).
   background job instead of blocking — poll `node .../codex-companion.mjs
   status --cwd <worktree> --json` until `running` is empty, then `result`
   (not `--background` flag needed on your end, it self-selects).
+- If a dispatch fails immediately with `"failed to load configuration"`
+  (exit 1, no real work done), this is stale session state tied to that
+  specific worktree *path* in the shared Codex runtime (seen after a
+  worktree was removed and recreated at the same path, once the runtime's
+  broker socket had rotated). Don't retry in place — recreate the worktree
+  under a new directory name (e.g. `P3-7` → `P3-7b`) and dispatch there;
+  it resolves immediately.
 
 **After each task**: copy the worktree's changed files into the main
 checkout, hand-merge any shared file another parallel task also touched

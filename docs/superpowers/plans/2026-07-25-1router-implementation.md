@@ -45,7 +45,7 @@ There is no unit test for a skeleton; the "test" is `cargo build`. Create `Cargo
 
 ```toml
 [package]
-name = "1router"
+name = "router"
 version = "0.1.0"
 edition = "2021"
 default-run = "1router"
@@ -1434,7 +1434,7 @@ pub fn auth_header(secret: &str) -> (String, String) {
 }
 ```
 
-> Note: `tests/` are integration tests and see the crate as an external library named by its lib target. Because the package is a binary named `1router` (not a valid Rust ident), add a library target so tests can import it. In `Cargo.toml` add under `[[bin]]`:
+> Note: `tests/` are integration tests and see the crate as an external library named by its lib target. The package is already named `router` (fixed in P0-1 — Cargo package names cannot start with a digit; the binary target stays `1router`), so an explicit `[lib]` block just reaffirms the default lib name rather than introducing a new one. In `Cargo.toml` add under `[[bin]]`:
 > ```toml
 > [lib]
 > name = "router"

@@ -1,0 +1,241 @@
+use std::time::{Duration, Instant};
+
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+
+use crate::core::error::ErrorClass;
+use crate::core::model::{LogEntry, Provider, WireFormat};
+use crate::core::state::AppState;
+use crate::pools::select::select;
+use crate::providers::adapter::{adapter_for, Credentials};
+use crate::providers::queries::get_oauth_state;
+use crate::proxy::backoff;
+use crate::proxy::error_response::wire_error;
+
+async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
+    if let Ok(Some(os)) = get_oauth_state(&state.db, &provider.id).await {
+        Credentials {
+            api_key: provider.api_key.clone(),
+            access_token: os.access_token,
+            refresh_token: os.refresh_token,
+            id_token: os.id_token,
+            access_expires_at: os.access_expires_at,
+            provider_data: os.provider_data,
+        }
+    } else {
+        Credentials {
+            api_key: provider.api_key.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+fn log(
+    state: &AppState,
+    pool_id: &str,
+    provider_id: &str,
+    status: Option<i64>,
+    latency_ms: i64,
+    success: bool,
+) {
+    // Logging must never block the hot path.
+    let _ = state.log_tx.try_send(LogEntry {
+        pool_id: Some(pool_id.to_string()),
+        provider_id: Some(provider_id.to_string()),
+        status_code: status,
+        latency_ms,
+        success,
+    });
+}
+
+pub async fn handle_proxy(
+    state: AppState,
+    wire: WireFormat,
+    pool_id: String,
+    _client_headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let snapshot = state.snapshot.load();
+    let selection = match select(&snapshot, &pool_id, wire) {
+        Some(s) => s,
+        None => {
+            return wire_error(
+                wire,
+                StatusCode::BAD_REQUEST,
+                &format!("unknown model or pool '{pool_id}'"),
+            );
+        }
+    };
+
+    let client_wanted_stream = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
+        .unwrap_or(false);
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_error_body = String::from("no provider produced a response");
+    let mut last_provider = String::new();
+
+    for provider in &selection.providers {
+        let now = Instant::now();
+        {
+            let st = state.runtime.entry(provider.id.clone()).or_default();
+            if !st.is_available(now) {
+                continue;
+            }
+        }
+        tried.push(provider.id.clone());
+        last_provider = provider.id.clone();
+
+        let adapter = adapter_for(provider, state.http.clone());
+        let creds = credentials_for(&state, provider).await;
+
+        let req = match adapter.build_request(&body, &creds).await {
+            Ok(r) => r,
+            Err(e) => {
+                last_error_body = format!("request build failed: {e}");
+                continue;
+            }
+        };
+
+        let start = Instant::now();
+        let sent = state.http.execute(req).await;
+        let latency_ms = start.elapsed().as_millis() as i64;
+
+        let upstream = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                {
+                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    let cooldown = backoff::cooldown_for(st.backoff_level + 1);
+                    st.record_retryable(cooldown, Instant::now());
+                }
+                log(&state, &pool_id, &provider.id, None, latency_ms, false);
+                last_error_body = format!("upstream request error: {e}");
+                continue;
+            }
+        };
+
+        let status = upstream.status();
+        let headers = upstream.headers().clone();
+        let class = adapter.classify_error(status, &headers).await;
+
+        match class {
+            ErrorClass::Success => {
+                {
+                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    st.record_success();
+                }
+                log(
+                    &state,
+                    &pool_id,
+                    &provider.id,
+                    Some(status.as_u16() as i64),
+                    latency_ms,
+                    true,
+                );
+                match adapter
+                    .transform_response(upstream, client_wanted_stream)
+                    .await
+                {
+                    Ok(resp) => return resp,
+                    Err(e) => {
+                        last_error_body = format!("response transform failed: {e}");
+                        continue;
+                    }
+                }
+            }
+            ErrorClass::NonRetryable | ErrorClass::AuthExpired => {
+                {
+                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    st.mark_misconfigured();
+                }
+                let text = upstream.text().await.unwrap_or_default();
+                log(
+                    &state,
+                    &pool_id,
+                    &provider.id,
+                    Some(status.as_u16() as i64),
+                    latency_ms,
+                    false,
+                );
+                return build_error_passthrough(status, &text, &tried, &provider.id);
+            }
+            ErrorClass::Retryable { retry_after } => {
+                let cooldown = retry_after.unwrap_or_else(|| {
+                    if status.is_server_error()
+                        || status == StatusCode::TOO_MANY_REQUESTS
+                        || status == StatusCode::REQUEST_TIMEOUT
+                    {
+                        let st = state.runtime.entry(provider.id.clone()).or_default();
+                        backoff::cooldown_for(st.backoff_level + 1)
+                    } else {
+                        Duration::from_secs(30)
+                    }
+                });
+                {
+                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    st.record_retryable(cooldown, Instant::now());
+                }
+                last_error_body = upstream.text().await.unwrap_or_default();
+                log(
+                    &state,
+                    &pool_id,
+                    &provider.id,
+                    Some(status.as_u16() as i64),
+                    latency_ms,
+                    false,
+                );
+                continue;
+            }
+        }
+    }
+
+    let mut resp = wire_error(wire, StatusCode::SERVICE_UNAVAILABLE, &last_error_body);
+    insert_debug_headers(
+        resp.headers_mut(),
+        &tried,
+        &last_provider,
+        &last_error_body,
+    );
+    resp
+}
+
+fn build_error_passthrough(
+    status: StatusCode,
+    body: &str,
+    tried: &[String],
+    provider_id: &str,
+) -> Response {
+    let mut resp = (status, body.to_string()).into_response();
+    insert_debug_headers(resp.headers_mut(), tried, provider_id, body);
+    resp
+}
+
+fn insert_debug_headers(headers: &mut HeaderMap, tried: &[String], provider: &str, error: &str) {
+    if let Ok(v) = HeaderValue::from_str(&tried.join(",")) {
+        headers.insert("x-1router-tried", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(provider) {
+        headers.insert("x-1router-provider", v);
+    }
+    let short: String = error.chars().take(200).collect();
+    if let Ok(v) = HeaderValue::from_str(&short.replace(['\n', '\r'], " ")) {
+        headers.insert("x-1router-error", v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::runtime::{ProviderRuntimeState, ProviderStatus};
+    use std::time::Instant;
+
+    #[test]
+    fn misconfigured_is_skipped() {
+        let mut st = ProviderRuntimeState::default();
+        st.mark_misconfigured();
+        assert!(!st.is_available(Instant::now()));
+        assert!(matches!(st.status, ProviderStatus::Misconfigured));
+    }
+}

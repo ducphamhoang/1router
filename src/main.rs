@@ -6,6 +6,7 @@ use router::core::db::init_pool;
 use router::core::http_client::build_client;
 use router::core::state::{load_snapshot, AppState};
 use router::providers::refresh_task::spawn_background_refresh;
+use router::seed::seed_if_configured;
 use router::telemetry::logging::init_tracing;
 use router::telemetry::request_log::spawn_writer;
 
@@ -15,6 +16,7 @@ async fn main() -> Result<()> {
 
     let cfg = Config::from_env()?;
     let db = init_pool(&cfg.sqlite_path).await?;
+    seed_if_configured(&db, &cfg).await?;
     let http = build_client(&cfg);
     let snapshot = load_snapshot(&db).await?;
     let log_tx = spawn_writer(db.clone(), 4096, 100);

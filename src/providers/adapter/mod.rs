@@ -44,9 +44,8 @@ pub fn adapter_for(provider: &Provider, http: reqwest::Client) -> Box<dyn Provid
         ProviderKind::Passthrough => {
             Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
         }
-        // Replaced by the real Codex adapter in P3-5.
         ProviderKind::OauthCodex => {
-            Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
+            Box::new(codex::CodexAdapter::new(provider.clone(), http))
         }
     }
 }

@@ -1304,19 +1304,19 @@ pub fn build_router(state: AppState) -> Router {
 }
 ```
 
-Replace `src/main.rs` entirely:
+Replace `src/main.rs` entirely. Note: this brief predates the P0-3 lib-target
+pull-forward — use `router::` imports (the lib crate), not local `mod app; mod
+core;`, which would duplicate the module tree between the bin and lib targets:
 
 ```rust
-mod app;
-mod core;
-
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::core::config::Config;
-use crate::core::db::init_pool;
-use crate::core::http_client::build_client;
-use crate::core::state::{load_snapshot, AppState};
+use router::app;
+use router::core::config::Config;
+use router::core::db::init_pool;
+use router::core::http_client::build_client;
+use router::core::state::{load_snapshot, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {

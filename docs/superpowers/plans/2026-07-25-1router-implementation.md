@@ -224,10 +224,18 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ### Task P0-3: Core domain model types
 
+> **Deviation from earlier draft:** this task also introduces the `[lib]` target,
+> pulled forward from its original location in P1-1. Reason: P0-3..P0-8 all run
+> `cargo test --lib`, which requires a lib target to exist — running these tasks
+> for real (in parallel, via separate worktrees) surfaced "no library targets
+> found in package `router`" on all five before any of them reached P1-1. P1-1's
+> note about adding `[lib]` is now a no-op (it already exists) — see that task.
+
 **Files:**
+- Modify: `Cargo.toml` (add `[lib]\nname = "router"\npath = "src/lib.rs"` above `[[bin]]`)
+- Create: `src/lib.rs` (`pub mod core;`)
 - Create: `src/core/mod.rs`
 - Create: `src/core/model.rs`
-- Modify: `src/main.rs` (add `mod core;`)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -575,9 +583,17 @@ Add to `src/core/config.rs`:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // std::env is process-global; cargo runs #[test] fns on multiple threads by
+    // default, so tests that set/remove env vars must serialize on this lock or
+    // they race each other's ROUTER_* variables when run as part of the full
+    // `cargo test --lib` suite (not just this module in isolation).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn from_env_reads_required_and_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ROUTER_LISTEN_ADDR", "127.0.0.1:9999");
         std::env::set_var("ROUTER_SQLITE_PATH", "/tmp/x.db");
         std::env::set_var("ROUTER_SHARED_SECRET", "s3cret");
@@ -590,10 +606,13 @@ mod tests {
         assert!(c.seed_path.is_none());
         assert_eq!(c.connect_timeout, std::time::Duration::from_secs(10));
         assert_eq!(c.max_body_bytes, 10 * 1024 * 1024);
+
+        std::env::remove_var("ROUTER_SHARED_SECRET");
     }
 
     #[test]
     fn from_env_errors_without_secret() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ROUTER_SQLITE_PATH", "/tmp/x.db");
         std::env::remove_var("ROUTER_SHARED_SECRET");
         assert!(Config::from_env().is_err());
@@ -603,8 +622,10 @@ mod tests {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test --lib core::config -- --test-threads=1`
-Expected: FAIL — `cannot find type Config`.
+Run: `cargo test --offline --lib core::config`
+Expected: FAIL — `cannot find type Config`. (No `--test-threads=1` needed — the
+`ENV_LOCK` mutex serializes just these two tests, so the full suite runs with
+default parallelism.)
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -674,7 +695,7 @@ pub mod config;
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cargo test --lib core::config -- --test-threads=1`
+Run: `cargo test --offline --lib core::config`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1434,13 +1455,7 @@ pub fn auth_header(secret: &str) -> (String, String) {
 }
 ```
 
-> Note: `tests/` are integration tests and see the crate as an external library named by its lib target. The package is already named `router` (fixed in P0-1 — Cargo package names cannot start with a digit; the binary target stays `1router`), so an explicit `[lib]` block just reaffirms the default lib name rather than introducing a new one. In `Cargo.toml` add under `[[bin]]`:
-> ```toml
-> [lib]
-> name = "router"
-> path = "src/lib.rs"
-> ```
-> Create `src/lib.rs` re-exporting the modules: `pub mod app; pub mod core; pub mod auth;` (extend as modules are added — each later task that adds a top-level module also adds its `pub mod` line here). Change `src/main.rs` to `use router::...;` instead of local `mod` declarations. Do this refactor as the first action of Step 3.
+> Note: `tests/` are integration tests and see the crate as an external library named by its lib target. **The `[lib]` target and `src/lib.rs` already exist** — pulled forward to P0-3 (see that task's deviation note) because P0-3..P0-8 all need `cargo test --lib` to work. `src/lib.rs` currently has `pub mod core;`; this task extends it. Add `pub mod app;` and `pub mod auth;` to the existing `src/lib.rs` (extend further as later modules are added — each task that adds a top-level module also adds its `pub mod` line here). Change `src/main.rs` to `use router::...;` instead of local `mod` declarations where applicable.
 
 Create `tests/auth.rs`:
 
@@ -1499,7 +1514,7 @@ Expected: FAIL — `router` crate/lib not found or `require_bearer` missing.
 
 - [ ] **Step 3: Write minimal implementation**
 
-First do the lib refactor described in the Step 1 note (`[lib]` in Cargo.toml, create `src/lib.rs`, point `main.rs` at `router::`).
+First do the lib-extension described in the Step 1 note (add `pub mod app; pub mod auth;` to the existing `src/lib.rs`, point `main.rs` at `router::` where applicable — `[lib]` itself already exists from P0-3).
 
 `src/lib.rs`:
 

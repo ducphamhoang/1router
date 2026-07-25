@@ -6387,7 +6387,9 @@ Docker builds are validated by building the image (no cargo test). Write `Docker
 
 ```dockerfile
 # ---- build stage ----
-FROM rust:1.83-alpine AS builder
+# [Fixed after real docker build] 1.83 fails: a transitive dep (cpufeatures
+# 0.3.0) requires Cargo's edition2024 feature, unstable before Rust 1.85.
+FROM rust:1.90-alpine AS builder
 RUN apk add --no-cache musl-dev sqlite-static openssl-dev pkgconfig
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

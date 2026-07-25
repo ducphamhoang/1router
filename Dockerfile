@@ -1,8 +1,12 @@
 # ---- build stage ----
 FROM rust:1.90-alpine AS builder
-RUN apk add --no-cache musl-dev sqlite-static openssl-dev pkgconfig
+# rustls (not openssl) handles TLS and sqlx's sqlite feature bundles/statically
+# links libsqlite3, so no OpenSSL dependency is actually needed at build or
+# runtime - musl-dev + sqlite-static is sufficient.
+RUN apk add --no-cache musl-dev sqlite-static pkgconfig
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
 COPY migrations ./migrations
 COPY src ./src
 RUN cargo build --release --target x86_64-unknown-linux-musl

@@ -56,7 +56,14 @@ async fn import(
 ///
 /// This is a backup/restore artifact: exported and imported providers include
 /// the real `api_key`, unlike masked API responses.
+///
+/// All-or-nothing: runs inside a single transaction so a crash (or a bad row)
+/// partway through can't leave a half-seeded config (e.g. providers inserted
+/// but no pools/members) that first-boot seeding's "providers table
+/// non-empty" guard would then treat as already-seeded and never retry.
 pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), AppError> {
+    let mut tx = db.begin().await?;
+
     for p in &dump.providers {
         sqlx::query(
             "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,created_at,updated_at)
@@ -75,7 +82,7 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .bind(&p.upstream_model)
         .bind(p.created_at)
         .bind(p.updated_at)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
     for pool in &dump.pools {
@@ -86,7 +93,7 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .bind(&pool.id)
         .bind(pool.wire_format)
         .bind(pool.created_at)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
     for m in &dump.members {
@@ -97,8 +104,71 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .bind(&m.pool_id)
         .bind(&m.provider_id)
         .bind(m.priority)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::db::init_pool;
+    use crate::core::model::{Pool, PoolMember, Provider, ProviderKind, WireFormat};
+    use chrono::Utc;
+
+    fn provider(id: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            wire_format: WireFormat::OpenAi,
+            kind: ProviderKind::Passthrough,
+            base_url: Some("https://x".into()),
+            api_key: Some("k".into()),
+            upstream_model: "m".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // Regression test for the Phase 4 review: import_config previously ran
+    // each insert autocommitted, so a bad row partway through (e.g. a member
+    // referencing a nonexistent provider) could leave providers/pools
+    // committed with no members - a half-seeded state that first-boot
+    // seeding's "providers table non-empty" guard would then treat as
+    // already-seeded and never retry. Must be all-or-nothing.
+    #[tokio::test]
+    async fn import_is_all_or_nothing_on_failure() {
+        let db = init_pool(":memory:").await.unwrap();
+        let dump = ExportDump {
+            providers: vec![provider("p1")],
+            pools: vec![Pool {
+                id: "gpt-4o".into(),
+                wire_format: WireFormat::OpenAi,
+                created_at: Utc::now(),
+            }],
+            // references a provider that was never inserted - FK violation
+            members: vec![PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "does-not-exist".into(),
+                priority: 1,
+            }],
+        };
+
+        let result = import_config(&db, &dump).await;
+        assert!(result.is_err(), "expected the FK violation to error out");
+
+        let n: (i64,) = sqlx::query_as("SELECT count(*) FROM providers")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 0, "providers insert should have been rolled back too");
+        let n: (i64,) = sqlx::query_as("SELECT count(*) FROM pools")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 0, "pools insert should have been rolled back too");
+    }
 }

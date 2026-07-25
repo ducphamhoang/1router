@@ -151,6 +151,9 @@ pub async fn handle_proxy(
                     let mut st = state.runtime.entry(provider.id.clone()).or_default();
                     st.mark_misconfigured();
                 }
+                let content_type = headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .cloned();
                 let text = upstream.text().await.unwrap_or_default();
                 log(
                     &state,
@@ -160,7 +163,13 @@ pub async fn handle_proxy(
                     latency_ms,
                     false,
                 );
-                return build_error_passthrough(status, &text, &tried, &provider.id);
+                return build_error_passthrough(
+                    status,
+                    &text,
+                    &tried,
+                    &provider.id,
+                    content_type,
+                );
             }
             ErrorClass::Retryable { retry_after } => {
                 let cooldown = retry_after.unwrap_or_else(|| {
@@ -207,8 +216,15 @@ fn build_error_passthrough(
     body: &str,
     tried: &[String],
     provider_id: &str,
+    content_type: Option<HeaderValue>,
 ) -> Response {
     let mut resp = (status, body.to_string()).into_response();
+    // Preserve the upstream's content-type (e.g. application/json) instead of the
+    // text/plain that (StatusCode, String) sets by default, so SDK clients parsing
+    // the relayed error body don't misinterpret it.
+    if let Some(ct) = content_type {
+        resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, ct);
+    }
     insert_debug_headers(resp.headers_mut(), tried, provider_id, body);
     resp
 }

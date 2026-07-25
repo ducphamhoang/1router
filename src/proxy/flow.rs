@@ -4,12 +4,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 
-use crate::core::error::ErrorClass;
-use crate::core::model::{LogEntry, Provider, WireFormat};
+use crate::core::error::{ErrorClass, RefreshError};
+use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::state::AppState;
 use crate::pools::select::select;
 use crate::providers::adapter::{adapter_for, Credentials};
 use crate::providers::queries::get_oauth_state;
+use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
 use crate::proxy::backoff;
 use crate::proxy::error_response::wire_error;
 
@@ -146,14 +147,12 @@ pub async fn handle_proxy(
                     }
                 }
             }
-            ErrorClass::NonRetryable | ErrorClass::AuthExpired => {
+            ErrorClass::NonRetryable => {
                 {
                     let mut st = state.runtime.entry(provider.id.clone()).or_default();
                     st.mark_misconfigured();
                 }
-                let content_type = headers
-                    .get(axum::http::header::CONTENT_TYPE)
-                    .cloned();
+                let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
                 let text = upstream.text().await.unwrap_or_default();
                 log(
                     &state,
@@ -163,13 +162,93 @@ pub async fn handle_proxy(
                     latency_ms,
                     false,
                 );
-                return build_error_passthrough(
-                    status,
-                    &text,
-                    &tried,
-                    &provider.id,
-                    content_type,
-                );
+                return build_error_passthrough(status, &text, &tried, &provider.id, content_type);
+            }
+            ErrorClass::AuthExpired => {
+                // Only oauth_codex can recover via refresh; others are misconfigured.
+                if !matches!(provider.kind, ProviderKind::OauthCodex)
+                    || creds.refresh_token.is_none()
+                {
+                    {
+                        let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                        st.mark_misconfigured();
+                    }
+                    let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
+                    let text = upstream.text().await.unwrap_or_default();
+                    log(
+                        &state,
+                        &pool_id,
+                        &provider.id,
+                        Some(status.as_u16() as i64),
+                        latency_ms,
+                        false,
+                    );
+                    return build_error_passthrough(
+                        status,
+                        &text,
+                        &tried,
+                        &provider.id,
+                        content_type,
+                    );
+                }
+                drop(upstream);
+                let refreshed = with_refresh_lock(&state.refresh_locks, &provider.id, || async {
+                    refresh_and_persist(&state, provider, adapter.as_ref(), &creds).await
+                })
+                .await;
+                match refreshed {
+                    Ok(new_creds) => {
+                        // Retry the same provider once with new credentials.
+                        if let Ok(retry_req) = adapter.build_request(&body, &new_creds).await {
+                            let start2 = Instant::now();
+                            if let Ok(resp2) = state.http.execute(retry_req).await {
+                                let lat2 = start2.elapsed().as_millis() as i64;
+                                if resp2.status().is_success() {
+                                    {
+                                        let mut st =
+                                            state.runtime.entry(provider.id.clone()).or_default();
+                                        st.record_success();
+                                    }
+                                    log(
+                                        &state,
+                                        &pool_id,
+                                        &provider.id,
+                                        Some(resp2.status().as_u16() as i64),
+                                        lat2,
+                                        true,
+                                    );
+                                    if let Ok(r) = adapter
+                                        .transform_response(resp2, client_wanted_stream)
+                                        .await
+                                    {
+                                        return r;
+                                    }
+                                }
+                            }
+                        }
+                        last_error_body = "refresh succeeded but retry failed".into();
+                        continue;
+                    }
+                    Err(RefreshError::InvalidGrant) => {
+                        {
+                            let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                            st.mark_misconfigured();
+                        }
+                        last_error_body = "refresh token invalid_grant; re-auth required".into();
+                        log(&state, &pool_id, &provider.id, Some(401), latency_ms, false);
+                        continue;
+                    }
+                    Err(RefreshError::Transient(msg)) => {
+                        {
+                            let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                            let cooldown = backoff::cooldown_for(st.backoff_level + 1);
+                            st.record_retryable(cooldown, Instant::now());
+                        }
+                        last_error_body = format!("transient refresh error: {msg}");
+                        log(&state, &pool_id, &provider.id, Some(401), latency_ms, false);
+                        continue;
+                    }
+                }
             }
             ErrorClass::Retryable { retry_after } => {
                 let cooldown = retry_after.unwrap_or_else(|| {
@@ -202,12 +281,7 @@ pub async fn handle_proxy(
     }
 
     let mut resp = wire_error(wire, StatusCode::SERVICE_UNAVAILABLE, &last_error_body);
-    insert_debug_headers(
-        resp.headers_mut(),
-        &tried,
-        &last_provider,
-        &last_error_body,
-    );
+    insert_debug_headers(resp.headers_mut(), &tried, &last_provider, &last_error_body);
     resp
 }
 
@@ -223,7 +297,8 @@ fn build_error_passthrough(
     // text/plain that (StatusCode, String) sets by default, so SDK clients parsing
     // the relayed error body don't misinterpret it.
     if let Some(ct) = content_type {
-        resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, ct);
+        resp.headers_mut()
+            .insert(axum::http::header::CONTENT_TYPE, ct);
     }
     insert_debug_headers(resp.headers_mut(), tried, provider_id, body);
     resp

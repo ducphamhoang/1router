@@ -5115,7 +5115,11 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Consumes: `Credentials` (P1-11); `RefreshError` (P0-4); `TokenSet`, `CODEX_CLIENT_ID`, `TOKEN_URL` (P3-1).
 - Produces:
   ```rust
-  pub fn needs_refresh(creds: &Credentials, now: DateTime<Utc>) -> bool; // true if access_expires_at within 5 days OR already past
+  pub fn needs_refresh(creds: &Credentials, now: DateTime<Utc>) -> bool; // true if access_expires_at within 5 MINUTES OR already past.
+  // [Fixed after Phase 3 review] `access_expires_at` tracks the short-lived
+  // ACCESS token (~1h), not the ~8-day refresh token - a multi-day lead window
+  // here made this always true regardless of actual freshness. Use a lead
+  // window scaled to the access token's own lifetime instead.
   pub async fn refresh_tokens(http: &reqwest::Client, refresh_token: &str) -> Result<TokenSet, RefreshError>;
   ```
   Note: refresh uses a **JSON body** (deliberately different from the form-urlencoded code exchange in P3-1).
@@ -5957,6 +5961,11 @@ async fn start(
 #[derive(Deserialize)]
 struct CompleteBody {
     code: String,
+    // [Fixed after Phase 3 review] originally omitted - store_pkce persists
+    // oauth_state above but nothing compared it against what /oauth/complete
+    // received, so it provided no real CSRF binding. Require it and reject a
+    // mismatch with 400 before exchanging the code.
+    state: String,
 }
 
 async fn complete(

@@ -4253,7 +4253,11 @@ describe("Settings", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url === "/admin/settings/shared-secret") {
+        // (Implementation-time correction) This branch must be GET-only -
+        // without the method guard it also intercepts the PATCH request
+        // below (same URL), so the 409 branch was never reached. Caught by
+        // actually running renders_shared_secret_409_message_verbatim.
+        if (url === "/admin/settings/shared-secret" && (!init || init.method === "GET")) {
           return new Response(JSON.stringify({ shared_secret: "sec_****" }), { status: 200 });
         }
         if (url === "/admin/settings/shared-secret?reveal=true") {

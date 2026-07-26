@@ -12,9 +12,10 @@ type Provider = {
   upstream_model: string;
 };
 
-type ProviderForm = Omit<Provider, "id">;
+type ProviderForm = Provider;
 
 const emptyForm: ProviderForm = {
+  id: "",
   name: "",
   wire_format: "openai",
   kind: "passthrough",
@@ -49,8 +50,8 @@ export function Providers() {
       const entries = await Promise.all(
         providers.map(async (provider) => {
           try {
-            const body = await apiJson<{ state: string }>(`/admin/providers/${provider.id}/state`);
-            return [provider.id, body.state] as const;
+            const body = await apiJson<{ status: string }>(`/admin/providers/${provider.id}/state`);
+            return [provider.id, body.status] as const;
           } catch {
             return [provider.id, "unknown"] as const;
           }
@@ -78,6 +79,7 @@ export function Providers() {
   function openEdit(provider: Provider) {
     setEditing(provider);
     setForm({
+      id: provider.id,
       name: provider.name,
       wire_format: provider.wire_format,
       kind: provider.kind,
@@ -92,10 +94,18 @@ export function Providers() {
     event.preventDefault();
     setError(null);
     try {
+      const body = editing
+        ? {
+            name: form.name,
+            base_url: form.base_url,
+            upstream_model: form.upstream_model,
+            ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
+          }
+        : form;
       await apiJson(editing ? `/admin/providers/${editing.id}` : "/admin/providers", {
-        method: editing ? "PUT" : "POST",
+        method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form)
+        body: JSON.stringify(body)
       });
       setModalOpen(false);
       await loadProviders();
@@ -149,6 +159,12 @@ export function Providers() {
 
       {modalOpen ? (
         <form aria-label="Provider form" onSubmit={saveProvider}>
+          {!editing ? (
+            <label>
+              Provider ID
+              <input value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} />
+            </label>
+          ) : null}
           <label>
             Name
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />

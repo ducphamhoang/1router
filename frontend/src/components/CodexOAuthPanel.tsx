@@ -7,6 +7,7 @@ type StartResponse = {
 
 export function CodexOAuthPanel({ providerId }: { providerId: string }) {
   const [code, setCode] = useState("");
+  const [state, setState] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,7 +25,7 @@ export function CodexOAuthPanel({ providerId }: { providerId: string }) {
       await apiJson(`/admin/providers/${providerId}/oauth/complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code })
+        body: JSON.stringify({ code, state })
       });
       setMessage("Codex OAuth connected.");
     } catch (error) {
@@ -37,7 +38,7 @@ export function CodexOAuthPanel({ providerId }: { providerId: string }) {
       <h2 id="codex-oauth-title">Codex OAuth</h2>
       <p>
         After you approve access, your browser will show a page that fails to load at localhost:1455 — that's expected.
-        Copy the code value out of that page's address bar and paste it below.
+        Copy the code and state values out of that page's address bar query string and paste them below.
       </p>
       <button type="button" onClick={startOAuth}>
         Start Codex OAuth
@@ -46,6 +47,10 @@ export function CodexOAuthPanel({ providerId }: { providerId: string }) {
         <label>
           Code
           <input value={code} onChange={(event) => setCode(event.target.value)} />
+        </label>
+        <label>
+          State
+          <input value={state} onChange={(event) => setState(event.target.value)} />
         </label>
         <button type="submit">Complete Codex OAuth</button>
       </form>

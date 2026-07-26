@@ -53,6 +53,18 @@ describe("apiClient", () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
+  it("apiFetch_can_skip_auth_redirect_for_local_error_handling", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 401 })));
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { pathname: "/ui/settings", assign }
+    });
+
+    await apiFetch("/admin/auth/password", { method: "PATCH", skipAuthRedirect: true });
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it("apiJson_throws_with_server_error_message_on_non_ok", async () => {
     vi.stubGlobal(
       "fetch",

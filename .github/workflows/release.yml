@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  binaries:
+    name: binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      # Default, but stated explicitly: a release is all-platforms-or-nothing.
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install musl build tools (Linux legs only)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          BIN="target/${{ matrix.target }}/release/1router"
+          case "${{ matrix.target }}" in
+            *-apple-darwin) strip -x "$BIN" ;;
+            *)              strip "$BIN" ;;
+          esac
+
+      - name: Package tarball
+        run: |
+          tar -czf "1router-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" 1router
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 1router-${{ github.ref_name }}-${{ matrix.target }}
+          path: 1router-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          retention-days: 7

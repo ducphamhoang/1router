@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde_json::{json, Value};
 
 // Fields Codex's backend rejects. This is a denylist rather than the spec's
@@ -56,6 +57,20 @@ fn strip_ids(value: &mut Value) {
     }
 }
 
+fn flatten_function_shape(value: &mut Value) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    if map.get("type").and_then(|t| t.as_str()) != Some("function") {
+        return;
+    }
+    if let Some(Value::Object(function)) = map.remove("function") {
+        for (k, v) in function {
+            map.insert(k, v);
+        }
+    }
+}
+
 pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
     let mut out = client_json.clone();
     let obj = match out.as_object_mut() {
@@ -111,6 +126,20 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
         strip_ids(input);
     }
 
+    // Chat Completions nests function specs under tools[i].function.{name,
+    // description,parameters}; the Responses API expects them flattened onto
+    // tools[i] directly. Forwarding the nested shape unchanged makes the
+    // Responses backend report the flattened field as missing (e.g.
+    // "tools[0].name"), even though the client did send a name.
+    if let Some(tools) = obj.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        for tool in tools.iter_mut() {
+            flatten_function_shape(tool);
+        }
+    }
+    if let Some(tool_choice) = obj.get_mut("tool_choice") {
+        flatten_function_shape(tool_choice);
+    }
+
     obj.insert("store".into(), json!(false));
     obj.insert("stream".into(), json!(true));
     obj.insert("prompt_cache_key".into(), json!(session_id));
@@ -124,27 +153,28 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
     out
 }
 
-/// Parse an SSE body into (event, data-json) pairs.
-fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    for block in sse_body.split("\n\n") {
-        let mut event = String::new();
-        let mut data = String::new();
-        for line in block.lines() {
-            if let Some(rest) = line.strip_prefix("event:") {
-                event = rest.trim().to_string();
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                data.push_str(rest.trim());
-            }
-        }
-        if data.is_empty() {
-            continue;
-        }
-        if let Ok(json) = serde_json::from_str::<Value>(&data) {
-            out.push((event, json));
+/// Parse one SSE block (the text between two blank lines, no trailing
+/// newlines) into its (event, data-json) pair, if it carries a `data:` line
+/// with valid JSON.
+pub fn parse_sse_block(block: &str) -> Option<(String, Value)> {
+    let mut event = String::new();
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data.push_str(rest.trim());
         }
     }
-    out
+    if data.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(&data).ok().map(|j| (event, j))
+}
+
+/// Parse an SSE body into (event, data-json) pairs.
+fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
+    sse_body.split("\n\n").filter_map(parse_sse_block).collect()
 }
 
 pub fn aggregate_sse(sse_body: &str) -> Value {
@@ -180,6 +210,178 @@ pub fn sse_embedded_error(sse_body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Running state needed to turn a sequence of Responses-API SSE events into
+/// Chat Completions `chat.completion.chunk` events - carries the response id
+/// (only known once `response.created` arrives) and whether any tool call
+/// was seen, which decides the final `finish_reason`.
+#[derive(Default)]
+pub struct SseChunkState {
+    id: String,
+    created: i64,
+    saw_tool_call: bool,
+}
+
+impl SseChunkState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn chat_chunk(state: &SseChunkState, model: &str, delta: Value, finish_reason: Option<&str>) -> Value {
+    json!({
+        "id": state.id,
+        "object": "chat.completion.chunk",
+        "created": state.created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    })
+}
+
+/// Convert one parsed Responses-API SSE event into a Chat Completions
+/// streaming chunk, mutating `state` as needed (id/created captured from
+/// `response.created`, tool-call flag set from `response.output_item.added`).
+/// Returns `None` for upstream events that have no Chat Completions
+/// equivalent (e.g. `response.in_progress`).
+pub fn chat_chunk_for_event(
+    state: &mut SseChunkState,
+    event: &str,
+    data: &Value,
+    model: &str,
+) -> Option<Value> {
+    match event {
+        "response.created" => {
+            state.id = data["response"]["id"].as_str().unwrap_or_default().to_string();
+            state.created = data["response"]["created_at"].as_i64().unwrap_or(0);
+            Some(chat_chunk(
+                state,
+                model,
+                json!({ "role": "assistant", "content": "" }),
+                None,
+            ))
+        }
+        "response.output_text.delta" => {
+            let text = data["delta"].as_str().unwrap_or_default();
+            Some(chat_chunk(state, model, json!({ "content": text }), None))
+        }
+        "response.output_item.added" => {
+            let item = &data["item"];
+            if item["type"].as_str() != Some("function_call") {
+                return None;
+            }
+            state.saw_tool_call = true;
+            let index = data["output_index"].as_u64().unwrap_or(0);
+            let call_id = item["call_id"].as_str().unwrap_or_default();
+            let name = item["name"].as_str().unwrap_or_default();
+            Some(chat_chunk(
+                state,
+                model,
+                json!({
+                    "tool_calls": [{
+                        "index": index,
+                        "id": call_id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": "" }
+                    }]
+                }),
+                None,
+            ))
+        }
+        "response.function_call_arguments.delta" => {
+            let index = data["output_index"].as_u64().unwrap_or(0);
+            let delta = data["delta"].as_str().unwrap_or_default();
+            Some(chat_chunk(
+                state,
+                model,
+                json!({
+                    "tool_calls": [{
+                        "index": index,
+                        "function": { "arguments": delta }
+                    }]
+                }),
+                None,
+            ))
+        }
+        "response.completed" => {
+            let finish = if state.saw_tool_call { "tool_calls" } else { "stop" };
+            Some(chat_chunk(state, model, json!({}), Some(finish)))
+        }
+        _ => None,
+    }
+}
+
+pub fn render_chunk(chunk: &Value) -> Vec<u8> {
+    format!("data: {chunk}\n\n").into_bytes()
+}
+
+pub const SSE_DONE: &[u8] = b"data: [DONE]\n\n";
+
+/// Turn a byte stream of Responses-API SSE (arbitrarily chunked - network
+/// reads don't align to SSE block boundaries) into a byte stream of Chat
+/// Completions SSE, terminated with a `[DONE]` marker once upstream ends.
+pub fn convert_sse_stream<S, E>(
+    upstream: S,
+    model: String,
+) -> impl futures::Stream<Item = Result<Bytes, E>>
+where
+    S: futures::Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
+    struct State<S> {
+        upstream: S,
+        buf: String,
+        chunk_state: SseChunkState,
+        model: String,
+        finished: bool,
+    }
+
+    let state = State {
+        upstream,
+        buf: String::new(),
+        chunk_state: SseChunkState::new(),
+        model,
+        finished: false,
+    };
+
+    futures::stream::unfold(state, |mut st| async move {
+        use futures::StreamExt;
+        loop {
+            if st.finished {
+                return None;
+            }
+            if let Some(pos) = st.buf.find("\n\n") {
+                let block: String = st.buf.drain(..pos + 2).collect();
+                let block = block.trim_end_matches("\n\n").to_string();
+                let Some((event, data)) = parse_sse_block(&block) else {
+                    continue;
+                };
+                let Some(chunk) = chat_chunk_for_event(&mut st.chunk_state, &event, &data, &st.model)
+                else {
+                    continue;
+                };
+                return Some((Ok(Bytes::from(render_chunk(&chunk))), st));
+            }
+            match st.upstream.next().await {
+                Some(Ok(bytes)) => {
+                    st.buf.push_str(&String::from_utf8_lossy(&bytes));
+                    continue;
+                }
+                Some(Err(e)) => {
+                    st.finished = true;
+                    return Some((Err(e), st));
+                }
+                None => {
+                    st.finished = true;
+                    return Some((Ok(Bytes::from_static(SSE_DONE)), st));
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -271,10 +473,188 @@ mod tests {
     }
 
     #[test]
+    fn tools_flatten_from_chat_completions_to_responses_shape() {
+        let input = json!({
+            "messages": [],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }]
+        });
+        let out = transform_request(&input, "s");
+        let tool = &out["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["name"], "get_weather");
+        assert_eq!(tool["description"], "Get the weather");
+        assert_eq!(tool["parameters"]["type"], "object");
+        assert!(tool.get("function").is_none());
+    }
+
+    #[test]
+    fn tool_choice_function_variant_flattens_too() {
+        let input = json!({
+            "messages": [],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+        });
+        let out = transform_request(&input, "s");
+        assert_eq!(out["tool_choice"]["type"], "function");
+        assert_eq!(out["tool_choice"]["name"], "get_weather");
+        assert!(out["tool_choice"].get("function").is_none());
+    }
+
+    #[test]
+    fn tool_choice_string_variant_is_untouched() {
+        let input = json!({ "messages": [], "tool_choice": "auto" });
+        let out = transform_request(&input, "s");
+        assert_eq!(out["tool_choice"], "auto");
+    }
+
+    #[test]
     fn strips_item_ids() {
         let input = json!({ "messages": [], "input": [{"id": "msg_abc", "type": "message"}] });
         let out = transform_request(&input, "s");
         assert!(out["input"][0].get("id").is_none());
+    }
+
+    #[test]
+    fn chat_chunk_for_created_event_carries_id_and_role() {
+        let mut state = SseChunkState::new();
+        let data = json!({"response": {"id": "resp_1", "created_at": 1785055543}});
+        let chunk = chat_chunk_for_event(&mut state, "response.created", &data, "gpt-5.4").unwrap();
+        assert_eq!(chunk["id"], "resp_1");
+        assert_eq!(chunk["created"], 1785055543);
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
+        assert!(chunk["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn chat_chunk_for_text_delta_carries_content() {
+        let mut state = SseChunkState::new();
+        let data = json!({"delta": "Hello"});
+        let chunk =
+            chat_chunk_for_event(&mut state, "response.output_text.delta", &data, "m").unwrap();
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "Hello");
+    }
+
+    #[test]
+    fn chat_chunk_for_function_call_added_emits_tool_call_header() {
+        let mut state = SseChunkState::new();
+        let data = json!({
+            "output_index": 0,
+            "item": {"type": "function_call", "call_id": "call_1", "name": "get_weather"}
+        });
+        let chunk =
+            chat_chunk_for_event(&mut state, "response.output_item.added", &data, "m").unwrap();
+        let tc = &chunk["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["index"], 0);
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["type"], "function");
+        assert_eq!(tc["function"]["name"], "get_weather");
+        assert_eq!(tc["function"]["arguments"], "");
+        assert!(state.saw_tool_call);
+    }
+
+    #[test]
+    fn chat_chunk_for_message_item_added_is_ignored() {
+        let mut state = SseChunkState::new();
+        let data = json!({"output_index": 0, "item": {"type": "message"}});
+        assert!(chat_chunk_for_event(&mut state, "response.output_item.added", &data, "m")
+            .is_none());
+        assert!(!state.saw_tool_call);
+    }
+
+    #[test]
+    fn chat_chunk_for_function_call_arguments_delta_carries_index_and_partial_args() {
+        let mut state = SseChunkState::new();
+        let data = json!({"output_index": 2, "delta": "{\"loc"});
+        let chunk = chat_chunk_for_event(
+            &mut state,
+            "response.function_call_arguments.delta",
+            &data,
+            "m",
+        )
+        .unwrap();
+        let tc = &chunk["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["index"], 2);
+        assert_eq!(tc["function"]["arguments"], "{\"loc");
+        assert!(tc.get("id").is_none());
+    }
+
+    #[test]
+    fn chat_chunk_for_completed_sets_finish_reason_stop_without_tool_calls() {
+        let mut state = SseChunkState::new();
+        let chunk = chat_chunk_for_event(&mut state, "response.completed", &json!({}), "m").unwrap();
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn chat_chunk_for_completed_sets_finish_reason_tool_calls_when_tool_call_seen() {
+        let mut state = SseChunkState::new();
+        state.saw_tool_call = true;
+        let chunk = chat_chunk_for_event(&mut state, "response.completed", &json!({}), "m").unwrap();
+        assert_eq!(chunk["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn chat_chunk_ignores_unmapped_events() {
+        let mut state = SseChunkState::new();
+        assert!(chat_chunk_for_event(&mut state, "response.in_progress", &json!({}), "m").is_none());
+    }
+
+    fn block_from(bytes_chunks: Vec<&str>) -> Vec<Result<Bytes, std::io::Error>> {
+        bytes_chunks
+            .into_iter()
+            .map(|s| Ok(Bytes::from(s.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn convert_sse_stream_translates_events_and_appends_done() {
+        let sse = "event: response.created\n\
+                   data: {\"response\":{\"id\":\"resp_1\",\"created_at\":1}}\n\n\
+                   event: response.output_text.delta\n\
+                   data: {\"delta\":\"Hi\"}\n\n\
+                   event: response.completed\n\
+                   data: {}\n\n";
+        let upstream = futures::stream::iter(block_from(vec![sse]));
+        let converted = convert_sse_stream(upstream, "gpt-5.4".to_string());
+        let out: Vec<Result<Bytes, std::io::Error>> = futures::executor::block_on(
+            futures::StreamExt::collect::<Vec<_>>(converted),
+        );
+        let rendered: String = out
+            .into_iter()
+            .map(|r| String::from_utf8(r.unwrap().to_vec()).unwrap())
+            .collect();
+
+        assert!(rendered.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(rendered.contains("\"role\":\"assistant\""));
+        assert!(rendered.contains("\"content\":\"Hi\""));
+        assert!(rendered.contains("\"finish_reason\":\"stop\""));
+        assert!(rendered.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn convert_sse_stream_handles_events_split_across_network_chunks() {
+        // Simulate a network read splitting a single SSE block into two
+        // arbitrary byte chunks that don't align to the "\n\n" boundary.
+        let full = "event: response.output_text.delta\ndata: {\"delta\":\"Hi\"}\n\n";
+        let (first, second) = full.split_at(20);
+        let upstream = futures::stream::iter(block_from(vec![first, second]));
+        let converted = convert_sse_stream(upstream, "m".to_string());
+        let out: Vec<Result<Bytes, std::io::Error>> = futures::executor::block_on(
+            futures::StreamExt::collect::<Vec<_>>(converted),
+        );
+        let rendered: String = out
+            .into_iter()
+            .map(|r| String::from_utf8(r.unwrap().to_vec()).unwrap())
+            .collect();
+        assert!(rendered.contains("\"content\":\"Hi\""));
+        assert!(rendered.ends_with("data: [DONE]\n\n"));
     }
 
     #[test]

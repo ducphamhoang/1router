@@ -79,9 +79,16 @@ impl ProviderAdapter for CodexAdapter {
     ) -> Result<Response, AppError> {
         let status = upstream.status();
         if client_wanted_stream {
-            // pass the SSE through unchanged
-            let stream = upstream.bytes_stream();
-            return Ok((status, Body::from_stream(stream)).into_response());
+            // Responses-API SSE events (response.created, output_text.delta,
+            // function_call_arguments.delta, ...) don't match what an
+            // OpenAI-Chat-Completions-compatible client expects on the wire
+            // (chat.completion.chunk / delta.content / delta.tool_calls) -
+            // translate event-by-event instead of passing the body through.
+            use futures::StreamExt;
+            let stream = upstream.bytes_stream().boxed();
+            let converted =
+                transform::convert_sse_stream(stream, self.provider.upstream_model.clone());
+            return Ok((status, Body::from_stream(converted)).into_response());
         }
         // aggregate: client did not ask to stream, but Codex is forced to stream upstream
         let text = upstream

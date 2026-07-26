@@ -57,6 +57,7 @@ async fn spawn_app_with_options(
         ttfb_timeout: std::time::Duration::from_secs(60),
         idle_timeout: std::time::Duration::from_secs(120),
         max_body_bytes: 10 * 1024 * 1024,
+        max_concurrent_requests: 256,
         drain_timeout: std::time::Duration::from_secs(30),
     };
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
@@ -72,6 +73,9 @@ async fn spawn_app_with_options(
         runtime: std::sync::Arc::new(dashmap::DashMap::new()),
         log_tx,
         refresh_locks: std::sync::Arc::new(dashmap::DashMap::new()),
+        proxy_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            cfg.max_concurrent_requests,
+        )),
     };
 
     let router = router::app::build_router(state);

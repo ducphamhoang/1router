@@ -55,12 +55,13 @@ mod tests {
             ttfb_timeout: Duration::from_secs(1),
             idle_timeout: Duration::from_secs(1),
             max_body_bytes: 1024,
+            max_concurrent_requests: 256,
             drain_timeout: Duration::from_secs(1),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         AppState {
             http: build_client(&cfg),
-            config: Arc::new(cfg),
+            config: Arc::new(cfg.clone()),
             snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
                 providers: vec![],
                 pools: vec![],
@@ -68,6 +69,7 @@ mod tests {
             runtime: Arc::new(dashmap::DashMap::new()),
             log_tx: tx,
             refresh_locks: Arc::new(dashmap::DashMap::new()),
+            proxy_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_requests)),
             db,
         }
     }

@@ -45,6 +45,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        let addr =
+            std::env::var("ROUTER_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let host = if let Some(port) = addr.rsplit_once(':').map(|(_, p)| p) {
+            format!("127.0.0.1:{port}")
+        } else {
+            addr
+        };
+        let url = format!("http://{host}/health");
+        let resp = reqwest::Client::new().get(url).send().await?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        anyhow::bail!("healthcheck returned {}", resp.status());
+    }
+
     // Normal boot. Resolve the secret before anything can need it.
     let secret = match config::resolve_shared_secret(&sqlite_path)? {
         SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s),
@@ -103,6 +119,7 @@ async fn main() -> Result<()> {
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
+        proxy_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_requests)),
     };
 
     spawn_background_refresh(state.clone());

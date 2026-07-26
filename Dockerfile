@@ -16,4 +16,5 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/1router /1router
 ENV ROUTER_LISTEN_ADDR=0.0.0.0:8080
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/1router", "healthcheck"]
 ENTRYPOINT ["/1router"]

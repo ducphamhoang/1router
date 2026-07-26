@@ -26,6 +26,7 @@ pub struct AppState {
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
     pub refresh_locks: RefreshLocks,
+    pub proxy_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {

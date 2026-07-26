@@ -151,12 +151,13 @@ mod tests {
             ttfb_timeout: std::time::Duration::from_secs(1),
             idle_timeout: std::time::Duration::from_secs(1),
             max_body_bytes: 1024,
+            max_concurrent_requests: 256,
             drain_timeout: std::time::Duration::from_secs(1),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         AppState {
             http: reqwest::Client::new(),
-            config: Arc::new(cfg),
+            config: Arc::new(cfg.clone()),
             snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::core::state::ConfigSnapshot {
                     providers: vec![],
@@ -166,6 +167,7 @@ mod tests {
             runtime: Arc::new(dashmap::DashMap::new()),
             log_tx: tx,
             refresh_locks: Arc::new(dashmap::DashMap::new()),
+            proxy_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_requests)),
             db,
         }
     }

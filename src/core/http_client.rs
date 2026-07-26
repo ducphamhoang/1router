@@ -38,6 +38,7 @@ mod tests {
             ttfb_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(7),
             max_body_bytes: 1024,
+            max_concurrent_requests: 256,
             drain_timeout: Duration::from_secs(1),
         }
     }

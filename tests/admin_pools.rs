@@ -27,12 +27,13 @@ async fn test_state() -> AppState {
         ttfb_timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(1),
         max_body_bytes: 1024,
+        max_concurrent_requests: 256,
         drain_timeout: Duration::from_secs(1),
     };
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
     let state = AppState {
         http: build_client(&cfg),
-        config: Arc::new(cfg),
+        config: Arc::new(cfg.clone()),
         snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
             providers: vec![],
             pools: vec![],
@@ -40,6 +41,7 @@ async fn test_state() -> AppState {
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
+        proxy_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_requests)),
         db,
     };
     std::mem::forget(dir);

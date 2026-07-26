@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,6 +36,16 @@ async fn messages(State(s): State<AppState>, headers: HeaderMap, body: Body) -> 
 }
 
 async fn proxy_entry(s: AppState, wire: WireFormat, headers: HeaderMap, body: Body) -> Response {
+    let permit = match s.proxy_semaphore.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return wire_error(
+                wire,
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many concurrent requests",
+            );
+        }
+    };
     let cap = s.config.max_body_bytes;
     let bytes = match buffer_body(body, cap).await {
         Ok(b) => b,
@@ -51,7 +61,9 @@ async fn proxy_entry(s: AppState, wire: WireFormat, headers: HeaderMap, body: Bo
             )
         }
     };
-    handle_proxy(s, wire, pool_id, headers, bytes).await
+    let resp = handle_proxy(s, wire, pool_id, headers, bytes).await;
+    drop(permit);
+    resp
 }
 
 async fn models(State(s): State<AppState>) -> Json<Value> {
@@ -62,4 +74,59 @@ async fn models(State(s): State<AppState>) -> Json<Value> {
         .map(|p| json!({ "id": p.pool.id, "object": "model", "owned_by": "1router" }))
         .collect();
     Json(json!({ "object": "list", "data": data }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::Config;
+    use crate::core::db::init_pool;
+    use crate::core::http_client::build_client;
+    use crate::core::state::ConfigSnapshot;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn state_with_proxy_permits(permits: usize) -> AppState {
+        let cfg = Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            sqlite_path: ":memory:".into(),
+            shared_secret: "s".into(),
+            admin_secret: None,
+            seed_path: None,
+            connect_timeout: Duration::from_secs(1),
+            ttfb_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(1),
+            max_body_bytes: 1024,
+            max_concurrent_requests: permits.max(1),
+            drain_timeout: Duration::from_secs(1),
+        };
+        let db = init_pool(":memory:").await.unwrap();
+        AppState {
+            db,
+            http: build_client(&cfg),
+            config: Arc::new(cfg),
+            snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
+                providers: vec![],
+                pools: vec![],
+            })),
+            runtime: Arc::new(dashmap::DashMap::new()),
+            log_tx: tokio::sync::mpsc::channel(1).0,
+            refresh_locks: Arc::new(dashmap::DashMap::new()),
+            proxy_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_entry_returns_429_when_concurrency_limit_is_exhausted() {
+        let state = state_with_proxy_permits(0).await;
+        let resp = proxy_entry(
+            state,
+            WireFormat::OpenAi,
+            HeaderMap::new(),
+            Body::from(r#"{"model":"gpt-4o","messages":[]}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 }

@@ -13,6 +13,7 @@ pub struct Config {
     pub ttfb_timeout: Duration,
     pub idle_timeout: Duration,
     pub max_body_bytes: usize,
+    pub max_concurrent_requests: usize,
     pub drain_timeout: Duration,
 }
 
@@ -145,6 +146,11 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10 * 1024 * 1024);
+        let max_concurrent_requests = std::env::var("ROUTER_MAX_CONCURRENT_REQUESTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(256);
 
         Ok(Config {
             listen_addr,
@@ -158,6 +164,7 @@ impl Config {
             ttfb_timeout: env_secs("ROUTER_TTFB_TIMEOUT", 60),
             idle_timeout: env_secs("ROUTER_IDLE_TIMEOUT", 120),
             max_body_bytes,
+            max_concurrent_requests,
             drain_timeout: env_secs("ROUTER_DRAIN_TIMEOUT", 30),
         })
     }
@@ -196,6 +203,7 @@ mod tests {
         assert!(c.admin_secret.is_none());
         assert_eq!(c.connect_timeout, std::time::Duration::from_secs(10));
         assert_eq!(c.max_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(c.max_concurrent_requests, 256);
 
         std::env::remove_var("ROUTER_SHARED_SECRET");
         std::env::remove_var("ROUTER_ADMIN_SECRET");

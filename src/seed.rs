@@ -50,6 +50,7 @@ mod tests {
             ttfb_timeout: Duration::from_secs(1),
             idle_timeout: Duration::from_secs(1),
             max_body_bytes: 1024,
+            max_concurrent_requests: 256,
             drain_timeout: Duration::from_secs(1),
         }
     }

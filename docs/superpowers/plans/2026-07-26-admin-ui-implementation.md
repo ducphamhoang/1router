@@ -3445,7 +3445,11 @@ describe("Providers", () => {
   it("lists_providers_and_polls_state_badges", async () => {
     render(<Providers />);
 
-    expect(await screen.findByText("openai")).toBeInTheDocument();
+    // (Implementation-time correction) The fixture's name AND wire_format
+    // are both literally "openai" - findByText("openai") is ambiguous
+    // (matches both table cells). Assert on the unique upstream_model
+    // value instead to prove the row actually rendered.
+    expect(await screen.findByText("gpt-4.1")).toBeInTheDocument();
     expect(await screen.findByText("ready")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith("/admin/providers/prov_1/state", expect.objectContaining({ credentials: "include" }));
   });

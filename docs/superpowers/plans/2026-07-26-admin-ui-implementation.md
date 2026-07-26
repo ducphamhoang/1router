@@ -2874,6 +2874,8 @@ There is no component test before the scaffold exists; the TDD check is `npm run
     "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
@@ -3001,20 +3003,25 @@ Modify `.gitignore`:
 *.db-shm
 frontend/node_modules/
 frontend/dist/
+frontend/tsconfig.tsbuildinfo
 ```
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd frontend && npm run build`
+Run: `cd frontend && npm install && npm run build`
 
 Expected: PASS — `tsc -b && vite build` completes and emits `frontend/dist/index.html`.
+
+**(Implementation-time correction)** The `devDependencies` above must also include `@types/react` and `@types/react-dom` (already reflected in the package.json shown in this task) — without them `tsc -b` fails with `TS7016`/`TS7026` errors on every JSX file, since it can't type-check `react`/`react-dom`'s untyped JS. This was caught by actually running the build during implementation, not just reading the spec; keep it in mind if this task is ever re-derived from an earlier copy of this plan.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/package.json frontend/tsconfig.json frontend/vite.config.ts frontend/index.html frontend/src/main.tsx frontend/src/App.tsx .gitignore
+git add frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/vite.config.ts frontend/index.html frontend/src/main.tsx frontend/src/App.tsx .gitignore
 git commit -m "feat(ui): scaffold React admin app"
 ```
+
+`frontend/package-lock.json` must be committed (not gitignored) — Task D1/D3's `npm ci` requires a committed lock file to work.
 
 ### Task C2: apiClient.ts
 
@@ -4018,6 +4025,8 @@ Modify `frontend/package.json`:
     "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
@@ -4648,6 +4657,8 @@ Modify `frontend/package.json`:
     "@testing-library/jest-dom": "^6.4.8",
     "@testing-library/react": "^16.0.1",
     "@testing-library/user-event": "^14.5.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.1",
     "jsdom": "^25.0.1",
     "typescript": "^5.6.2",

@@ -28,6 +28,7 @@ async fn spawn_app() -> TestApp {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path.to_string_lossy().into_owned(),
         shared_secret: secret,
+        admin_secret: None,
         seed_path: None,
         connect_timeout: Duration::from_secs(1),
         ttfb_timeout: Duration::from_secs(1),

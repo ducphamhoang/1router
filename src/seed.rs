@@ -44,6 +44,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
             sqlite_path: ":memory:".into(),
             shared_secret: "s".into(),
+            admin_secret: None,
             seed_path: Some(path),
             connect_timeout: Duration::from_secs(1),
             ttfb_timeout: Duration::from_secs(1),

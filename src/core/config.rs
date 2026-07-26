@@ -7,6 +7,7 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub sqlite_path: String,
     pub shared_secret: String,
+    pub admin_secret: Option<String>,
     pub seed_path: Option<PathBuf>,
     pub connect_timeout: Duration,
     pub ttfb_timeout: Duration,
@@ -149,6 +150,9 @@ impl Config {
             listen_addr,
             sqlite_path: sqlite_path_from_env(),
             shared_secret,
+            admin_secret: std::env::var("ROUTER_ADMIN_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
             seed_path,
             connect_timeout: env_secs("ROUTER_CONNECT_TIMEOUT", 10),
             ttfb_timeout: env_secs("ROUTER_TTFB_TIMEOUT", 60),
@@ -182,16 +186,36 @@ mod tests {
         std::env::set_var("ROUTER_SQLITE_PATH", "/tmp/x.db");
         std::env::set_var("ROUTER_SHARED_SECRET", "s3cret");
         std::env::remove_var("ROUTER_SEED_PATH");
+        std::env::remove_var("ROUTER_ADMIN_SECRET");
 
         let c = Config::from_env().unwrap();
         assert_eq!(c.listen_addr.to_string(), "127.0.0.1:9999");
         assert_eq!(c.sqlite_path, "/tmp/x.db");
         assert_eq!(c.shared_secret, "s3cret");
         assert!(c.seed_path.is_none());
+        assert!(c.admin_secret.is_none());
         assert_eq!(c.connect_timeout, std::time::Duration::from_secs(10));
         assert_eq!(c.max_body_bytes, 10 * 1024 * 1024);
 
         std::env::remove_var("ROUTER_SHARED_SECRET");
+        std::env::remove_var("ROUTER_ADMIN_SECRET");
+    }
+
+    #[test]
+    fn from_env_reads_optional_admin_secret() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        std::env::set_var("ROUTER_SQLITE_PATH", db.to_str().unwrap());
+        std::env::set_var("ROUTER_SHARED_SECRET", "proxy-secret");
+        std::env::set_var("ROUTER_ADMIN_SECRET", "admin-secret");
+
+        let c = Config::from_env().unwrap();
+        assert_eq!(c.shared_secret, "proxy-secret");
+        assert_eq!(c.admin_secret.as_deref(), Some("admin-secret"));
+
+        std::env::remove_var("ROUTER_SHARED_SECRET");
+        std::env::remove_var("ROUTER_ADMIN_SECRET");
     }
 
     #[test]

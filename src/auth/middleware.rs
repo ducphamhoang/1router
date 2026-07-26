@@ -12,23 +12,51 @@ pub fn bearer_matches(token: &str, secret: &str) -> bool {
     token.len() == secret.len() && token.as_bytes().ct_eq(secret.as_bytes()).into()
 }
 
-pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let ok = req
-        .headers()
+fn bearer_token(req: &Request) -> Option<&str> {
+    req.headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": { "message": "unauthorized" } })),
+    )
+        .into_response()
+}
+
+pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let ok = bearer_token(&req)
         .map(|token| bearer_matches(token, &state.config.shared_secret))
         .unwrap_or(false);
 
     if ok {
         next.run(req).await
     } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": { "message": "unauthorized" } })),
-        )
-            .into_response()
+        unauthorized()
+    }
+}
+
+pub async fn require_admin_bearer(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let required = state
+        .config
+        .admin_secret
+        .as_deref()
+        .unwrap_or(&state.config.shared_secret);
+    let ok = bearer_token(&req)
+        .map(|token| bearer_matches(token, required))
+        .unwrap_or(false);
+
+    if ok {
+        next.run(req).await
+    } else {
+        unauthorized()
     }
 }
 

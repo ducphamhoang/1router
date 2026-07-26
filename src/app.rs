@@ -1,25 +1,29 @@
 use axum::Router;
 
-use crate::auth::middleware::require_bearer;
+use crate::auth::middleware::{require_admin_bearer, require_bearer};
 use crate::core::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
-    // Guarded surface: /v1/* and /admin/* module routes are merged here by later tasks.
-    let guarded = Router::new()
+    let admin = Router::new()
         .merge(crate::telemetry::stats::routes())
         .merge(crate::providers::routes())
         .merge(crate::providers::oauth_routes::routes())
         .merge(crate::pools::routes::routes())
         .merge(crate::admin::routes())
-        .merge(crate::proxy::routes::routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            require_bearer,
+            require_admin_bearer,
         ));
+
+    let proxy = crate::proxy::routes::routes().route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_bearer,
+    ));
 
     Router::new()
         .merge(crate::telemetry::health::routes())
-        .merge(guarded)
+        .merge(admin)
+        .merge(proxy)
         .with_state(state)
 }
 
@@ -45,6 +49,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
             sqlite_path: ":memory:".into(),
             shared_secret: "s".into(),
+            admin_secret: None,
             seed_path: None,
             connect_timeout: Duration::from_secs(1),
             ttfb_timeout: Duration::from_secs(1),

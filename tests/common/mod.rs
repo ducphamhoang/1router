@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 pub struct TestApp {
     pub base_url: String,
     pub secret: String,
+    pub admin_secret: Option<String>,
     pub db: SqlitePool,
 }
 
@@ -11,11 +12,23 @@ pub async fn spawn_app() -> TestApp {
     spawn_app_with_sqlite_path(None).await
 }
 
+#[allow(dead_code)]
+pub async fn spawn_app_with_admin_secret(admin_secret: &str) -> TestApp {
+    spawn_app_with_options(None, Some(admin_secret.to_string())).await
+}
+
 // Lets a caller point at a persistent SQLite file instead of a throwaway temp
 // one - used by the Codex real-account e2e test so a completed OAuth login
 // (and its refresh token) survives across separate `cargo test` invocations,
 // instead of requiring a fresh browser login every single run.
 pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp {
+    spawn_app_with_options(sqlite_path, None).await
+}
+
+async fn spawn_app_with_options(
+    sqlite_path: Option<String>,
+    admin_secret: Option<String>,
+) -> TestApp {
     // Build Config directly rather than through Config::from_env() + std::env::set_var.
     // Integration tests within one file run concurrently by default; std::env is
     // process-global, so concurrent spawn_app() calls setting ROUTER_* would race
@@ -38,6 +51,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path,
         shared_secret: secret.clone(),
+        admin_secret: admin_secret.clone(),
         seed_path: None,
         connect_timeout: std::time::Duration::from_secs(10),
         ttfb_timeout: std::time::Duration::from_secs(60),
@@ -70,6 +84,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     TestApp {
         base_url: format!("http://{addr}"),
         secret,
+        admin_secret,
         db,
     }
 }

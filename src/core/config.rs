@@ -258,14 +258,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("sub").join("r.db");
         let db = db.to_str().unwrap();
-        assert_eq!(secret_file_path(db), std::path::Path::new(db).parent().unwrap().join(".router_secret"));
+        assert_eq!(
+            secret_file_path(db),
+            std::path::Path::new(db)
+                .parent()
+                .unwrap()
+                .join(".router_secret")
+        );
 
         persist_secret(db, "abc").unwrap();
-        assert_eq!(std::fs::read_to_string(secret_file_path(db)).unwrap(), "abc");
+        assert_eq!(
+            std::fs::read_to_string(secret_file_path(db)).unwrap(),
+            "abc"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(secret_file_path(db)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(secret_file_path(db))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "sidecar must be owner-read/write only");
         }
     }

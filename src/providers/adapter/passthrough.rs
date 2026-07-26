@@ -36,11 +36,10 @@ impl ProviderAdapter for PassthroughAdapter {
                 serde_json::Value::String(self.provider.upstream_model.clone()),
             );
         }
-        let url = self
-            .provider
-            .base_url
-            .clone()
-            .ok_or_else(|| AppError::Internal("passthrough provider missing base_url".into()))?;
+        let url =
+            self.provider.base_url.clone().ok_or_else(|| {
+                AppError::Internal("passthrough provider missing base_url".into())
+            })?;
 
         let mut builder = self.http.post(url).json(&json);
         if let Some(key) = creds.api_key.as_ref() {
@@ -85,9 +84,7 @@ impl ProviderAdapter for PassthroughAdapter {
     }
 
     async fn refresh_credentials(&self, _creds: &Credentials) -> Result<Credentials, RefreshError> {
-        Err(RefreshError::Transient(
-            "passthrough has no refresh".into(),
-        ))
+        Err(RefreshError::Transient("passthrough has no refresh".into()))
     }
 }
 

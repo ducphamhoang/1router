@@ -4,6 +4,8 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+static CODEX_TOKEN_URL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn make_codex_provider(app: &common::TestApp) {
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
@@ -14,7 +16,9 @@ async fn make_codex_provider(app: &common::TestApp) {
             "id": "cx", "name": "Codex", "wire_format": "openai", "kind": "oauth_codex",
             "base_url": null, "api_key": null, "upstream_model": "gpt-5-codex"
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -26,7 +30,9 @@ async fn oauth_start_returns_authorize_url() {
     let resp = client
         .post(format!("{}/admin/providers/cx/oauth/start", app.base_url))
         .header(k, v)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let url = body["authorize_url"].as_str().unwrap();
@@ -39,6 +45,7 @@ async fn oauth_start_returns_authorize_url() {
 // with a fake JWT id_token, per the plan's testing section for this task.
 #[tokio::test]
 async fn oauth_complete_exchanges_code_and_persists_account_claims() {
+    let _env_guard = CODEX_TOKEN_URL_LOCK.lock().await;
     let auth_server = MockServer::start().await;
 
     let b64 = |b: &[u8]| {
@@ -100,7 +107,10 @@ async fn oauth_complete_exchanges_code_and_persists_account_claims() {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/admin/providers/cx/oauth/complete", app.base_url))
+        .post(format!(
+            "{}/admin/providers/cx/oauth/complete",
+            app.base_url
+        ))
         .header(&k, &v)
         .json(&json!({ "code": "auth-code-abc", "state": issued_state }))
         .send()
@@ -117,7 +127,10 @@ async fn oauth_complete_exchanges_code_and_persists_account_claims() {
         .expect("oauth state should exist after complete");
     assert_eq!(os.access_token.as_deref(), Some("at-123"));
     assert_eq!(os.refresh_token.as_deref(), Some("rt-456"));
-    assert!(os.pkce_verifier.is_none(), "pkce should be cleared after complete");
+    assert!(
+        os.pkce_verifier.is_none(),
+        "pkce should be cleared after complete"
+    );
     assert_eq!(
         os.provider_data["chatgpt_account_id"],
         json!("acct_test123")
@@ -142,7 +155,10 @@ async fn oauth_complete_rejects_state_mismatch() {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/admin/providers/cx/oauth/complete", app.base_url))
+        .post(format!(
+            "{}/admin/providers/cx/oauth/complete",
+            app.base_url
+        ))
         .header(&k, &v)
         .json(&json!({ "code": "auth-code-abc", "state": "wrong-state" }))
         .send()
@@ -161,7 +177,9 @@ async fn provider_state_endpoint_reports_status() {
     let resp = client
         .get(format!("{}/admin/providers/cx/state", app.base_url))
         .header(k, v)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "healthy");

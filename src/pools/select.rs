@@ -40,16 +40,23 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::{Pool, PoolMember, PoolWithMembers, Provider, ProviderKind, WireFormat};
+    use crate::core::model::{
+        Pool, PoolMember, PoolWithMembers, Provider, ProviderKind, WireFormat,
+    };
     use crate::core::state::ConfigSnapshot;
     use chrono::Utc;
 
     fn prov(id: &str) -> Provider {
         Provider {
-            id: id.into(), name: id.into(), wire_format: WireFormat::OpenAi,
-            kind: ProviderKind::Passthrough, base_url: Some("u".into()),
-            api_key: Some("k".into()), upstream_model: "m".into(),
-            created_at: Utc::now(), updated_at: Utc::now(),
+            id: id.into(),
+            name: id.into(),
+            wire_format: WireFormat::OpenAi,
+            kind: ProviderKind::Passthrough,
+            base_url: Some("u".into()),
+            api_key: Some("k".into()),
+            upstream_model: "m".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 
@@ -57,10 +64,22 @@ mod tests {
         ConfigSnapshot {
             providers: vec![prov("a"), prov("b")],
             pools: vec![PoolWithMembers {
-                pool: Pool { id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now() },
+                pool: Pool {
+                    id: "gpt-4o".into(),
+                    wire_format: WireFormat::OpenAi,
+                    created_at: Utc::now(),
+                },
                 members: vec![
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20 },
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10 },
+                    PoolMember {
+                        pool_id: "gpt-4o".into(),
+                        provider_id: "b".into(),
+                        priority: 20,
+                    },
+                    PoolMember {
+                        pool_id: "gpt-4o".into(),
+                        provider_id: "a".into(),
+                        priority: 10,
+                    },
                 ],
             }],
         }

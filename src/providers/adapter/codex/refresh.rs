@@ -71,6 +71,8 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    static CODEX_TOKEN_URL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn creds_expiring_in_minutes(minutes: i64) -> Credentials {
         Credentials {
             access_expires_at: Some(Utc::now() + Duration::minutes(minutes)),
@@ -92,16 +94,22 @@ mod tests {
 
     #[test]
     fn needs_refresh_true_when_no_expiry_known() {
-        let c = Credentials { access_expires_at: None, ..Default::default() };
+        let c = Credentials {
+            access_expires_at: None,
+            ..Default::default()
+        };
         assert!(needs_refresh(&c, Utc::now()));
     }
 
     #[tokio::test]
     async fn refresh_invalid_grant_maps_error() {
+        let _env_guard = CODEX_TOKEN_URL_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/oauth/token"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("{\"error\":\"invalid_grant\"}"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string("{\"error\":\"invalid_grant\"}"),
+            )
             .mount(&server)
             .await;
 
@@ -110,6 +118,9 @@ mod tests {
         std::env::set_var("CODEX_TOKEN_URL", format!("{}/oauth/token", server.uri()));
         let res = refresh_tokens(&http, "rt").await;
         std::env::remove_var("CODEX_TOKEN_URL");
-        assert!(matches!(res, Err(crate::core::error::RefreshError::InvalidGrant)));
+        assert!(matches!(
+            res,
+            Err(crate::core::error::RefreshError::InvalidGrant)
+        ));
     }
 }

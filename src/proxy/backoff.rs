@@ -45,14 +45,14 @@ pub fn reset_after_from_header(headers: &HeaderMap) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use crate::core::error::ErrorClass;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::time::Duration;
 
     #[test]
     fn cooldown_formula_and_cap() {
-        assert_eq!(cooldown_for(1), Duration::from_secs(2));   // 2s * 2^0
-        assert_eq!(cooldown_for(2), Duration::from_secs(4));   // 2s * 2^1
+        assert_eq!(cooldown_for(1), Duration::from_secs(2)); // 2s * 2^0
+        assert_eq!(cooldown_for(2), Duration::from_secs(4)); // 2s * 2^1
         assert_eq!(cooldown_for(3), Duration::from_secs(8));
         // capped at 5 minutes
         assert_eq!(cooldown_for(15), Duration::from_secs(300));
@@ -63,16 +63,31 @@ mod tests {
     fn classify_success_and_client_errors() {
         let h = HeaderMap::new();
         assert_eq!(classify(StatusCode::OK, &h), ErrorClass::Success);
-        assert_eq!(classify(StatusCode::UNAUTHORIZED, &h), ErrorClass::AuthExpired);
-        assert_eq!(classify(StatusCode::BAD_REQUEST, &h), ErrorClass::NonRetryable);
+        assert_eq!(
+            classify(StatusCode::UNAUTHORIZED, &h),
+            ErrorClass::AuthExpired
+        );
+        assert_eq!(
+            classify(StatusCode::BAD_REQUEST, &h),
+            ErrorClass::NonRetryable
+        );
     }
 
     #[test]
     fn classify_retryable() {
         let h = HeaderMap::new();
-        assert!(matches!(classify(StatusCode::TOO_MANY_REQUESTS, &h), ErrorClass::Retryable { .. }));
-        assert!(matches!(classify(StatusCode::INTERNAL_SERVER_ERROR, &h), ErrorClass::Retryable { .. }));
-        assert!(matches!(classify(StatusCode::REQUEST_TIMEOUT, &h), ErrorClass::Retryable { .. }));
+        assert!(matches!(
+            classify(StatusCode::TOO_MANY_REQUESTS, &h),
+            ErrorClass::Retryable { .. }
+        ));
+        assert!(matches!(
+            classify(StatusCode::INTERNAL_SERVER_ERROR, &h),
+            ErrorClass::Retryable { .. }
+        ));
+        assert!(matches!(
+            classify(StatusCode::REQUEST_TIMEOUT, &h),
+            ErrorClass::Retryable { .. }
+        ));
     }
 
     #[test]
@@ -82,6 +97,7 @@ mod tests {
         assert_eq!(reset_after_from_header(&h), Some(Duration::from_secs(120)));
 
         h.insert("retry-after", HeaderValue::from_static("999999"));
-        assert_eq!(reset_after_from_header(&h), Some(Duration::from_secs(1800))); // cap 30min
+        assert_eq!(reset_after_from_header(&h), Some(Duration::from_secs(1800)));
+        // cap 30min
     }
 }

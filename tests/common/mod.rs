@@ -1,5 +1,6 @@
 use sqlx::SqlitePool;
 
+#[allow(dead_code)]
 pub struct TestApp {
     pub base_url: String,
     pub secret: String,
@@ -73,6 +74,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     }
 }
 
+#[allow(dead_code)]
 pub fn auth_header(secret: &str) -> (String, String) {
     ("authorization".to_string(), format!("Bearer {secret}"))
 }

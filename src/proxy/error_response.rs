@@ -41,7 +41,11 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_shape() {
-        let resp = wire_error(WireFormat::Anthropic, StatusCode::SERVICE_UNAVAILABLE, "down");
+        let resp = wire_error(
+            WireFormat::Anthropic,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "down",
+        );
         let j = body_json(resp).await;
         assert_eq!(j["type"], "error");
         assert_eq!(j["error"]["message"], "down");

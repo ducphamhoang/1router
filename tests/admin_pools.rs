@@ -157,3 +157,24 @@ async fn wire_format_mismatch_is_400() {
         .unwrap();
     assert_eq!(m.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn oversized_proxy_body_is_413() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let (k, v) = auth_header(&state.config.shared_secret);
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(k, v)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; 2048]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}

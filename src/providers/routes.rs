@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::Deserialize;
@@ -19,7 +19,6 @@ pub fn routes() -> Router<AppState> {
             "/admin/providers/:id",
             get(get_one).patch(patch).delete(delete),
         )
-        .route("/admin/providers/:id/test", post(test_stub))
         .route("/admin/providers/:id/state", get(state_stub))
 }
 
@@ -114,22 +113,6 @@ async fn delete(State(s): State<AppState>, Path(id): Path<String>) -> Result<Sta
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn test_stub(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
-    let provider = queries::get_provider(&s.db, &id).await?;
-    let url = match &provider.base_url {
-        Some(u) => u.clone(),
-        None => return Ok(Json(json!({ "ok": false, "reason": "no base_url (oauth provider)" }))),
-    };
-    let res = s.http.get(&url).send().await;
-    match res {
-        Ok(r) => Ok(Json(json!({ "ok": true, "status": r.status().as_u16() }))),
-        Err(e) => Ok(Json(json!({ "ok": false, "reason": e.to_string() }))),
-    }
-}
-
 async fn state_stub(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -138,9 +121,10 @@ async fn state_stub(
     let entry = s.runtime.get(&id);
     let (level, status, until_secs) = match entry {
         Some(st) => {
-            let secs = st
-                .unavailable_until
-                .map(|u| u.saturating_duration_since(std::time::Instant::now()).as_secs());
+            let secs = st.unavailable_until.map(|u| {
+                u.saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+            });
             let status = match st.status {
                 ProviderStatus::Healthy => "healthy",
                 ProviderStatus::Cooling => "cooling",

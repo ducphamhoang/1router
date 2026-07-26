@@ -14,7 +14,9 @@ async fn add_provider(app: &common::TestApp, id: &str, base_url: &str) {
             "id": id, "name": id, "wire_format": "openai", "kind": "passthrough",
             "base_url": base_url, "api_key": "sk-test", "upstream_model": "real-model"
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 }
 
 async fn add_pool_member(app: &common::TestApp, provider_id: &str, priority: i64) {
@@ -24,7 +26,9 @@ async fn add_pool_member(app: &common::TestApp, provider_id: &str, priority: i64
         .put(format!("{}/admin/pools/gpt-4o/members", app.base_url))
         .header(&k, &v)
         .json(&json!({ "provider_id": provider_id, "priority": priority }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 }
 
 async fn create_pool(app: &common::TestApp) {
@@ -34,7 +38,9 @@ async fn create_pool(app: &common::TestApp) {
         .post(format!("{}/admin/pools", app.base_url))
         .header(&k, &v)
         .json(&json!({ "id": "gpt-4o", "wire_format": "openai" }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -63,7 +69,9 @@ async fn fails_over_from_500_to_200() {
         .post(format!("{}/v1/chat/completions", app.base_url))
         .header(k, v)
         .json(&json!({ "model": "gpt-4o", "messages": [] }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -89,10 +97,16 @@ async fn all_unavailable_is_503_with_tried_header() {
         .post(format!("{}/v1/chat/completions", app.base_url))
         .header(k, v)
         .json(&json!({ "model": "gpt-4o", "messages": [] }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 503);
     assert!(resp.headers().contains_key("x-1router-tried"));
+    assert!(
+        !resp.headers().contains_key("x-1router-error"),
+        "raw upstream errors should not be exposed in debug headers by default"
+    );
 }
 
 // Regression test for the Phase 2 review finding: NonRetryable passthrough was

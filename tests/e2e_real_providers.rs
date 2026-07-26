@@ -137,7 +137,9 @@ async fn codex_end_to_end_real() {
             .is_some();
 
     if already_authed {
-        eprintln!("=== reusing stored Codex OAuth token from E2E_SQLITE_PATH; skipping browser login ===");
+        eprintln!(
+            "=== reusing stored Codex OAuth token from E2E_SQLITE_PATH; skipping browser login ==="
+        );
     } else {
         let start_resp: serde_json::Value = client
             .post(format!(
@@ -173,7 +175,11 @@ async fn codex_end_to_end_real() {
         .await
         .unwrap();
 
-        let query = line.trim().split_once('?').map(|(_, q)| q).unwrap_or(line.trim());
+        let query = line
+            .trim()
+            .split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or(line.trim());
         let mut code: Option<String> = None;
         let mut state: Option<String> = None;
         for pair in query.split('&') {
@@ -279,9 +285,7 @@ async fn codex_end_to_end_real() {
         }
         None => {
             let (model, status, body) = last_failure.unwrap();
-            panic!(
-                "no candidate model worked; last attempt \"{model}\" -> {status}: {body}"
-            );
+            panic!("no candidate model worked; last attempt \"{model}\" -> {status}: {body}");
         }
     }
 }

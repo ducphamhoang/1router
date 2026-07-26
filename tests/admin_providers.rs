@@ -104,3 +104,31 @@ async fn get_patch_delete_existing_provider_by_id_succeeds() {
         .unwrap();
     assert_eq!(get_after.status(), 404);
 }
+
+#[tokio::test]
+async fn provider_test_endpoint_is_not_exposed() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+
+    client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({
+            "id": "p1", "name": "P1", "wire_format": "openai",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1/private",
+            "api_key": "sk-secret", "upstream_model": "gpt-4o"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/admin/providers/p1/test", app.base_url))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+}

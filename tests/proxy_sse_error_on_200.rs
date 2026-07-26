@@ -38,9 +38,11 @@ async fn error_event_inside_http_200_sse_is_passed_through() {
     client
         .post(format!("{}/admin/providers", app.base_url))
         .header(&k, &v)
-        .json(&json!({ "id": "p1", "name": "p1", "wire_format": "openai", "kind": "passthrough",
+        .json(
+            &json!({ "id": "p1", "name": "p1", "wire_format": "openai", "kind": "passthrough",
             "base_url": format!("{}/v1/chat/completions", upstream.uri()),
-            "api_key": "sk", "upstream_model": "m" }))
+            "api_key": "sk", "upstream_model": "m" }),
+        )
         .send()
         .await
         .unwrap();

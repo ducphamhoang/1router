@@ -79,15 +79,27 @@ mod tests {
 
     #[test]
     fn wire_format_serializes_as_lowercase_text() {
-        assert_eq!(serde_json::to_string(&WireFormat::OpenAi).unwrap(), "\"openai\"");
-        assert_eq!(serde_json::to_string(&WireFormat::Anthropic).unwrap(), "\"anthropic\"");
+        assert_eq!(
+            serde_json::to_string(&WireFormat::OpenAi).unwrap(),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WireFormat::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
         let w: WireFormat = serde_json::from_str("\"anthropic\"").unwrap();
         assert!(matches!(w, WireFormat::Anthropic));
     }
 
     #[test]
     fn provider_kind_serializes_with_snake_case() {
-        assert_eq!(serde_json::to_string(&ProviderKind::OauthCodex).unwrap(), "\"oauth_codex\"");
-        assert_eq!(serde_json::to_string(&ProviderKind::Passthrough).unwrap(), "\"passthrough\"");
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OauthCodex).unwrap(),
+            "\"oauth_codex\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Passthrough).unwrap(),
+            "\"passthrough\""
+        );
     }
 }

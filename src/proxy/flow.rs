@@ -311,6 +311,9 @@ fn insert_debug_headers(headers: &mut HeaderMap, tried: &[String], provider: &st
     if let Ok(v) = HeaderValue::from_str(provider) {
         headers.insert("x-1router-provider", v);
     }
+    if std::env::var("ROUTER_DEBUG_ERROR_HEADERS").ok().as_deref() != Some("1") {
+        return;
+    }
     let short: String = error.chars().take(200).collect();
     if let Ok(v) = HeaderValue::from_str(&short.replace(['\n', '\r'], " ")) {
         headers.insert("x-1router-error", v);

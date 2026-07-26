@@ -14,9 +14,11 @@ pub struct ProviderPatch {
 }
 
 pub async fn list_providers(db: &SqlitePool) -> Result<Vec<Provider>, AppError> {
-    Ok(sqlx::query_as::<_, Provider>("SELECT * FROM providers ORDER BY name")
-        .fetch_all(db)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, Provider>("SELECT * FROM providers ORDER BY name")
+            .fetch_all(db)
+            .await?,
+    )
 }
 
 pub async fn get_provider(db: &SqlitePool, id: &str) -> Result<Provider, AppError> {
@@ -46,9 +48,9 @@ pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppErr
 
     match res {
         Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            Err(AppError::Conflict(format!("provider name '{}' already exists", p.name)))
-        }
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(AppError::Conflict(
+            format!("provider name '{}' already exists", p.name),
+        )),
         Err(e) => Err(AppError::Db(e)),
     }
 }

@@ -16,8 +16,13 @@ use crate::core::model::PoolMember;
 /// way to find the right value is to try candidates against a live login.
 /// Kept in sync BY HAND with tests/e2e_real_providers.rs::codex_end_to_end_real;
 /// if you update one, update the other (see the spec's accepted-risk section).
-pub const CANDIDATE_MODELS: [&str; 5] =
-    ["gpt-5.4", "gpt-5-codex", "gpt-5.1-codex", "gpt-5", "codex-mini-latest"];
+pub const CANDIDATE_MODELS: [&str; 5] = [
+    "gpt-5.4",
+    "gpt-5-codex",
+    "gpt-5.1-codex",
+    "gpt-5",
+    "codex-mini-latest",
+];
 
 /// Placeholder `upstream_model` for a Codex provider whose real model is not
 /// known yet (set at create time, and left in place if every probe fails).
@@ -178,7 +183,11 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     let name: String = Input::with_theme(&theme())
         .with_prompt("Provider name (also used as its id)")
         .validate_with(|s: &String| -> Result<(), &str> {
-            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+            if s.trim().is_empty() {
+                Err("name cannot be empty")
+            } else {
+                Ok(())
+            }
         })
         .interact_text()?;
     let name = name.trim().to_string();
@@ -271,7 +280,10 @@ pub(crate) async fn persist_probe_result(
             provider_queries::update_provider(
                 db,
                 &provider.id,
-                &ProviderPatch { upstream_model: Some(model.clone()), ..Default::default() },
+                &ProviderPatch {
+                    upstream_model: Some(model.clone()),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| anyhow::anyhow!("failed to set upstream_model: {e}"))?;
@@ -358,7 +370,11 @@ pub async fn add_codex_provider(
     let name: String = Input::with_theme(&theme())
         .with_prompt("Provider name (also used as its id)")
         .validate_with(|s: &String| -> Result<(), &str> {
-            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+            if s.trim().is_empty() {
+                Err("name cannot be empty")
+            } else {
+                Ok(())
+            }
         })
         .interact_text()?;
     let name = name.trim().to_string();
@@ -530,8 +546,10 @@ pub async fn run_wizard(
     while ask {
         let kind = Select::with_theme(&theme())
             .with_prompt("Provider kind")
-            .items(["passthrough (OpenAI/Anthropic-compatible API key)",
-                     "Codex OAuth (ChatGPT account)"])
+            .items([
+                "passthrough (OpenAI/Anthropic-compatible API key)",
+                "Codex OAuth (ChatGPT account)",
+            ])
             .default(0)
             .interact()?;
 
@@ -587,7 +605,11 @@ mod tests {
     use crate::core::model::PoolMember;
 
     fn member(priority: i64) -> PoolMember {
-        PoolMember { pool_id: "p".into(), provider_id: "x".into(), priority }
+        PoolMember {
+            pool_id: "p".into(),
+            provider_id: "x".into(),
+            priority,
+        }
     }
 
     #[test]
@@ -638,7 +660,11 @@ mod tests {
             let t = t.clone();
             async move {
                 t.lock().unwrap().push(m.clone());
-                if m == "b" { Ok((200, "{}".into())) } else { Ok((400, "nope".into())) }
+                if m == "b" {
+                    Ok((200, "{}".into()))
+                } else {
+                    Ok((400, "nope".into()))
+                }
             }
         })
         .await;
@@ -649,10 +675,8 @@ mod tests {
 
     #[tokio::test]
     async fn probe_reports_every_failure_when_none_succeed() {
-        let out = probe_first_success(&["a", "b"], |m| async move {
-            Ok((404, format!("no {m}")))
-        })
-        .await;
+        let out =
+            probe_first_success(&["a", "b"], |m| async move { Ok((404, format!("no {m}"))) }).await;
 
         match out {
             ProbeOutcome::AllFailed(fs) => {
@@ -667,7 +691,11 @@ mod tests {
     #[tokio::test]
     async fn probe_treats_transport_error_as_a_failed_attempt_and_continues() {
         let out = probe_first_success(&["a", "b"], |m| async move {
-            if m == "a" { Err("connection reset".into()) } else { Ok((200, "{}".into())) }
+            if m == "a" {
+                Err("connection reset".into())
+            } else {
+                Ok((200, "{}".into()))
+            }
         })
         .await;
         assert!(matches!(out, ProbeOutcome::Found(ref m) if m == "b"));
@@ -679,7 +707,13 @@ mod tests {
         // the spec calls them out as a pair that goes stale together.
         assert_eq!(
             CANDIDATE_MODELS,
-            ["gpt-5.4", "gpt-5-codex", "gpt-5.1-codex", "gpt-5", "codex-mini-latest"]
+            [
+                "gpt-5.4",
+                "gpt-5-codex",
+                "gpt-5.1-codex",
+                "gpt-5",
+                "codex-mini-latest"
+            ]
         );
     }
 
@@ -711,9 +745,13 @@ mod tests {
         let prio = assign_to_pool(&db, "my-pool", &p).await.unwrap();
         assert_eq!(prio, 1);
 
-        let pool = crate::pools::queries::get_pool(&db, "my-pool").await.unwrap();
+        let pool = crate::pools::queries::get_pool(&db, "my-pool")
+            .await
+            .unwrap();
         assert_eq!(pool.wire_format, WireFormat::OpenAi);
-        let members = crate::pools::queries::list_members(&db, "my-pool").await.unwrap();
+        let members = crate::pools::queries::list_members(&db, "my-pool")
+            .await
+            .unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].provider_id, "p1");
         assert_eq!(members[0].priority, 1);
@@ -726,7 +764,10 @@ mod tests {
         insert_provider(&db, &p).await.unwrap();
         assign_to_pool(&db, "anth-pool", &p).await.unwrap();
         assert_eq!(
-            crate::pools::queries::get_pool(&db, "anth-pool").await.unwrap().wire_format,
+            crate::pools::queries::get_pool(&db, "anth-pool")
+                .await
+                .unwrap()
+                .wire_format,
             WireFormat::Anthropic
         );
     }
@@ -743,7 +784,11 @@ mod tests {
         // bump the incumbent to a sparse priority
         crate::pools::queries::upsert_member(
             &db,
-            &PoolMember { pool_id: "shared".into(), provider_id: "p1".into(), priority: 10 },
+            &PoolMember {
+                pool_id: "shared".into(),
+                provider_id: "p1".into(),
+                priority: 10,
+            },
         )
         .await
         .unwrap();
@@ -774,7 +819,13 @@ mod tests {
         assign_to_pool(&db, "pre", &p).await.unwrap();
         // still the original row (a Conflict from a second insert_pool would
         // have surfaced as an Err above)
-        assert_eq!(crate::pools::queries::get_pool(&db, "pre").await.unwrap().created_at, created);
+        assert_eq!(
+            crate::pools::queries::get_pool(&db, "pre")
+                .await
+                .unwrap()
+                .created_at,
+            created
+        );
     }
 
     #[test]
@@ -789,7 +840,10 @@ mod tests {
         assert_eq!(p.id, "my-openai");
         assert_eq!(p.name, "my-openai");
         assert_eq!(p.kind, ProviderKind::Passthrough);
-        assert_eq!(p.base_url.as_deref(), Some("https://api.example.com/v1/chat/completions"));
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://api.example.com/v1/chat/completions")
+        );
         assert_eq!(p.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(p.upstream_model, "gpt-4o-mini");
     }
@@ -809,7 +863,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(p.upstream_model, "gpt-5.4");
-        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        let stored = crate::providers::queries::get_provider(&db, "cx")
+            .await
+            .unwrap();
         assert_eq!(stored.upstream_model, "gpt-5.4");
     }
 
@@ -830,7 +886,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(p.upstream_model, PENDING_MODEL);
-        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        let stored = crate::providers::queries::get_provider(&db, "cx")
+            .await
+            .unwrap();
         assert_eq!(stored.upstream_model, PENDING_MODEL);
     }
 
@@ -839,7 +897,9 @@ mod tests {
         let db = init_pool(":memory:").await.unwrap();
         assert!(providers_table_is_empty(&db).await.unwrap());
 
-        insert_provider(&db, &provider("p1", WireFormat::OpenAi)).await.unwrap();
+        insert_provider(&db, &provider("p1", WireFormat::OpenAi))
+            .await
+            .unwrap();
         assert!(!providers_table_is_empty(&db).await.unwrap());
     }
 }

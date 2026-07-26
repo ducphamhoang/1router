@@ -1,5 +1,13 @@
 mod common;
 use common::{auth_header, spawn_app};
+use router::auth::middleware::bearer_matches;
+
+#[test]
+fn bearer_compare_requires_exact_constant_time_match() {
+    assert!(bearer_matches("test-secret", "test-secret"));
+    assert!(!bearer_matches("test-secret", "test-secreu"));
+    assert!(!bearer_matches("test-secret", "test-secret-extra"));
+}
 
 #[tokio::test]
 async fn missing_bearer_is_401() {

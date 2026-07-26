@@ -1,21 +1,32 @@
+use std::error::Error;
+
 use axum::body::Body;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 
 use crate::core::error::AppError;
 
-pub async fn buffer_body(body: Body, cap: usize) -> Result<Bytes, AppError> {
-    let collected = body
-        .collect()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("failed to read body: {e}")))?
-        .to_bytes();
-
-    if collected.len() > cap {
-        return Err(AppError::BadRequest("request body exceeds limit".into()));
+fn is_length_limit_error(mut error: &(dyn Error + 'static)) -> bool {
+    loop {
+        if error.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
     }
+}
 
-    Ok(collected)
+pub async fn buffer_body(body: Body, cap: usize) -> Result<Bytes, AppError> {
+    let limited = http_body_util::Limited::new(body, cap);
+    limited.collect().await.map(|c| c.to_bytes()).map_err(|e| {
+        if is_length_limit_error(e.as_ref()) {
+            AppError::PayloadTooLarge("request body exceeds limit".into())
+        } else {
+            AppError::BadRequest(format!("failed to read body: {e}"))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -37,7 +48,7 @@ mod tests {
         let res = buffer_body(b, 10).await;
         assert!(matches!(
             res,
-            Err(crate::core::error::AppError::BadRequest(_))
+            Err(crate::core::error::AppError::PayloadTooLarge(_))
         ));
     }
 }

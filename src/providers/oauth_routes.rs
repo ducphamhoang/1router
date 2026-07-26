@@ -17,10 +17,7 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/providers/:id/oauth/complete", post(complete))
 }
 
-async fn start(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
+async fn start(State(s): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, AppError> {
     let provider = queries::get_provider(&s.db, &id).await?;
     if !matches!(provider.kind, ProviderKind::OauthCodex) {
         return Err(AppError::BadRequest("provider is not oauth_codex".into()));
@@ -55,7 +52,9 @@ pub async fn complete_oauth_exchange(
 ) -> Result<(), AppError> {
     let os = queries::get_oauth_state(db, provider_id)
         .await?
-        .ok_or_else(|| AppError::BadRequest("no oauth flow in progress; call start first".into()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("no oauth flow in progress; call start first".into())
+        })?;
     let verifier = os
         .pkce_verifier
         .ok_or_else(|| AppError::BadRequest("missing pkce verifier".into()))?;

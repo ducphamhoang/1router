@@ -84,10 +84,12 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO pool_members (pool_id,provider_id,priority) VALUES ('gpt-4o','p1',10)")
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO pool_members (pool_id,provider_id,priority) VALUES ('gpt-4o','p1',10)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
 
         let snap = load_snapshot(&db).await.unwrap();
         assert_eq!(snap.providers.len(), 1);

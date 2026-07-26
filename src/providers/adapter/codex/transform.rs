@@ -217,11 +217,23 @@ mod tests {
         });
         let out = transform_request(&input, "sess-2");
         for field in [
-            "n", "presence_penalty", "frequency_penalty", "logprobs", "top_logprobs",
-            "logit_bias", "seed", "stop", "response_format", "stream_options",
-            "parallel_tool_calls", "service_tier",
+            "n",
+            "presence_penalty",
+            "frequency_penalty",
+            "logprobs",
+            "top_logprobs",
+            "logit_bias",
+            "seed",
+            "stop",
+            "response_format",
+            "stream_options",
+            "parallel_tool_calls",
+            "service_tier",
         ] {
-            assert!(out.get(field).is_none(), "{field} should have been stripped");
+            assert!(
+                out.get(field).is_none(),
+                "{field} should have been stripped"
+            );
         }
     }
 
@@ -289,7 +301,8 @@ mod tests {
 
     #[test]
     fn sse_embedded_error_detects_usage_limit() {
-        let sse = "event: response.failed\ndata: {\"error\":{\"type\":\"usage_limit_reached\"}}\n\n";
+        let sse =
+            "event: response.failed\ndata: {\"error\":{\"type\":\"usage_limit_reached\"}}\n\n";
         assert!(sse_embedded_error(sse).is_some());
         let clean = "event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n";
         assert!(sse_embedded_error(clean).is_none());

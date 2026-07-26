@@ -5042,11 +5042,27 @@ struct Dist;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui", get(redirect_to_ui_slash))
+        .route("/ui/", get(serve_root))
         .route("/ui/*path", get(serve_asset))
 }
 
 async fn redirect_to_ui_slash() -> Redirect {
     Redirect::permanent("/ui/")
+}
+
+// (Implementation-time correction, found via live end-to-end Docker testing
+// during Task E1's verification.) axum 0.7/matchit's `*path` wildcard does
+// NOT match an empty tail segment, so bare `GET /ui/` (the exact URL users
+// land on after the /ui redirect above) fell through to a 404 with no
+// matching route, even though /ui/index.html and any /ui/<non-empty-path>
+// correctly hit the wildcard. This was invisible to the original test suite
+// below because `serve_asset_serves_index_html_at_root` calls
+// `serve_asset(Path(String::new()))` directly - it never goes through axum's
+// actual route matching, so it couldn't have caught this. Added an explicit
+// `/ui/` route with its own handler, sharing the index.html lookup via a
+// `serve_index()` helper factored out of `serve_asset`.
+async fn serve_root() -> Response {
+    serve_index()
 }
 
 async fn serve_asset(Path(path): Path<String>) -> Response {
@@ -5058,6 +5074,10 @@ async fn serve_asset(Path(path): Path<String>) -> Response {
         return ([(header::CONTENT_TYPE, mime)], file.data).into_response();
     }
 
+    serve_index()
+}
+
+fn serve_index() -> Response {
     match Dist::get("index.html") {
         Some(file) => ([(header::CONTENT_TYPE, "text/html")], file.data).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -5118,6 +5138,27 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
         assert_eq!(resp.headers().get("location").unwrap(), "/ui/");
+    }
+
+    // (Implementation-time addition, pairs with the /ui/ 404 fix above.)
+    // Goes through the real router, not the handler function directly - this
+    // is what serve_asset_serves_index_html_at_root above should have done
+    // to catch the bug in the first place. Needs a test_state() AppState
+    // helper (same pattern used by every other route-module test in this
+    // codebase) since routes() -> Router<AppState> needs .with_state(...)
+    // before it's servable via oneshot.
+    #[tokio::test]
+    async fn serve_root_serves_index_html_through_full_router() {
+        let app = super::routes().with_state(test_state().await);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp.headers().get("content-type").unwrap();
+        assert!(content_type.to_str().unwrap().starts_with("text/html"));
     }
 }
 ```
@@ -5350,20 +5391,30 @@ use crate::core::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     // Authenticated admin surface: everything admin-side except login.
+    // (Implementation-time correction) admin::routes() (Task A3/B7) already
+    // internally merges settings::routes() as of B7 - merging it again here
+    // would panic at startup with "Overlapping method route". Do not add a
+    // separate .merge(crate::admin::settings::routes()) call.
     let admin_authenticated = Router::new()
         .merge(crate::telemetry::stats::routes())
         .merge(crate::providers::routes())
         .merge(crate::providers::oauth_routes::routes())
         .merge(crate::pools::routes::routes())
-        .merge(crate::admin::routes())              // export/import
-        .merge(crate::admin::auth::routes())          // logout, password-change
-        .merge(crate::admin::settings::routes())      // shared-secret settings
+        .merge(crate::admin::routes())              // export/import + shared-secret settings (via B7)
+        .merge(crate::admin::auth::routes::routes())  // logout, password-change
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_admin_session));
 
     // Unauthenticated admin surface: login only (spec's I2 fix — login can't gate itself).
-    let admin_public = crate::admin::auth::public_routes();
+    let admin_public = crate::admin::auth::routes::public_routes();
 
     // CSRF applies across BOTH admin strata — login is itself a POST.
+    // (Review note) axum 0.7's .layer() also wraps the router's fallback, and
+    // on .merge() the LATER-merged router's fallback wins. Today `admin` is
+    // merged before `proxy`/`ui_assets` below, so the final fallback is the
+    // default (unwrapped) 404 - correct, but only because of this order. If
+    // `admin` were ever the LAST merge into the outer router, every
+    // unmatched non-GET request would 403 instead of 404 globally. Do not
+    // move this merge to be last.
     let admin = Router::new()
         .merge(admin_authenticated)
         .merge(admin_public)

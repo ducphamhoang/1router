@@ -36,7 +36,18 @@ impl ProviderAdapter for CodexAdapter {
             .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
         // session id: prompt_cache_key ties to a stable per-provider id for now.
         let session_id = format!("1router-{}", self.provider.id);
-        let transformed = transform::transform_request(&client_json, &session_id);
+        let mut transformed = transform::transform_request(&client_json, &session_id);
+        // The client's `model` is the pool id, not a real Codex model name -
+        // rewrite to the provider's actual upstream model, matching
+        // PassthroughAdapter's behavior (confirmed via a real-account 400:
+        // "'<pool-id>' model is not supported when using Codex with a ChatGPT
+        // account").
+        if let Some(obj) = transformed.as_object_mut() {
+            obj.insert(
+                "model".into(),
+                serde_json::Value::String(self.provider.upstream_model.clone()),
+            );
+        }
 
         let account_id = creds.provider_data["chatgpt_account_id"]
             .as_str()
@@ -166,5 +177,8 @@ mod tests {
             serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
         assert!(sent.get("temperature").is_none());
         assert_eq!(sent["stream"], true);
+        // the client's `model` (a pool id, e.g. "gpt-4o") is not a real Codex
+        // model - it must be rewritten to the provider's upstream_model.
+        assert_eq!(sent["model"], "gpt-5-codex");
     }
 }

@@ -208,8 +208,11 @@ async fn codex_end_to_end_real() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let status = resp.status();
+    let raw_body = resp.text().await.unwrap();
+    eprintln!("=== chat completion response ({status}) ===\n{raw_body}\n");
+    assert_eq!(status, 200, "response body: {raw_body}");
+    let body: serde_json::Value = serde_json::from_str(&raw_body).unwrap();
     let choices = body["choices"].as_array().expect("choices array");
     assert!(!choices.is_empty(), "expected at least one choice");
     let content = choices[0]["message"]["content"]

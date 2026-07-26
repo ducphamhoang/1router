@@ -77,22 +77,35 @@ pub async fn refresh_due_providers(state: &AppState) {
 mod tests {
     use super::*;
     use crate::core::db::init_pool;
-    use crate::core::state::{AppState, ConfigSnapshot};
+    use crate::core::state::{AppState, ConfigSnapshot, SecretOrigin};
     use std::sync::Arc;
     use std::time::Duration;
 
     async fn state_with(db: sqlx::SqlitePool) -> AppState {
         let cfg = crate::core::config::Config {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
-            sqlite_path: ":memory:".into(), shared_secret: "s".into(), seed_path: None,
-            connect_timeout: Duration::from_secs(1), ttfb_timeout: Duration::from_secs(1),
-            idle_timeout: Duration::from_secs(1), max_body_bytes: 1024, drain_timeout: Duration::from_secs(1),
+            sqlite_path: ":memory:".into(),
+            shared_secret: "s".into(),
+            seed_path: None,
+            connect_timeout: Duration::from_secs(1),
+            ttfb_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(1),
+            max_body_bytes: 1024,
+            drain_timeout: Duration::from_secs(1),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         AppState {
-            db, http: reqwest::Client::new(), config: Arc::new(cfg),
-            snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(ConfigSnapshot { providers: vec![], pools: vec![] })),
-            runtime: Arc::new(dashmap::DashMap::new()), log_tx: tx,
+            db,
+            http: reqwest::Client::new(),
+            shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
+            config: Arc::new(cfg),
+            secret_origin: SecretOrigin::SidecarFile,
+            snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(ConfigSnapshot {
+                providers: vec![],
+                pools: vec![],
+            })),
+            runtime: Arc::new(dashmap::DashMap::new()),
+            log_tx: tx,
             refresh_locks: Arc::new(dashmap::DashMap::new()),
         }
     }

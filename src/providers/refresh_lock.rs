@@ -155,7 +155,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         AppState {
             http: reqwest::Client::new(),
+            shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
             config: Arc::new(cfg),
+            secret_origin: crate::core::state::SecretOrigin::SidecarFile,
             snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::core::state::ConfigSnapshot {
                     providers: vec![],

@@ -52,7 +52,11 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     let state = router::core::state::AppState {
         db: db.clone(),
         http,
+        shared_secret: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            cfg.shared_secret.clone(),
+        )),
         config: std::sync::Arc::new(cfg.clone()),
+        secret_origin: router::core::state::SecretOrigin::SidecarFile,
         snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         runtime: std::sync::Arc::new(dashmap::DashMap::new()),
         log_tx,

@@ -9,7 +9,7 @@ use router::core::config::Config;
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
 use router::core::model::WireFormat;
-use router::core::state::{AppState, ConfigSnapshot};
+use router::core::state::{AppState, ConfigSnapshot, SecretOrigin};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -31,7 +31,9 @@ async fn test_state() -> AppState {
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
     let state = AppState {
         http: build_client(&cfg),
+        shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
         config: Arc::new(cfg),
+        secret_origin: SecretOrigin::SidecarFile,
         snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
             providers: vec![],
             pools: vec![],
@@ -89,13 +91,14 @@ async fn create_pool_add_member() {
     let state = test_state().await;
     create_provider(&state.db, "p1", WireFormat::OpenAi).await;
     let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
 
     let c = router
         .clone()
         .oneshot(json_request(
             Method::POST,
             "/admin/pools",
-            &state.config.shared_secret,
+            secret.as_str(),
             json!({ "id": "gpt-4o", "wire_format": "openai" }),
         ))
         .await
@@ -107,7 +110,7 @@ async fn create_pool_add_member() {
         .oneshot(json_request(
             Method::PUT,
             "/admin/pools/gpt-4o/members",
-            &state.config.shared_secret,
+            secret.as_str(),
             json!({ "provider_id": "p1", "priority": 10 }),
         ))
         .await
@@ -118,7 +121,7 @@ async fn create_pool_add_member() {
         .oneshot(empty_request(
             Method::GET,
             "/admin/pools/gpt-4o/members",
-            &state.config.shared_secret,
+            secret.as_str(),
         ))
         .await
         .unwrap();
@@ -133,13 +136,14 @@ async fn wire_format_mismatch_is_400() {
     let state = test_state().await;
     create_provider(&state.db, "anth", WireFormat::Anthropic).await;
     let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
 
     let c = router
         .clone()
         .oneshot(json_request(
             Method::POST,
             "/admin/pools",
-            &state.config.shared_secret,
+            secret.as_str(),
             json!({ "id": "gpt-4o", "wire_format": "openai" }),
         ))
         .await
@@ -150,7 +154,7 @@ async fn wire_format_mismatch_is_400() {
         .oneshot(json_request(
             Method::PUT,
             "/admin/pools/gpt-4o/members",
-            &state.config.shared_secret,
+            secret.as_str(),
             json!({ "provider_id": "anth", "priority": 10 }),
         ))
         .await

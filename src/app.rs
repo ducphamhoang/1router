@@ -29,7 +29,7 @@ mod tests {
     use crate::core::config::Config;
     use crate::core::db::init_pool;
     use crate::core::http_client::build_client;
-    use crate::core::state::{AppState, ConfigSnapshot};
+    use crate::core::state::{AppState, ConfigSnapshot, SecretOrigin};
     use arc_swap::ArcSwap;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -55,7 +55,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         AppState {
             http: build_client(&cfg),
+            shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
             config: Arc::new(cfg),
+            secret_origin: SecretOrigin::SidecarFile,
             snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
                 providers: vec![],
                 pools: vec![],
@@ -71,9 +73,49 @@ mod tests {
     async fn health_route_is_wired() {
         let app = build_router(test_state().await);
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_reads_live_shared_secret_not_config_copy() {
+        let state = test_state().await;
+        state
+            .shared_secret
+            .store(Arc::new("rotated-secret".to_string()));
+
+        let router = build_router(state.clone());
+
+        let old = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/stats")
+                    .header("authorization", "Bearer s")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old.status(), StatusCode::UNAUTHORIZED);
+
+        let new = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/stats")
+                    .header("authorization", "Bearer rotated-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(new.status(), StatusCode::OK);
     }
 }

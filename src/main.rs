@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
     let db = init_pool(&sqlite_path).await?;
     seed_if_configured_first(&db).await?;
     onboarding::resolve_or_prompt_admin_password(&db).await?;
+    if let Err(e) = router::admin::auth::session::delete_expired(&db).await {
+        tracing::warn!(error = %e, "boot-time admin session sweep failed");
+    }
 
     // First-boot wizard (provider/pool prompts): empty DB + no seed file + a
     // real terminal. A seed file always wins over interactive setup, even if
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
     };
 
     spawn_background_refresh(state.clone());
+    router::admin::auth::cleanup::spawn_session_cleanup(state.clone());
 
     let router = router::app::build_router(state);
     let listener = tokio::net::TcpListener::bind(cfg.listen_addr).await?;

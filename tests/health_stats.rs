@@ -8,7 +8,7 @@ use router::app::build_router;
 use router::core::config::Config;
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
-use router::core::state::{AppState, ConfigSnapshot};
+use router::core::state::{AppState, ConfigSnapshot, SecretOrigin};
 use tower::ServiceExt;
 
 pub struct TestApp {
@@ -38,7 +38,9 @@ async fn spawn_app() -> TestApp {
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
     let state = AppState {
         http: build_client(&cfg),
+        shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
         config: Arc::new(cfg),
+        secret_origin: SecretOrigin::SidecarFile,
         snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
             providers: vec![],
             pools: vec![],
@@ -85,7 +87,8 @@ async fn stats_totals_reflect_request_log() {
     .await
     .unwrap();
 
-    let (k, v) = auth_header(&app.state.config.shared_secret);
+    let secret = app.state.shared_secret.load();
+    let (k, v) = auth_header(secret.as_str());
     let router = build_router(app.state.clone());
     let resp = router
         .oneshot(

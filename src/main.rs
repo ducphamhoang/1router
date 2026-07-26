@@ -4,7 +4,7 @@ use std::sync::Arc;
 use router::core::config::{self, Config, SecretSource};
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
-use router::core::state::{load_snapshot, AppState};
+use router::core::state::{load_snapshot, AppState, SecretOrigin};
 use router::onboarding;
 use router::providers::refresh_task::spawn_background_refresh;
 use router::seed::seed_if_configured;
@@ -46,7 +46,10 @@ async fn main() -> Result<()> {
     }
 
     // Normal boot. Resolve the secret before anything can need it.
-    let secret = match config::resolve_shared_secret(&sqlite_path)? {
+    let resolved_secret = config::resolve_shared_secret(&sqlite_path)?;
+    let mut secret_origin = SecretOrigin::from_source(&resolved_secret);
+
+    let secret = match resolved_secret {
         SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s),
         // TTY + no secret yet: bootstrap ONLY the secret here (not the full
         // provider-adding wizard) - a seed file must still be able to win
@@ -55,7 +58,9 @@ async fn main() -> Result<()> {
         // loop runs at all is decided once, below, by the unified trigger
         // check (empty DB + no seed path + TTY).
         SecretSource::BootstrapNeeded if onboarding::stdin_is_tty() => {
-            Some(onboarding::resolve_or_prompt_secret(&sqlite_path)?)
+            let s = onboarding::resolve_or_prompt_secret(&sqlite_path)?;
+            secret_origin = Some(SecretOrigin::SidecarFile);
+            Some(s)
         }
         SecretSource::BootstrapNeeded => {
             // Headless first boot: auto-generate, persist, and log it ONCE.
@@ -67,10 +72,12 @@ async fn main() -> Result<()> {
                 "generated a new admin shared secret - SAVE THIS NOW, it will not be logged \
                  again. Set ROUTER_SHARED_SECRET to control it explicitly."
             );
+            secret_origin = Some(SecretOrigin::SidecarFile);
             Some(s)
         }
     };
     let secret = secret.expect("all resolve_shared_secret arms above produce a secret");
+    let secret_origin = secret_origin.expect("all resolved runtime secrets have an origin");
 
     let db = init_pool(&sqlite_path).await?;
     seed_if_configured_first(&db).await?;
@@ -99,6 +106,8 @@ async fn main() -> Result<()> {
         db,
         http,
         config: Arc::new(cfg.clone()),
+        shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
+        secret_origin,
         snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,

@@ -17,11 +17,30 @@ pub struct ConfigSnapshot {
 pub type RequestLogSender = tokio::sync::mpsc::Sender<LogEntry>;
 pub type RefreshLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretOrigin {
+    Env,
+    SidecarFile,
+}
+
+impl SecretOrigin {
+    pub fn from_source(source: &crate::core::config::SecretSource) -> Option<Self> {
+        match source {
+            crate::core::config::SecretSource::Env(_) => Some(SecretOrigin::Env),
+            crate::core::config::SecretSource::SidecarFile(_) => Some(SecretOrigin::SidecarFile),
+            crate::core::config::SecretSource::BootstrapNeeded => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub http: reqwest::Client,
     pub config: Arc<Config>,
+    pub shared_secret: Arc<ArcSwap<String>>,
+    pub secret_origin: SecretOrigin,
     pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
@@ -84,10 +103,12 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO pool_members (pool_id,provider_id,priority) VALUES ('gpt-4o','p1',10)")
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO pool_members (pool_id,provider_id,priority) VALUES ('gpt-4o','p1',10)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
 
         let snap = load_snapshot(&db).await.unwrap();
         assert_eq!(snap.providers.len(), 1);

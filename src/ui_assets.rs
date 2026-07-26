@@ -13,11 +13,16 @@ struct Dist;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui", get(redirect_to_ui_slash))
+        .route("/ui/", get(serve_root))
         .route("/ui/*path", get(serve_asset))
 }
 
 async fn redirect_to_ui_slash() -> Redirect {
     Redirect::permanent("/ui/")
+}
+
+async fn serve_root() -> Response {
+    serve_index()
 }
 
 async fn serve_asset(Path(path): Path<String>) -> Response {
@@ -29,6 +34,10 @@ async fn serve_asset(Path(path): Path<String>) -> Response {
         return ([(header::CONTENT_TYPE, mime)], file.data).into_response();
     }
 
+    serve_index()
+}
+
+fn serve_index() -> Response {
     match Dist::get("index.html") {
         Some(file) => ([(header::CONTENT_TYPE, "text/html")], file.data).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -129,5 +138,19 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
         assert_eq!(resp.headers().get("location").unwrap(), "/ui/");
+    }
+
+    #[tokio::test]
+    async fn serve_root_serves_index_html_through_full_router() {
+        let app = super::routes().with_state(test_state().await);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp.headers().get("content-type").unwrap();
+        assert!(content_type.to_str().unwrap().starts_with("text/html"));
     }
 }

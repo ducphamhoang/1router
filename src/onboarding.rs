@@ -84,6 +84,59 @@ where
     ProbeOutcome::AllFailed(failures)
 }
 
+use crate::core::error::AppError;
+use crate::core::model::{Pool, Provider};
+use crate::pools::queries as pool_queries;
+
+/// Add `provider` to `pool_id`, creating the pool if needed.
+///
+/// Deliberately takes `pool_id` rather than prompting for it, so the whole
+/// DB-touching part of the pool step is unit testable; the prompt lives in
+/// `run_wizard`.
+pub async fn assign_to_pool(
+    db: &sqlx::SqlitePool,
+    pool_id: &str,
+    provider: &Provider,
+) -> anyhow::Result<i64> {
+    match pool_queries::get_pool(db, pool_id).await {
+        Ok(_) => {}
+        Err(AppError::NotFound) => {
+            pool_queries::insert_pool(
+                db,
+                &Pool {
+                    id: pool_id.to_string(),
+                    // A pool's wire_format is what clients speak to it; for a
+                    // brand-new pool built around one provider, match the
+                    // provider so the two can't disagree.
+                    wire_format: provider.wire_format,
+                    created_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create pool '{pool_id}': {e}"))?;
+        }
+        Err(e) => return Err(anyhow::anyhow!("failed to look up pool '{pool_id}': {e}")),
+    }
+
+    let existing = pool_queries::list_members(db, pool_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to list members of '{pool_id}': {e}"))?;
+    let priority = next_priority(&existing);
+
+    pool_queries::upsert_member(
+        db,
+        &PoolMember {
+            pool_id: pool_id.to_string(),
+            provider_id: provider.id.clone(),
+            priority,
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to add '{}' to '{pool_id}': {e}", provider.id))?;
+
+    Ok(priority)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +237,99 @@ mod tests {
             CANDIDATE_MODELS,
             ["gpt-5.4", "gpt-5-codex", "gpt-5.1-codex", "gpt-5", "codex-mini-latest"]
         );
+    }
+
+    use crate::core::db::init_pool;
+    use crate::core::model::{Provider, ProviderKind, WireFormat};
+    use crate::providers::queries::insert_provider;
+    use chrono::Utc;
+
+    fn provider(id: &str, wf: WireFormat) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            wire_format: wf,
+            kind: ProviderKind::Passthrough,
+            base_url: Some("https://x/v1/chat/completions".into()),
+            api_key: Some("k".into()),
+            upstream_model: "m".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn assign_creates_the_pool_and_uses_priority_one() {
+        let db = init_pool(":memory:").await.unwrap();
+        let p = provider("p1", WireFormat::OpenAi);
+        insert_provider(&db, &p).await.unwrap();
+
+        let prio = assign_to_pool(&db, "my-pool", &p).await.unwrap();
+        assert_eq!(prio, 1);
+
+        let pool = crate::pools::queries::get_pool(&db, "my-pool").await.unwrap();
+        assert_eq!(pool.wire_format, WireFormat::OpenAi);
+        let members = crate::pools::queries::list_members(&db, "my-pool").await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].provider_id, "p1");
+        assert_eq!(members[0].priority, 1);
+    }
+
+    #[tokio::test]
+    async fn assign_inherits_the_providers_wire_format_for_a_new_pool() {
+        let db = init_pool(":memory:").await.unwrap();
+        let p = provider("p1", WireFormat::Anthropic);
+        insert_provider(&db, &p).await.unwrap();
+        assign_to_pool(&db, "anth-pool", &p).await.unwrap();
+        assert_eq!(
+            crate::pools::queries::get_pool(&db, "anth-pool").await.unwrap().wire_format,
+            WireFormat::Anthropic
+        );
+    }
+
+    #[tokio::test]
+    async fn assign_appends_behind_existing_members() {
+        let db = init_pool(":memory:").await.unwrap();
+        let first = provider("p1", WireFormat::OpenAi);
+        let second = provider("p2", WireFormat::OpenAi);
+        insert_provider(&db, &first).await.unwrap();
+        insert_provider(&db, &second).await.unwrap();
+
+        assign_to_pool(&db, "shared", &first).await.unwrap();
+        // bump the incumbent to a sparse priority
+        crate::pools::queries::upsert_member(
+            &db,
+            &PoolMember { pool_id: "shared".into(), provider_id: "p1".into(), priority: 10 },
+        )
+        .await
+        .unwrap();
+
+        let prio = assign_to_pool(&db, "shared", &second).await.unwrap();
+        assert_eq!(prio, 11, "must go behind the incumbent, not in front of it");
+    }
+
+    #[tokio::test]
+    async fn assign_to_an_existing_pool_does_not_recreate_it() {
+        let db = init_pool(":memory:").await.unwrap();
+        let p = provider("p1", WireFormat::OpenAi);
+        insert_provider(&db, &p).await.unwrap();
+        let created = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        crate::pools::queries::insert_pool(
+            &db,
+            &crate::core::model::Pool {
+                id: "pre".into(),
+                wire_format: WireFormat::OpenAi,
+                created_at: created,
+            },
+        )
+        .await
+        .unwrap();
+
+        assign_to_pool(&db, "pre", &p).await.unwrap();
+        // still the original row (a Conflict from a second insert_pool would
+        // have surfaced as an Err above)
+        assert_eq!(crate::pools::queries::get_pool(&db, "pre").await.unwrap().created_at, created);
     }
 }

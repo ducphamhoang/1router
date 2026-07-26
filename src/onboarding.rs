@@ -447,7 +447,7 @@ pub async fn providers_table_is_empty(db: &sqlx::SqlitePool) -> anyhow::Result<b
 /// exists yet, and persist it to the sidecar file.
 ///
 /// Persisting is what lets a later `1router setup` skip this step entirely.
-fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
+pub fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
     match config::resolve_shared_secret(sqlite_path)? {
         config::SecretSource::Env(s) => {
             println!("Admin secret: using ROUTER_SHARED_SECRET from the environment.");
@@ -540,12 +540,24 @@ pub async fn run_wizard(
             _ => add_codex_provider(db, http).await?,
         };
 
-        // Pool id: what clients will send as `model`.
+        // Pool id: what clients will send as `model`. The provider row above
+        // is already committed, so an interrupt (Ctrl-C/EOF) here leaves a
+        // provider with no pool membership - print a clear recovery hint
+        // before propagating rather than a bare prompt error, since the next
+        // boot won't re-trigger the wizard (the providers table is no
+        // longer empty).
         let default_pool = provider.id.clone();
         let pool_id: String = Input::with_theme(&theme())
             .with_prompt("Pool id (this is the `model` name clients will request)")
             .default(default_pool)
-            .interact_text()?;
+            .interact_text()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "setup interrupted: provider '{}' was created but not added to a pool. \
+                     Add it later via PUT /admin/pools/:id/members. ({e})",
+                    provider.id
+                )
+            })?;
         let pool_id = pool_id.trim().to_string();
         let priority = assign_to_pool(db, &pool_id, &provider).await?;
         println!(

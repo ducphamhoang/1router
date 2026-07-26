@@ -93,13 +93,29 @@ pub fn persist_secret(sqlite_path: &str, secret: &str) -> anyhow::Result<()> {
             std::fs::create_dir_all(dir)?;
         }
     }
-    std::fs::write(&path, secret)
-        .map_err(|e| anyhow::anyhow!("failed to write secret file {path:?}: {e}"))?;
+    // Create with owner-only permissions from the start via OpenOptions'
+    // mode(), rather than write() then chmod() after - the latter leaves a
+    // window where the file briefly exists at the process umask's default
+    // (often group/world-readable) before being tightened, during which a
+    // local user watching the directory could read the secret.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("failed to chmod secret file {path:?}: {e}"))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| anyhow::anyhow!("failed to create secret file {path:?}: {e}"))?;
+        f.write_all(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("failed to write secret file {path:?}: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, secret)
+            .map_err(|e| anyhow::anyhow!("failed to write secret file {path:?}: {e}"))?;
     }
     Ok(())
 }

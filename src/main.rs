@@ -48,7 +48,15 @@ async fn main() -> Result<()> {
     // Normal boot. Resolve the secret before anything can need it.
     let secret = match config::resolve_shared_secret(&sqlite_path)? {
         SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s),
-        SecretSource::BootstrapNeeded if onboarding::stdin_is_tty() => None, // wizard will make one
+        // TTY + no secret yet: bootstrap ONLY the secret here (not the full
+        // provider-adding wizard) - a seed file must still be able to win
+        // over interactive setup even when a secret has to be created, per
+        // the design's "seed always wins" rule. Whether the provider-adding
+        // loop runs at all is decided once, below, by the unified trigger
+        // check (empty DB + no seed path + TTY).
+        SecretSource::BootstrapNeeded if onboarding::stdin_is_tty() => {
+            Some(onboarding::resolve_or_prompt_secret(&sqlite_path)?)
+        }
         SecretSource::BootstrapNeeded => {
             // Headless first boot: auto-generate, persist, and log it ONCE.
             let s = config::generate_secret();
@@ -62,27 +70,19 @@ async fn main() -> Result<()> {
             Some(s)
         }
     };
+    let secret = secret.expect("all resolve_shared_secret arms above produce a secret");
 
     let db = init_pool(&sqlite_path).await?;
     seed_if_configured_first(&db).await?;
 
-    // First-boot wizard: empty DB + no seed file + a real terminal. Any one of
-    // those missing means "don't block a headless/scripted deployment".
+    // First-boot wizard (provider/pool prompts): empty DB + no seed file + a
+    // real terminal. A seed file always wins over interactive setup, even if
+    // the secret itself had to be bootstrapped just above - that's a
+    // separate concern from whether to prompt for providers. Any of the
+    // three conditions missing means "don't block a headless/scripted
+    // deployment or override a seed file's config."
     let seed_configured = std::env::var("ROUTER_SEED_PATH").is_ok();
-    let mut wizard_already_ran = false;
-    let secret = match secret {
-        Some(s) => s,
-        None => {
-            // BootstrapNeeded + TTY: the wizard both creates the secret and
-            // (optionally) the first provider, and hands the secret back.
-            let http = reqwest::Client::new();
-            let s = onboarding::run_wizard(&db, &http, &sqlite_path).await?;
-            wizard_already_ran = true;
-            s
-        }
-    };
-    if !wizard_already_ran
-        && !seed_configured
+    if !seed_configured
         && onboarding::stdin_is_tty()
         && onboarding::providers_table_is_empty(&db).await?
     {

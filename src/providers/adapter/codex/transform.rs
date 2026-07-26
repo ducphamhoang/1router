@@ -27,6 +27,18 @@ const DISALLOWED: &[&str] = &[
     "service_tier",
 ];
 
+fn message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
 fn strip_ids(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -61,6 +73,37 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
             if m.get("role").and_then(|r| r.as_str()) == Some("system") {
                 m["role"] = json!("developer");
             }
+        }
+    }
+
+    // The Responses API takes `input`, not Chat Completions' `messages` - real
+    // OpenAI-SDK clients send `messages`, and forwarding that field unconverted
+    // gets a 400 from the real backend (confirmed via a real-account Phase 4
+    // e2e run; the design spec had left this shape unconfirmed).
+    if let Some(Value::Array(messages)) = obj.remove("messages") {
+        if !obj.contains_key("input") {
+            let input: Vec<Value> = messages
+                .into_iter()
+                .map(|m| {
+                    let role = m
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("user")
+                        .to_string();
+                    let text = message_text(&m);
+                    let part_type = if role == "assistant" {
+                        "output_text"
+                    } else {
+                        "input_text"
+                    };
+                    json!({
+                        "type": "message",
+                        "role": role,
+                        "content": [{ "type": part_type, "text": text }]
+                    })
+                })
+                .collect();
+            obj.insert("input".into(), json!(input));
         }
     }
 
@@ -186,7 +229,35 @@ mod tests {
     fn system_role_becomes_developer() {
         let input = json!({ "messages": [{"role": "system", "content": "x"}] });
         let out = transform_request(&input, "s");
-        assert_eq!(out["messages"][0]["role"], "developer");
+        assert!(out.get("messages").is_none());
+        assert_eq!(out["input"][0]["role"], "developer");
+    }
+
+    #[test]
+    fn messages_convert_to_responses_input() {
+        let input = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello there"}
+            ]
+        });
+        let out = transform_request(&input, "s");
+        assert!(out.get("messages").is_none(), "messages should be removed");
+        let items = out["input"].as_array().unwrap();
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["content"][0]["type"], "input_text");
+        assert_eq!(items[0]["content"][0]["text"], "hi");
+        assert_eq!(items[1]["role"], "assistant");
+        assert_eq!(items[1]["content"][0]["type"], "output_text");
+        assert_eq!(items[1]["content"][0]["text"], "hello there");
+    }
+
+    #[test]
+    fn existing_input_field_is_not_overwritten_by_messages_conversion() {
+        let input = json!({ "messages": [], "input": [{"id": "msg_abc", "type": "message"}] });
+        let out = transform_request(&input, "s");
+        assert!(out.get("messages").is_none());
+        assert!(out["input"][0].get("id").is_none());
     }
 
     #[test]

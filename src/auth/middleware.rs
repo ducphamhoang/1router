@@ -1,5 +1,5 @@
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -72,6 +72,109 @@ pub async fn require_admin_session(
         Json(json!({ "error": { "message": "unauthorized" } })),
     )
         .into_response()
+}
+
+pub async fn require_csrf_header(req: Request, next: Next) -> Response {
+    if req.method() != Method::GET {
+        let ok = req
+            .headers()
+            .get("x-requested-with")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "1router-ui")
+            .unwrap_or(false);
+
+        if !ok {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": { "message": "missing X-Requested-With header" } })),
+            )
+                .into_response();
+        }
+    }
+
+    next.run(req).await
+}
+
+#[cfg(test)]
+mod csrf_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::middleware;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/protected", get(|| async { "ok" }).post(|| async { "ok" }))
+            .route_layer(middleware::from_fn(require_csrf_header))
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_get_without_header() {
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_post_without_header() {
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_post_with_correct_header_value() {
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/protected")
+                    .header("x-requested-with", "1router-ui")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_post_with_wrong_header_value() {
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/protected")
+                    .header("x-requested-with", "wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
 }
 
 #[cfg(test)]

@@ -24,10 +24,11 @@ RUN set -eux; \
 # ---- runtime stage ----
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /out/1router /1router
-COPY --from=builder /out-data /data
+COPY --chown=nonroot:nonroot --from=builder /out-data /data
 ENV ROUTER_LISTEN_ADDR=0.0.0.0:8080
 ENV ROUTER_SQLITE_PATH=/data/1router.db
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/1router", "healthcheck"]
+USER nonroot:nonroot
 ENTRYPOINT ["/1router"]

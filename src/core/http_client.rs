@@ -2,6 +2,10 @@ use crate::core::config::Config;
 
 pub fn build_client(cfg: &Config) -> reqwest::Client {
     reqwest::Client::builder()
+        // Provider base URLs are validated before building outbound requests.
+        // Do not allow an upstream-controlled 30x to bypass that validation and
+        // pivot into loopback/private/metadata endpoints.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(cfg.connect_timeout)
         // reqwest's read_timeout is an inter-read idle timeout that resets on every
         // read, not a headers-only TTFB cap — it also governs gaps between streamed
@@ -50,5 +54,31 @@ mod tests {
         let client = build_client(&cfg());
         // Smoke: the builder did not panic and produced a Client we can clone cheaply.
         let _c2 = client.clone();
+    }
+
+    #[tokio::test]
+    async fn build_client_does_not_follow_redirects() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/final"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("followed"))
+            .mount(&server)
+            .await;
+
+        let resp = build_client(&cfg())
+            .get(format!("{}/redirect", server.uri()))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::FOUND);
     }
 }

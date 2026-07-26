@@ -9,7 +9,16 @@ use subtle::ConstantTimeEq;
 use crate::core::state::AppState;
 
 pub fn bearer_matches(token: &str, secret: &str) -> bool {
-    token.len() == secret.len() && token.as_bytes().ct_eq(secret.as_bytes()).into()
+    let token = token.as_bytes();
+    let secret = secret.as_bytes();
+    let max_len = token.len().max(secret.len());
+    let mut diff = (token.len() ^ secret.len()) as u8;
+    for i in 0..max_len {
+        let a = token.get(i).copied().unwrap_or(0);
+        let b = secret.get(i).copied().unwrap_or(0);
+        diff |= a ^ b;
+    }
+    diff.ct_eq(&0).into()
 }
 
 pub fn bearer_matches_any(token: &str, secrets: &[String]) -> bool {

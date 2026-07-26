@@ -55,7 +55,10 @@ impl IntoResponse for AppError {
                     "internal server error".to_string(),
                 )
             }
-            AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
+            AppError::Upstream(m) => {
+                tracing::warn!(error = %m, "upstream error while handling request");
+                (StatusCode::BAD_GATEWAY, "upstream error".to_string())
+            }
             AppError::Internal(m) => {
                 tracing::warn!(error = %m, "internal error while handling request");
                 (
@@ -132,6 +135,17 @@ mod tests {
         let e = sqlx::Error::RowNotFound;
         let app: AppError = e.into();
         assert!(matches!(app, AppError::Db(_)));
+    }
+
+    #[tokio::test]
+    async fn upstream_errors_do_not_expose_details_to_clients() {
+        let resp = AppError::Upstream("provider echoed token Bearer secret".into()).into_response();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["message"], "upstream error");
     }
 
     #[tokio::test]

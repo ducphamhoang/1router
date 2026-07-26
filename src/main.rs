@@ -54,7 +54,12 @@ async fn main() -> Result<()> {
             addr
         };
         let url = format!("http://{host}/health");
-        let resp = reqwest::Client::new().get(url).send().await?;
+        let resp = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()?
+            .get(url)
+            .send()
+            .await?;
         if resp.status().is_success() {
             return Ok(());
         }

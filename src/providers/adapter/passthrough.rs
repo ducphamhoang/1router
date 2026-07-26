@@ -19,12 +19,17 @@ fn is_private_host(host: &str) -> bool {
     }
     match host.parse::<IpAddr>() {
         Ok(IpAddr::V4(ip)) => {
+            let [a, b, _, _] = ip.octets();
             ip.is_loopback()
                 || ip.is_private()
                 || ip.is_link_local()
                 || ip.is_unspecified()
                 || ip.is_broadcast()
                 || ip.is_multicast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 198 && matches!(b, 18 | 19))
+                || a >= 240
         }
         Ok(IpAddr::V6(ip)) => {
             ip.is_loopback()

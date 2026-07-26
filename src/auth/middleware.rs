@@ -1,8 +1,8 @@
+use axum::Json;
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 
 use crate::admin::auth::session;
@@ -39,6 +39,10 @@ pub async fn require_admin_session(
 
     if let Some(raw) = session::extract_cookie(headers, https) {
         if let Ok(Some(row)) = session::validate_session(&state.db, raw).await {
+            if !csrf_header_ok(req.method(), headers) {
+                return missing_csrf_response();
+            }
+
             let _ = session::renew_if_needed(
                 &state.db,
                 &row.token_hash,
@@ -75,34 +79,41 @@ pub async fn require_admin_session(
 }
 
 pub async fn require_csrf_header(req: Request, next: Next) -> Response {
-    if req.method() != Method::GET {
-        let ok = req
-            .headers()
-            .get("x-requested-with")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v == "1router-ui")
-            .unwrap_or(false);
-
-        if !ok {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": { "message": "missing X-Requested-With header" } })),
-            )
-                .into_response();
-        }
+    if !csrf_header_ok(req.method(), req.headers()) {
+        return missing_csrf_response();
     }
 
     next.run(req).await
 }
 
+fn csrf_header_ok(method: &Method, headers: &HeaderMap) -> bool {
+    if method == Method::GET {
+        return true;
+    }
+
+    headers
+        .get("x-requested-with")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "1router-ui")
+        .unwrap_or(false)
+}
+
+fn missing_csrf_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": { "message": "missing X-Requested-With header" } })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod csrf_tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::middleware;
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -185,11 +196,11 @@ mod require_admin_session_tests {
     use crate::core::db::init_pool;
     use crate::core::state::{AppState, ConfigSnapshot, SecretOrigin};
     use arc_swap::ArcSwap;
+    use axum::Router;
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use axum::middleware;
     use axum::routing::get;
-    use axum::Router;
     use dashmap::DashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -231,7 +242,7 @@ mod require_admin_session_tests {
 
     fn app(state: AppState) -> Router {
         Router::new()
-            .route("/protected", get(|| async { "ok" }))
+            .route("/protected", get(|| async { "ok" }).post(|| async { "ok" }))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 require_admin_session,
@@ -273,6 +284,24 @@ mod require_admin_session_tests {
     }
 
     #[tokio::test]
+    async fn require_admin_session_accepts_valid_bearer_post_without_csrf_header() {
+        let state = state().await;
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/protected")
+                    .header(header::AUTHORIZATION, "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn require_admin_session_accepts_valid_session_cookie() {
         let state = state().await;
         let (raw, _) = session::create_session(&state.db).await.unwrap();
@@ -289,6 +318,26 @@ mod require_admin_session_tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_admin_session_rejects_session_cookie_post_without_csrf_header() {
+        let state = state().await;
+        let (raw, _) = session::create_session(&state.db).await.unwrap();
+
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/protected")
+                    .header(header::COOKIE, format!("admin_session={raw}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

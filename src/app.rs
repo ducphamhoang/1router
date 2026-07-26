@@ -16,12 +16,10 @@ pub fn build_router(state: AppState) -> Router {
             require_admin_session,
         ));
 
-    let admin_public = crate::admin::auth::routes::public_routes();
-
-    let admin = Router::new()
-        .merge(admin_authenticated)
-        .merge(admin_public)
+    let admin_public = crate::admin::auth::routes::public_routes()
         .layer(axum::middleware::from_fn(require_csrf_header));
+
+    let admin = Router::new().merge(admin_authenticated).merge(admin_public);
 
     let proxy = crate::proxy::routes::routes().route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
@@ -50,7 +48,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use axum::body::Body;
     use axum::extract::ConnectInfo;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use serde_json::json;
     use std::net::SocketAddr;
     use std::sync::Arc;

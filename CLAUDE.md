@@ -64,6 +64,10 @@ cargo, don't run git commands, report DONE/DONE_WITH_CONCERNS/BLOCKED).
   `cargo fetch` (with real network, outside Codex) whenever a task adds a
   new dependency, *including* transitive deps of `[dev-dependencies]` (a
   plain `cargo build` doesn't pull those in).
+- Once the `ui` feature is default-on, every `cargo build --offline` /
+  `cargo test --offline` invocation dispatched into a Codex worktree must add
+  `--no-default-features` — the sandbox has neither network nor `node` /
+  `npm`, so `build.rs`'s shellout fails fast otherwise.
 - **Cannot bind a local TCP listener** (`TcpListener::bind` →
   `PermissionDenied`) — any test using `tests/common::spawn_app` (which
   binds a real socket for true end-to-end HTTP testing) will report BLOCKED
@@ -111,3 +115,27 @@ next phase; log Minor findings in the ledger.
   `wire_format`**: OpenAi → `Authorization: Bearer`, Anthropic →
   `x-api-key` + `anthropic-version: 2023-06-01`. Don't default to Bearer
   for everything.
+- Per-source-IP login rate limiting needs `ConnectInfo<SocketAddr>`, which
+  requires
+  `axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())`
+  at **both** `axum::serve` call sites (`src/main.rs` and
+  `tests/common::spawn_app`) — missing one silently compiles but the other
+  call site never sees real client IPs. Same shape of trap as the
+  `:id`-vs-`{id}` axum 0.7 gotcha.
+- Cargo build scripts (`build.rs`) do not see feature activation via
+  `cfg!(feature = "...")` — use the `CARGO_FEATURE_<NAME>` env var instead;
+  `cfg!()` reflects `build.rs`'s own compilation, not the crate being built.
+- The admin UI's CSRF protection (`require_csrf_header` / the CSRF check
+  inside `require_admin_session`) deliberately does NOT apply to
+  Bearer-authenticated `/admin/*` requests — only to
+  session-cookie-authenticated ones (plus the login endpoint itself, which
+  has no Bearer path). This is intentional: a browser never automatically
+  attaches an `Authorization` header cross-site the way it does cookies, so
+  Bearer-authenticated requests are not CSRF-vulnerable in the first place.
+  An early implementation applied the CSRF header requirement universally
+  (all non-GET `/admin/*` regardless of auth method), which silently broke 6
+  pre-existing integration tests doing admin mutations via Bearer auth
+  (`admin_pools`, `admin_settings`, `admin_export_import`, `admin_providers`,
+  `codex_oauth`, plus regression checks) before being caught during Phase E
+  integration. Do not "fix" the Bearer exemption back to a universal CSRF
+  check — that reintroduces the regression.

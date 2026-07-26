@@ -1,22 +1,96 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use router::core::config::Config;
+use router::core::config::{self, Config, SecretSource};
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
 use router::core::state::{load_snapshot, AppState};
+use router::onboarding;
 use router::providers::refresh_task::spawn_background_refresh;
 use router::seed::seed_if_configured;
 use router::telemetry::logging::init_tracing;
 use router::telemetry::request_log::spawn_writer;
 
+/// seed_if_configured needs a Config (for `seed_path`), but the secret may
+/// not exist yet at this point in boot. The seed only ever reads
+/// `cfg.seed_path`, so build a throwaway Config with a dummy secret for it.
+async fn seed_if_configured_first(db: &sqlx::SqlitePool) -> Result<()> {
+    let cfg = Config::from_env_with_secret(String::new())?;
+    seed_if_configured(db, &cfg).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
 
-    let cfg = Config::from_env()?;
-    let db = init_pool(&cfg.sqlite_path).await?;
-    seed_if_configured(&db, &cfg).await?;
+    let sqlite_path = config::sqlite_path_from_env();
+
+    // Subcommand check first, before any other startup work. One deliberate
+    // arg check instead of a CLI parser dependency (spec non-goal).
+    if std::env::args().nth(1).as_deref() == Some("setup") {
+        if !onboarding::stdin_is_tty() {
+            eprintln!(
+                "`1router setup` is interactive and needs a terminal on stdin. \
+                 For scripted config, set ROUTER_SEED_PATH to a config JSON file instead."
+            );
+            std::process::exit(2);
+        }
+        let db = init_pool(&sqlite_path).await?;
+        // build_client needs a Config, and a Config needs a secret - which the
+        // wizard may be about to create. Use a plain client for the wizard's
+        // own requests (only the OAuth exchange + model probes) rather than
+        // ordering the two around each other.
+        let http = reqwest::Client::new();
+        onboarding::run_wizard(&db, &http, &sqlite_path).await?;
+        return Ok(());
+    }
+
+    // Normal boot. Resolve the secret before anything can need it.
+    let secret = match config::resolve_shared_secret(&sqlite_path)? {
+        SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s),
+        SecretSource::BootstrapNeeded if onboarding::stdin_is_tty() => None, // wizard will make one
+        SecretSource::BootstrapNeeded => {
+            // Headless first boot: auto-generate, persist, and log it ONCE.
+            let s = config::generate_secret();
+            config::persist_secret(&sqlite_path, &s)?;
+            tracing::info!(
+                secret = %s,
+                path = ?config::secret_file_path(&sqlite_path),
+                "generated a new admin shared secret - SAVE THIS NOW, it will not be logged \
+                 again. Set ROUTER_SHARED_SECRET to control it explicitly."
+            );
+            Some(s)
+        }
+    };
+
+    let db = init_pool(&sqlite_path).await?;
+    seed_if_configured_first(&db).await?;
+
+    // First-boot wizard: empty DB + no seed file + a real terminal. Any one of
+    // those missing means "don't block a headless/scripted deployment".
+    let seed_configured = std::env::var("ROUTER_SEED_PATH").is_ok();
+    let mut wizard_already_ran = false;
+    let secret = match secret {
+        Some(s) => s,
+        None => {
+            // BootstrapNeeded + TTY: the wizard both creates the secret and
+            // (optionally) the first provider, and hands the secret back.
+            let http = reqwest::Client::new();
+            let s = onboarding::run_wizard(&db, &http, &sqlite_path).await?;
+            wizard_already_ran = true;
+            s
+        }
+    };
+    if !wizard_already_ran
+        && !seed_configured
+        && onboarding::stdin_is_tty()
+        && onboarding::providers_table_is_empty(&db).await?
+    {
+        let http = reqwest::Client::new();
+        onboarding::run_wizard(&db, &http, &sqlite_path).await?;
+    }
+
+    let cfg = Config::from_env_with_secret(secret)?;
     let http = build_client(&cfg);
     let snapshot = load_snapshot(&db).await?;
     let log_tx = spawn_writer(db.clone(), 4096, 100);

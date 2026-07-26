@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use sqlx::SqlitePool;
 
+use crate::admin::auth::rate_limit::LoginAttemptMap;
 use crate::core::config::Config;
 use crate::core::error::AppError;
 use crate::core::model::{LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
@@ -45,6 +46,7 @@ pub struct AppState {
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
     pub refresh_locks: RefreshLocks,
+    pub login_attempts: LoginAttemptMap,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {

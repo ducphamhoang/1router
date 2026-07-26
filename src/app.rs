@@ -65,6 +65,7 @@ mod tests {
             runtime: Arc::new(dashmap::DashMap::new()),
             log_tx: tx,
             refresh_locks: Arc::new(dashmap::DashMap::new()),
+            login_attempts: Arc::new(dashmap::DashMap::new()),
             db,
         }
     }

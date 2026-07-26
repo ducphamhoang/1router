@@ -59,3 +59,31 @@ jobs:
           name: 1router-${{ github.ref_name }}-${{ matrix.target }}
           path: 1router-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
           retention-days: 7
+
+  release:
+    name: release
+    needs: binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

@@ -2,6 +2,7 @@ pub mod admin;
 pub mod app;
 pub mod auth;
 pub mod core;
+pub mod onboarding;
 pub mod pools;
 pub mod providers;
 pub mod proxy;

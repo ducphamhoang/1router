@@ -89,7 +89,11 @@ pub async fn handle_proxy(
         tried.push(provider.id.clone());
         last_provider = provider.id.clone();
 
-        let adapter = adapter_for(provider, state.http.clone());
+        let adapter = adapter_for(
+            provider,
+            state.http.clone(),
+            state.config.allow_insecure_upstreams,
+        );
         let creds = credentials_for(&state, provider).await;
 
         let req = match adapter.build_request(&body, &creds).await {

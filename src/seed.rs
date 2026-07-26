@@ -44,6 +44,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
             sqlite_path: ":memory:".into(),
             shared_secret: "s".into(),
+            shared_secrets: vec!["s".into()],
             admin_secret: None,
             seed_path: Some(path),
             connect_timeout: Duration::from_secs(1),
@@ -51,6 +52,7 @@ mod tests {
             idle_timeout: Duration::from_secs(1),
             max_body_bytes: 1024,
             max_concurrent_requests: 256,
+            allow_insecure_upstreams: true,
             drain_timeout: Duration::from_secs(1),
         }
     }

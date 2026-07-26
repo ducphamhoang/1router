@@ -28,6 +28,7 @@ async fn spawn_app() -> TestApp {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path.to_string_lossy().into_owned(),
         shared_secret: secret,
+        shared_secrets: vec!["test-secret".into()],
         admin_secret: None,
         seed_path: None,
         connect_timeout: Duration::from_secs(1),
@@ -35,6 +36,7 @@ async fn spawn_app() -> TestApp {
         idle_timeout: Duration::from_secs(1),
         max_body_bytes: 1024,
         max_concurrent_requests: 256,
+        allow_insecure_upstreams: true,
         drain_timeout: Duration::from_secs(1),
     };
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);

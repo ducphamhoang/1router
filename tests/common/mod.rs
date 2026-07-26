@@ -51,6 +51,7 @@ async fn spawn_app_with_options(
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path,
         shared_secret: secret.clone(),
+        shared_secrets: vec![secret.clone()],
         admin_secret: admin_secret.clone(),
         seed_path: None,
         connect_timeout: std::time::Duration::from_secs(10),
@@ -58,6 +59,7 @@ async fn spawn_app_with_options(
         idle_timeout: std::time::Duration::from_secs(120),
         max_body_bytes: 10 * 1024 * 1024,
         max_concurrent_requests: 256,
+        allow_insecure_upstreams: true,
         drain_timeout: std::time::Duration::from_secs(30),
     };
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();

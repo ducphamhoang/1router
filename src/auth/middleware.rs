@@ -12,6 +12,10 @@ pub fn bearer_matches(token: &str, secret: &str) -> bool {
     token.len() == secret.len() && token.as_bytes().ct_eq(secret.as_bytes()).into()
 }
 
+pub fn bearer_matches_any(token: &str, secrets: &[String]) -> bool {
+    secrets.iter().any(|secret| bearer_matches(token, secret))
+}
+
 fn bearer_token(req: &Request) -> Option<&str> {
     req.headers()
         .get("authorization")
@@ -29,7 +33,7 @@ fn unauthorized() -> Response {
 
 pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let ok = bearer_token(&req)
-        .map(|token| bearer_matches(token, &state.config.shared_secret))
+        .map(|token| bearer_matches_any(token, &state.config.shared_secrets))
         .unwrap_or(false);
 
     if ok {
@@ -62,12 +66,20 @@ pub async fn require_admin_bearer(
 
 #[cfg(test)]
 mod tests {
-    use super::bearer_matches;
+    use super::{bearer_matches, bearer_matches_any};
 
     #[test]
     fn bearer_match_requires_exact_secret() {
         assert!(bearer_matches("secret", "secret"));
         assert!(!bearer_matches("secret", "secrex"));
         assert!(!bearer_matches("secret", "secret-longer"));
+    }
+
+    #[test]
+    fn bearer_match_accepts_rotated_secret_set() {
+        let secrets = vec!["current".to_string(), "previous".to_string()];
+        assert!(bearer_matches_any("previous", &secrets));
+        assert!(bearer_matches_any("current", &secrets));
+        assert!(!bearer_matches_any("unknown", &secrets));
     }
 }

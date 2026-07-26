@@ -7,6 +7,7 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub sqlite_path: String,
     pub shared_secret: String,
+    pub shared_secrets: Vec<String>,
     pub admin_secret: Option<String>,
     pub seed_path: Option<PathBuf>,
     pub connect_timeout: Duration,
@@ -14,7 +15,15 @@ pub struct Config {
     pub idle_timeout: Duration,
     pub max_body_bytes: usize,
     pub max_concurrent_requests: usize,
+    pub allow_insecure_upstreams: bool,
     pub drain_timeout: Duration,
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(default)
 }
 
 fn env_secs(key: &str, default: u64) -> Duration {
@@ -122,6 +131,23 @@ pub fn persist_secret(sqlite_path: &str, secret: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_shared_secrets(primary: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |s: &str| {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() && !out.iter().any(|x| x == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    };
+    push(primary);
+    if let Ok(extra) = std::env::var("ROUTER_SHARED_SECRETS") {
+        for item in extra.split(',') {
+            push(item);
+        }
+    }
+    out
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Config> {
         let sqlite_path = sqlite_path_from_env();
@@ -152,10 +178,13 @@ impl Config {
             .filter(|v| *v > 0)
             .unwrap_or(256);
 
+        let shared_secrets = parse_shared_secrets(&shared_secret);
+
         Ok(Config {
             listen_addr,
             sqlite_path: sqlite_path_from_env(),
             shared_secret,
+            shared_secrets,
             admin_secret: std::env::var("ROUTER_ADMIN_SECRET")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -165,6 +194,7 @@ impl Config {
             idle_timeout: env_secs("ROUTER_IDLE_TIMEOUT", 120),
             max_body_bytes,
             max_concurrent_requests,
+            allow_insecure_upstreams: env_bool("ROUTER_ALLOW_INSECURE_UPSTREAMS", false),
             drain_timeout: env_secs("ROUTER_DRAIN_TIMEOUT", 30),
         })
     }
@@ -194,16 +224,19 @@ mod tests {
         std::env::set_var("ROUTER_SHARED_SECRET", "s3cret");
         std::env::remove_var("ROUTER_SEED_PATH");
         std::env::remove_var("ROUTER_ADMIN_SECRET");
+        std::env::remove_var("ROUTER_SHARED_SECRETS");
 
         let c = Config::from_env().unwrap();
         assert_eq!(c.listen_addr.to_string(), "127.0.0.1:9999");
         assert_eq!(c.sqlite_path, "/tmp/x.db");
         assert_eq!(c.shared_secret, "s3cret");
+        assert_eq!(c.shared_secrets, vec!["s3cret".to_string()]);
         assert!(c.seed_path.is_none());
         assert!(c.admin_secret.is_none());
         assert_eq!(c.connect_timeout, std::time::Duration::from_secs(10));
         assert_eq!(c.max_body_bytes, 10 * 1024 * 1024);
         assert_eq!(c.max_concurrent_requests, 256);
+        assert!(!c.allow_insecure_upstreams);
 
         std::env::remove_var("ROUTER_SHARED_SECRET");
         std::env::remove_var("ROUTER_ADMIN_SECRET");
@@ -224,6 +257,22 @@ mod tests {
 
         std::env::remove_var("ROUTER_SHARED_SECRET");
         std::env::remove_var("ROUTER_ADMIN_SECRET");
+    }
+
+    #[test]
+    fn from_env_reads_rotated_proxy_secrets() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        std::env::set_var("ROUTER_SQLITE_PATH", db.to_str().unwrap());
+        std::env::set_var("ROUTER_SHARED_SECRET", "primary");
+        std::env::set_var("ROUTER_SHARED_SECRETS", "old, primary, next");
+
+        let c = Config::from_env().unwrap();
+        assert_eq!(c.shared_secrets, vec!["primary", "old", "next"]);
+
+        std::env::remove_var("ROUTER_SHARED_SECRET");
+        std::env::remove_var("ROUTER_SHARED_SECRETS");
     }
 
     #[test]

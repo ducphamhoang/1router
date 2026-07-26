@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -10,14 +12,70 @@ use crate::proxy::backoff;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+fn is_private_host(host: &str) -> bool {
+    let host = host.trim_matches(&['[', ']'][..]);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+        }
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || matches!(ip.segments()[0] & 0xfe00, 0xfc00)
+                || matches!(ip.segments()[0] & 0xffc0, 0xfe80)
+        }
+        Err(_) => false,
+    }
+}
+
+fn validate_upstream_url(
+    raw: &str,
+    allow_insecure_upstreams: bool,
+) -> Result<reqwest::Url, AppError> {
+    let url =
+        reqwest::Url::parse(raw).map_err(|_| AppError::Internal("invalid upstream URL".into()))?;
+    match url.scheme() {
+        "https" => {}
+        "http" if allow_insecure_upstreams => {}
+        _ => {
+            return Err(AppError::Internal(
+                "upstream URL must use https unless explicitly allowed".into(),
+            ));
+        }
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::Internal("upstream URL missing host".into()))?;
+    if !allow_insecure_upstreams && is_private_host(host) {
+        return Err(AppError::Internal(
+            "private-network upstream URL blocked".into(),
+        ));
+    }
+    Ok(url)
+}
+
 pub struct PassthroughAdapter {
     provider: Provider,
     http: reqwest::Client,
+    allow_insecure_upstreams: bool,
 }
 
 impl PassthroughAdapter {
-    pub fn new(provider: Provider, http: reqwest::Client) -> Self {
-        Self { provider, http }
+    pub fn new(provider: Provider, http: reqwest::Client, allow_insecure_upstreams: bool) -> Self {
+        Self {
+            provider,
+            http,
+            allow_insecure_upstreams,
+        }
     }
 }
 
@@ -36,10 +94,11 @@ impl ProviderAdapter for PassthroughAdapter {
                 serde_json::Value::String(self.provider.upstream_model.clone()),
             );
         }
-        let url =
+        let raw_url =
             self.provider.base_url.clone().ok_or_else(|| {
                 AppError::Internal("passthrough provider missing base_url".into())
             })?;
+        let url = validate_upstream_url(&raw_url, self.allow_insecure_upstreams)?;
 
         let mut builder = self.http.post(url).json(&json);
         if let Some(key) = creds.api_key.as_ref() {
@@ -123,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_rewrites_model_and_sets_auth() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new());
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), true);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "gpt-4o", "messages": []
@@ -149,7 +208,7 @@ mod tests {
     async fn build_request_uses_anthropic_headers_for_anthropic_wire_format() {
         let mut p = prov();
         p.wire_format = WireFormat::Anthropic;
-        let a = PassthroughAdapter::new(p, reqwest::Client::new());
+        let a = PassthroughAdapter::new(p, reqwest::Client::new(), true);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({ "model": "claude", "messages": [] })).unwrap(),
         );
@@ -170,9 +229,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn blocks_private_upstream_by_default() {
+        let mut p = prov();
+        p.base_url = Some("http://127.0.0.1:8080/v1/chat/completions".into());
+        let a = PassthroughAdapter::new(p, reqwest::Client::new(), false);
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "gpt-4o", "messages": []
+            }))
+            .unwrap(),
+        );
+        let err = a.build_request(&body, &creds()).await.unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)));
+    }
+
     #[test]
     fn needs_refresh_is_false() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new());
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), true);
         assert!(!a.needs_refresh(&creds()));
     }
 }

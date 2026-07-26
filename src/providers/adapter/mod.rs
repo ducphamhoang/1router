@@ -39,11 +39,17 @@ pub trait ProviderAdapter: Send + Sync {
     async fn refresh_credentials(&self, creds: &Credentials) -> Result<Credentials, RefreshError>;
 }
 
-pub fn adapter_for(provider: &Provider, http: reqwest::Client) -> Box<dyn ProviderAdapter> {
+pub fn adapter_for(
+    provider: &Provider,
+    http: reqwest::Client,
+    allow_insecure_upstreams: bool,
+) -> Box<dyn ProviderAdapter> {
     match provider.kind {
-        ProviderKind::Passthrough => {
-            Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
-        }
+        ProviderKind::Passthrough => Box::new(passthrough::PassthroughAdapter::new(
+            provider.clone(),
+            http,
+            allow_insecure_upstreams,
+        )),
         ProviderKind::OauthCodex => Box::new(codex::CodexAdapter::new(provider.clone(), http)),
     }
 }

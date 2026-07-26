@@ -323,7 +323,7 @@ pub async fn probe_and_set_model(
         let http = http.clone();
         async move {
             println!("  trying \"{model}\"...");
-            let adapter = adapter_for(&candidate, http.clone());
+            let adapter = adapter_for(&candidate, http.clone(), true);
             let req = adapter
                 .build_request(&body, &creds)
                 .await

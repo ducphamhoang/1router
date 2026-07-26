@@ -4494,11 +4494,14 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    globals: true,
     setupFiles: ["./src/test/setup.ts"],
     restoreMocks: true
   }
 });
 ```
+
+**(Implementation-time correction)** `globals: true` above was added after actually running the accumulated Phase C test files against a plan-conformant config without it: any test file with more than one test that renders a component (e.g. `Login.test.tsx`'s three tests) fails on the second and later tests with "Found multiple elements" — `@testing-library/react`'s automatic between-test cleanup only registers itself when it detects a global `afterEach`, which requires Vitest's `globals: true`. Without this, every multi-test component test file in Tasks C3-C6 would fail non-deterministically depending on test order. Confirmed fixed by re-running `Login.test.tsx` with `globals: true` added — 3/3 pass.
 
 Create or keep `frontend/src/lib/apiClient.test.ts`:
 

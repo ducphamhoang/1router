@@ -1,4 +1,5 @@
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Login } from "./pages/Login";
 
 function Placeholder({ title }: { title: string }) {
   return <h1>{title}</h1>;
@@ -13,7 +14,7 @@ export function App() {
         <NavLink to="/ui/settings">Settings</NavLink>
       </nav>
       <Routes>
-        <Route path="/ui/login" element={<Placeholder title="Login" />} />
+        <Route path="/ui/login" element={<Login />} />
         <Route path="/ui/providers" element={<Placeholder title="Providers" />} />
         <Route path="/ui/pools" element={<Placeholder title="Pools" />} />
         <Route path="/ui/settings" element={<Placeholder title="Settings" />} />

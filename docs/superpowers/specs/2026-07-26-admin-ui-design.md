@@ -101,18 +101,31 @@ CREATE TABLE server_secrets (
 ```
 
 **(review fix, C3 — weak default password, both agents' top Critical finding.)**
-`admin_users` is seeded on first boot if empty, mirroring the exact pattern
-`main.rs` already uses for the shared secret's headless bootstrap
-(`config::generate_secret()` + `persist_secret()` + log-once at
-`main.rs:59-66`): username `admin`, a **randomly generated** password (not a
-hardcoded `123456`), hashed with argon2 and stored in `admin_users`, with the
-plaintext logged exactly once at startup (`tracing::info!` at `info` level,
-same as the shared secret today) so an operator watching first-boot logs can
-capture it. No forced rotation on first login — matches the earlier decision
-that this stays a simple single-operator tool — but the bootstrap value is no
-longer guessable. `PATCH /admin/auth/password` (below) is how it gets changed
-afterward, same as today's `ROUTER_SHARED_SECRET`/`persist_secret` path for
-the shared secret.
+`admin_users` is seeded on first boot if empty. This is a fully separate
+bootstrap flow from the shared secret's — different table, different
+credential, never shared or merged — but it mirrors the same **dual
+TTY-vs-headless pattern** `main.rs`/`onboarding.rs` already use for the shared
+secret (`main.rs:48-66`: `onboarding::resolve_or_prompt_secret` when a TTY is
+present, `config::generate_secret()` + `persist_secret()` + log-once when
+headless), because it's the same underlying problem — a credential must exist
+before first use, and a human at a terminal should get to choose one they'll
+actually remember rather than being handed a random string to memorize:
+
+- **Interactive (TTY present, e.g. running `1router setup`)**: prompt the
+  operator to type their own admin password directly (same UX shape as the
+  existing shared-secret prompt), confirm it, hash with argon2, store in
+  `admin_users`. Username is always `admin` (not a secret, no prompt needed).
+- **Headless (no TTY, e.g. plain Docker boot)**: no one to prompt, so
+  auto-generate a random password, hash it, store it, and log the plaintext
+  **exactly once** at startup (`tracing::info!`, same level/treatment as the
+  shared secret today) — the expectation here matches the shared secret's
+  existing headless path: whoever's provisioning the deployment captures it
+  into their secrets manager at deploy time.
+- Either path: no forced rotation on first login (matches the earlier
+  decision to keep this a simple single-operator tool). `PATCH
+  /admin/auth/password` (below) lets the operator set something memorable at
+  any time after — the immediate next step for anyone who got the
+  auto-generated headless value and wants their own.
 
 **New `admin::auth` module**:
 

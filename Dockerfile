@@ -2,12 +2,20 @@
 FROM rust:1.90-alpine AS builder
 # rustls (not openssl) handles TLS and sqlx's sqlite feature bundles/statically
 # links libsqlite3, so no OpenSSL dependency is actually needed at build or
-# runtime - musl-dev + sqlite-static is sufficient.
-RUN apk add --no-cache musl-dev sqlite-static pkgconfig
+# runtime - musl-dev + sqlite-static is sufficient. The embedded admin UI adds
+# Node/npm as build-time-only dependencies.
+RUN apk add --no-cache musl-dev sqlite-static pkgconfig nodejs npm
 WORKDIR /app
+
+COPY frontend/package*.json frontend/
+RUN cd frontend && npm ci
+COPY frontend/ frontend/
+RUN cd frontend && npm run build
+
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
 COPY migrations ./migrations
+COPY build.rs ./build.rs
 COPY src ./src
 # TARGETARCH is supplied by buildx (docker/amd64 -> "amd64", docker/arm64 ->
 # "arm64"). Map it to the matching Rust musl triple, then stage the binary at a

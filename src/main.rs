@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
 
     let db = init_pool(&sqlite_path).await?;
     seed_if_configured_first(&db).await?;
+    onboarding::resolve_or_prompt_admin_password(&db).await?;
 
     // First-boot wizard (provider/pool prompts): empty DB + no seed file + a
     // real terminal. A seed file always wins over interactive setup, even if

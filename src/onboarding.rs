@@ -223,6 +223,211 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     Ok(p)
 }
 
+use crate::providers::adapter::codex::oauth;
+use crate::providers::adapter::{adapter_for, Credentials};
+use crate::providers::oauth_routes::complete_oauth_exchange;
+use crate::providers::queries::ProviderPatch;
+
+/// One minimal chat-completion body, reused for every probe attempt. The
+/// adapter rewrites `model` to the provider's upstream_model, so the value
+/// here is irrelevant - but it must be present and a string.
+fn probe_body() -> bytes::Bytes {
+    bytes::Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "model": "probe",
+            "messages": [{ "role": "user", "content": "Say OK and nothing else." }],
+            "max_tokens": 8
+        }))
+        .unwrap(),
+    )
+}
+
+/// Mirrors `proxy::flow::credentials_for` (private there); five field copies
+/// is not worth a cross-module extraction.
+async fn credentials_for(db: &sqlx::SqlitePool, provider: &Provider) -> Credentials {
+    match provider_queries::get_oauth_state(db, &provider.id).await {
+        Ok(Some(os)) => Credentials {
+            api_key: provider.api_key.clone(),
+            access_token: os.access_token,
+            refresh_token: os.refresh_token,
+            id_token: os.id_token,
+            access_expires_at: os.access_expires_at,
+            provider_data: os.provider_data,
+        },
+        _ => Credentials {
+            api_key: provider.api_key.clone(),
+            ..Default::default()
+        },
+    }
+}
+
+pub(crate) async fn persist_probe_result(
+    db: &sqlx::SqlitePool,
+    provider: &mut Provider,
+    outcome: &ProbeOutcome,
+) -> anyhow::Result<()> {
+    match outcome {
+        ProbeOutcome::Found(model) => {
+            provider_queries::update_provider(
+                db,
+                &provider.id,
+                &ProviderPatch { upstream_model: Some(model.clone()), ..Default::default() },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to set upstream_model: {e}"))?;
+            provider.upstream_model = model.clone();
+        }
+        // Not an error per the spec: leave `pending` in place and tell the
+        // user how to fix it once they know the right value.
+        ProbeOutcome::AllFailed(_) => {}
+    }
+    Ok(())
+}
+
+/// Probe CANDIDATE_MODELS in-process and persist the winner.
+///
+/// Spec gaps 3+4: the spec's probe went over HTTP through the gateway's own
+/// /v1/chat/completions and PATCHed upstream_model per attempt. At wizard time
+/// no listener exists, so we build the adapter request directly and mutate an
+/// in-memory clone per attempt, persisting only the winner. Same end state.
+pub async fn probe_and_set_model(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+    provider: &mut Provider,
+) -> anyhow::Result<ProbeOutcome> {
+    let creds = credentials_for(db, provider).await;
+    let body = probe_body();
+    println!(
+        "Probing which model this ChatGPT account accepts \
+         (this sends {} tiny real requests)...",
+        CANDIDATE_MODELS.len()
+    );
+
+    let outcome = probe_first_success(&CANDIDATE_MODELS, |model| {
+        let mut candidate = provider.clone();
+        candidate.upstream_model = model.clone();
+        let creds = creds.clone();
+        let body = body.clone();
+        let http = http.clone();
+        async move {
+            println!("  trying \"{model}\"...");
+            let adapter = adapter_for(&candidate, http.clone());
+            let req = adapter
+                .build_request(&body, &creds)
+                .await
+                .map_err(|e| format!("request build failed: {e}"))?;
+            let resp = http
+                .execute(req)
+                .await
+                .map_err(|e| format!("request failed: {e}"))?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            Ok((status, text))
+        }
+    })
+    .await;
+
+    match &outcome {
+        ProbeOutcome::Found(m) => println!("  -> using upstream_model \"{m}\""),
+        ProbeOutcome::AllFailed(failures) => {
+            eprintln!("  no candidate model worked; every attempt:");
+            for (model, status, body) in failures {
+                let body: String = body.chars().take(400).collect();
+                eprintln!("    \"{model}\" -> {status}: {body}");
+            }
+            eprintln!(
+                "  leaving upstream_model = \"{PENDING_MODEL}\". Once you know the right \
+                 value, set it with:\n    curl -X PATCH .../admin/providers/{} \\\n      \
+                 -H 'Authorization: Bearer $ROUTER_SHARED_SECRET' \\\n      \
+                 -d '{{\"upstream_model\":\"<model>\"}}'",
+                provider.id
+            );
+        }
+    }
+
+    persist_probe_result(db, provider, &outcome).await?;
+    Ok(outcome)
+}
+
+/// Prompt for a Codex provider: create the row, run the PKCE browser dance,
+/// exchange the code, then probe for a working model.
+pub async fn add_codex_provider(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+) -> anyhow::Result<Provider> {
+    let name: String = Input::with_theme(&theme())
+        .with_prompt("Provider name (also used as its id)")
+        .validate_with(|s: &String| -> Result<(), &str> {
+            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+        })
+        .interact_text()?;
+    let name = name.trim().to_string();
+
+    let now = chrono::Utc::now();
+    let mut provider = Provider {
+        id: name.clone(),
+        name,
+        wire_format: WireFormat::OpenAi,
+        kind: ProviderKind::OauthCodex,
+        base_url: None,
+        api_key: None,
+        // Replaced by the probe below; kept if every candidate fails.
+        upstream_model: PENDING_MODEL.to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    provider_queries::insert_provider(db, &provider)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", provider.id))?;
+
+    // PKCE + authorize URL, called directly - no HTTP hop through
+    // /admin/providers/:id/oauth/start.
+    let pkce = oauth::generate_pkce();
+    let state_tok = uuid::Uuid::new_v4().to_string();
+    provider_queries::store_pkce(db, &provider.id, &pkce.verifier, &state_tok)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to store pkce: {e}"))?;
+    let url = oauth::build_authorize_url(&state_tok, &pkce.challenge);
+
+    println!(
+        "\n=== Codex OAuth ===\n\
+         1. Open this URL in a browser and log in to your ChatGPT account:\n\n{url}\n\n\
+         2. The browser will be redirected to http://localhost:1455/auth/callback?... \
+         which will NOT load - that's expected.\n\
+         3. Copy that redirect URL from the address bar and paste it below \
+         (a bare `code=...&state=...` also works).\n"
+    );
+
+    // Re-prompt on a bad paste or a failed exchange without restarting the
+    // whole wizard (spec: error handling).
+    loop {
+        let pasted: String = Input::with_theme(&theme())
+            .with_prompt("Paste the redirect URL")
+            .interact_text()?;
+
+        let (code, state) = match parse_code_and_state(&pasted) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("  {e}");
+                continue;
+            }
+        };
+        match complete_oauth_exchange(db, http, &provider.id, &code, &state).await {
+            Ok(()) => {
+                println!("  login stored.");
+                break;
+            }
+            Err(e) => {
+                eprintln!("  {e} - paste it again (or Ctrl-C to abort)");
+                continue;
+            }
+        }
+    }
+
+    probe_and_set_model(db, http, &mut provider).await?;
+    Ok(provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +639,45 @@ mod tests {
         assert_eq!(p.base_url.as_deref(), Some("https://api.example.com/v1/chat/completions"));
         assert_eq!(p.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(p.upstream_model, "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn probe_outcome_found_persists_the_winning_model() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = provider("cx", WireFormat::OpenAi);
+        p.kind = ProviderKind::OauthCodex;
+        p.base_url = None;
+        p.api_key = None;
+        p.upstream_model = PENDING_MODEL.into();
+        insert_provider(&db, &p).await.unwrap();
+
+        persist_probe_result(&db, &mut p, &ProbeOutcome::Found("gpt-5.4".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(p.upstream_model, "gpt-5.4");
+        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        assert_eq!(stored.upstream_model, "gpt-5.4");
+    }
+
+    #[tokio::test]
+    async fn probe_outcome_all_failed_leaves_the_model_pending() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = provider("cx", WireFormat::OpenAi);
+        p.kind = ProviderKind::OauthCodex;
+        p.upstream_model = PENDING_MODEL.into();
+        insert_provider(&db, &p).await.unwrap();
+
+        persist_probe_result(
+            &db,
+            &mut p,
+            &ProbeOutcome::AllFailed(vec![("gpt-5.4".into(), 400, "nope".into())]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(p.upstream_model, PENDING_MODEL);
+        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        assert_eq!(stored.upstream_model, PENDING_MODEL);
     }
 }

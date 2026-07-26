@@ -42,12 +42,18 @@ struct CompleteBody {
     state: String,
 }
 
-async fn complete(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(b): Json<CompleteBody>,
-) -> Result<Json<Value>, AppError> {
-    let os = queries::get_oauth_state(&s.db, &id)
+/// Validate `state`, exchange `code`, persist tokens, clear the PKCE row.
+///
+/// Extracted from the `complete` handler so the onboarding wizard can run the
+/// exact same exchange in-process (no HTTP hop) instead of duplicating it.
+pub async fn complete_oauth_exchange(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+    provider_id: &str,
+    code: &str,
+    state: &str,
+) -> Result<(), AppError> {
+    let os = queries::get_oauth_state(db, provider_id)
         .await?
         .ok_or_else(|| AppError::BadRequest("no oauth flow in progress; call start first".into()))?;
     let verifier = os
@@ -56,11 +62,11 @@ async fn complete(
     let expected_state = os
         .oauth_state
         .ok_or_else(|| AppError::BadRequest("missing oauth state; call start first".into()))?;
-    if b.state != expected_state {
+    if state != expected_state {
         return Err(AppError::BadRequest("state mismatch".into()));
     }
 
-    let tokens = oauth::exchange_code(&s.http, &b.code, &verifier)
+    let tokens = oauth::exchange_code(http, code, &verifier)
         .await
         .map_err(|e| AppError::BadRequest(format!("code exchange failed: {e}")))?;
 
@@ -79,8 +85,8 @@ async fn complete(
         .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s));
 
     queries::upsert_oauth_tokens(
-        &s.db,
-        &id,
+        db,
+        provider_id,
         Some(&tokens.access_token),
         tokens.refresh_token.as_deref(),
         tokens.id_token.as_deref(),
@@ -88,8 +94,16 @@ async fn complete(
         &provider_data,
     )
     .await?;
-    queries::clear_pkce(&s.db, &id).await?;
-    reload_snapshot(&s).await?;
+    queries::clear_pkce(db, provider_id).await?;
+    Ok(())
+}
 
+async fn complete(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<CompleteBody>,
+) -> Result<Json<Value>, AppError> {
+    complete_oauth_exchange(&s.db, &s.http, &id, &b.code, &b.state).await?;
+    reload_snapshot(&s).await?;
     Ok(Json(json!({ "status": "ok" })))
 }

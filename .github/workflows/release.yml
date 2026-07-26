@@ -87,3 +87,41 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+
+  # Depends on `release` (not parallel with it) so ghcr.io/.../1router:latest
+  # only ever moves once the full binary release for this tag has succeeded.
+  docker:
+    name: docker
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/ducphamhoang/1router:${{ github.ref_name }}
+            ghcr.io/ducphamhoang/1router:latest

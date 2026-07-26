@@ -443,6 +443,48 @@ pub async fn providers_table_is_empty(db: &sqlx::SqlitePool) -> anyhow::Result<b
     Ok(count.0 == 0)
 }
 
+/// Fully separate from resolve_or_prompt_secret: different table, different
+/// credential. Same TTY-vs-headless branch shape as that function.
+pub async fn resolve_or_prompt_admin_password(db: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM admin_users")
+        .fetch_one(db)
+        .await?;
+    if count.0 > 0 {
+        return Ok(());
+    }
+
+    let plain = if stdin_is_tty() {
+        let s: String = Password::with_theme(&theme())
+            .with_prompt("Set an admin UI password (username: admin)")
+            .with_confirmation("Confirm", "passwords did not match")
+            .interact()?;
+        if s.trim().is_empty() {
+            anyhow::bail!("admin password cannot be empty");
+        }
+        s
+    } else {
+        let s = config::generate_secret();
+        tracing::info!(
+            password = %s,
+            "generated a new admin UI password (username: admin) - SAVE THIS NOW, it will not be logged again. Change it later via PATCH /admin/auth/password."
+        );
+        s
+    };
+
+    let hash = crate::admin::auth::password::hash_password(&plain)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO admin_users (id, username, password_hash, updated_at)
+         VALUES (1, 'admin', ?, ?)",
+    )
+    .bind(&hash)
+    .bind(&now)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
 /// Resolve the admin secret, prompting to generate-or-enter one if none
 /// exists yet, and persist it to the sidecar file.
 ///
@@ -841,5 +883,61 @@ mod tests {
 
         insert_provider(&db, &provider("p1", WireFormat::OpenAi)).await.unwrap();
         assert!(!providers_table_is_empty(&db).await.unwrap());
+    }
+}
+
+#[cfg(test)]
+mod admin_bootstrap_tests {
+    use super::*;
+    use crate::core::db::init_pool;
+
+    #[tokio::test]
+    async fn bootstrap_seeds_admin_user_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_bootstrap_empty.db");
+        let db = init_pool(path.to_str().unwrap()).await.unwrap();
+
+        resolve_or_prompt_admin_password(&db).await.unwrap();
+
+        let row: (i64, String) =
+            sqlx::query_as("SELECT count(*), username FROM admin_users")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "admin");
+
+        let password_hash: String =
+            sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(!password_hash.trim().is_empty());
+        assert_ne!(password_hash, "admin");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_is_noop_when_admin_user_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_bootstrap_noop.db");
+        let db = init_pool(path.to_str().unwrap()).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO admin_users (id, username, password_hash, updated_at)
+             VALUES (1, 'admin', 'sentinel', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        resolve_or_prompt_admin_password(&db).await.unwrap();
+
+        let row: (i64, String) =
+            sqlx::query_as("SELECT count(*), password_hash FROM admin_users")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "sentinel");
     }
 }

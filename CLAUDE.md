@@ -27,6 +27,18 @@ instead of failing to compile — this bit Phase 1 for real (see plan's P1-3
 fix commit). Grep for `{[a-zA-Z_]*}` in route strings if something 404s
 unexpectedly.
 
+## Onboarding
+
+- `src/onboarding.rs` is the interactive wizard (`1router setup`, plus the
+  first-boot auto-trigger). It is a thin `dialoguer` front end over
+  `providers::queries` / `pools::queries` / `codex::oauth` — put no business
+  logic in it. Its prompt paths are verified by
+  `docs/superpowers/plans/2026-07-26-onboarding-wizard-smoke.md`, not by
+  `cargo test`. Design spec:
+  `docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`.
+- `dialoguer` is a dependency as of Phase 5 — run `cargo fetch` with real
+  network before any `--offline` work if your registry predates it.
+
 ## Working tree
 
 Implementation happens on branch `impl/v1`, off `master` (which holds only

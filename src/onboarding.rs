@@ -185,7 +185,7 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
 
     let wire_format = match Select::with_theme(&theme())
         .with_prompt("Wire format")
-        .items(&["openai", "anthropic"])
+        .items(["openai", "anthropic"])
         .default(0)
         .interact()?
     {
@@ -463,7 +463,7 @@ fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
         config::SecretSource::BootstrapNeeded => {
             let choice = Select::with_theme(&theme())
                 .with_prompt("No admin secret yet. Generate a random one, or enter your own?")
-                .items(&["Generate a random secret (recommended)", "Enter my own"])
+                .items(["Generate a random secret (recommended)", "Enter my own"])
                 .default(0)
                 .interact()?;
             let secret = if choice == 0 {
@@ -530,7 +530,7 @@ pub async fn run_wizard(
     while ask {
         let kind = Select::with_theme(&theme())
             .with_prompt("Provider kind")
-            .items(&["passthrough (OpenAI/Anthropic-compatible API key)",
+            .items(["passthrough (OpenAI/Anthropic-compatible API key)",
                      "Codex OAuth (ChatGPT account)"])
             .default(0)
             .interact()?;

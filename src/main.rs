@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
+        login_attempts: Arc::new(dashmap::DashMap::new()),
     };
 
     spawn_background_refresh(state.clone());
@@ -142,11 +143,14 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     });
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = shutdown_rx.await;
+    })
+    .await?;
     Ok(())
 }
 

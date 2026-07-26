@@ -428,6 +428,147 @@ pub async fn add_codex_provider(
     Ok(provider)
 }
 
+use crate::core::config;
+use std::io::IsTerminal;
+
+pub fn stdin_is_tty() -> bool {
+    std::io::stdin().is_terminal()
+}
+
+/// Same signal `seed.rs` uses for its own first-boot guard.
+pub async fn providers_table_is_empty(db: &sqlx::SqlitePool) -> anyhow::Result<bool> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM providers")
+        .fetch_one(db)
+        .await?;
+    Ok(count.0 == 0)
+}
+
+/// Resolve the admin secret, prompting to generate-or-enter one if none
+/// exists yet, and persist it to the sidecar file.
+///
+/// Persisting is what lets a later `1router setup` skip this step entirely.
+fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
+    match config::resolve_shared_secret(sqlite_path)? {
+        config::SecretSource::Env(s) => {
+            println!("Admin secret: using ROUTER_SHARED_SECRET from the environment.");
+            Ok(s)
+        }
+        config::SecretSource::SidecarFile(s) => {
+            println!(
+                "Admin secret: reusing {:?}.",
+                config::secret_file_path(sqlite_path)
+            );
+            Ok(s)
+        }
+        config::SecretSource::BootstrapNeeded => {
+            let choice = Select::with_theme(&theme())
+                .with_prompt("No admin secret yet. Generate a random one, or enter your own?")
+                .items(&["Generate a random secret (recommended)", "Enter my own"])
+                .default(0)
+                .interact()?;
+            let secret = if choice == 0 {
+                config::generate_secret()
+            } else {
+                let s: String = Password::with_theme(&theme())
+                    .with_prompt("Admin secret (input hidden)")
+                    .with_confirmation("Confirm", "secrets did not match")
+                    .interact()?;
+                let s = s.trim().to_string();
+                if s.is_empty() {
+                    anyhow::bail!("admin secret cannot be empty");
+                }
+                s
+            };
+            // Written before anything else in the wizard proceeds.
+            config::persist_secret(sqlite_path, &secret)?;
+            let path = config::secret_file_path(sqlite_path);
+            println!("Admin secret written to {path:?} (mode 0600).");
+            if choice == 0 {
+                println!("  Your admin secret is:\n\n    {secret}\n");
+                println!(
+                    "  Use it as `Authorization: Bearer <secret>` on /v1/* and /admin/*. \
+                     It is stored in {path:?}; it will not be printed again."
+                );
+            }
+            Ok(secret)
+        }
+    }
+}
+
+/// The wizard. Shared by the first-boot trigger and `1router setup`.
+pub async fn run_wizard(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+    sqlite_path: &str,
+) -> anyhow::Result<String> {
+    println!("\n=== 1router setup ===\n");
+    let secret = resolve_or_prompt_secret(sqlite_path)?;
+
+    // On first boot this is always true; via `1router setup` it may not be,
+    // in which case we go straight to asking whether to add another one.
+    let mut ask = if providers_table_is_empty(db).await? {
+        Confirm::with_theme(&theme())
+            .with_prompt("Add a provider now?")
+            .default(true)
+            .interact()?
+    } else {
+        Confirm::with_theme(&theme())
+            .with_prompt("This gateway already has providers. Add another one?")
+            .default(true)
+            .interact()?
+    };
+
+    if !ask {
+        println!(
+            "Nothing added. Configure providers later via the admin API \
+             (POST /admin/providers, POST /admin/pools, \
+             PUT /admin/pools/:id/members) - see README.md."
+        );
+        return Ok(secret);
+    }
+
+    while ask {
+        let kind = Select::with_theme(&theme())
+            .with_prompt("Provider kind")
+            .items(&["passthrough (OpenAI/Anthropic-compatible API key)",
+                     "Codex OAuth (ChatGPT account)"])
+            .default(0)
+            .interact()?;
+
+        let provider = match kind {
+            0 => add_passthrough_provider(db).await?,
+            _ => add_codex_provider(db, http).await?,
+        };
+
+        // Pool id: what clients will send as `model`.
+        let default_pool = provider.id.clone();
+        let pool_id: String = Input::with_theme(&theme())
+            .with_prompt("Pool id (this is the `model` name clients will request)")
+            .default(default_pool)
+            .interact_text()?;
+        let pool_id = pool_id.trim().to_string();
+        let priority = assign_to_pool(db, &pool_id, &provider).await?;
+        println!(
+            "  added '{}' to pool '{pool_id}' at priority {priority}",
+            provider.id
+        );
+
+        ask = Confirm::with_theme(&theme())
+            .with_prompt("Add another provider?")
+            .default(false)
+            .interact()?;
+    }
+
+    println!("\nSetup complete. Example request:\n");
+    println!(
+        "  curl http://<host>:<port>/v1/chat/completions \\\n    \
+         -H 'Authorization: Bearer <your-admin-secret>' \\\n    \
+         -H 'Content-Type: application/json' \\\n    \
+         -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
+    );
+    Ok(secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +820,14 @@ mod tests {
         assert_eq!(p.upstream_model, PENDING_MODEL);
         let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
         assert_eq!(stored.upstream_model, PENDING_MODEL);
+    }
+
+    #[tokio::test]
+    async fn providers_table_emptiness_predicate() {
+        let db = init_pool(":memory:").await.unwrap();
+        assert!(providers_table_is_empty(&db).await.unwrap());
+
+        insert_provider(&db, &provider("p1", WireFormat::OpenAi)).await.unwrap();
+        assert!(!providers_table_is_empty(&db).await.unwrap());
     }
 }

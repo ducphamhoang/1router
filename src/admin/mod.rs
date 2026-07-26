@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod settings;
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -21,6 +22,7 @@ pub struct ExportDump {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .merge(settings::routes())
         .route("/admin/export", get(export))
         .route("/admin/import", post(import))
 }

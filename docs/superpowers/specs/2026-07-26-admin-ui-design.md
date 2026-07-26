@@ -190,12 +190,31 @@ boot (covers a long-downtime restart). The new `idx_admin_sessions_expires`
 index above keeps this and the per-request expiry check cheap.
 
 **(review fix, I5 — CSRF, SameSite=Strict alone is necessary but not
-sufficient.)** All non-`GET` `/admin/*` requests must carry a custom header
-(e.g. `X-Requested-With: 1router-ui`) or be rejected with 403. A cross-site
+sufficient.)** **(implementation-time correction — scope narrowed to
+cookie-authenticated requests only.)** All non-`GET` `/admin/*` requests
+authenticated via the **session cookie** must carry a custom header (e.g.
+`X-Requested-With: 1router-ui`) or be rejected with 403. A cross-site
 form/fetch can trigger a same-site-cookie-bearing request but cannot set a
 custom header without CORS preflight, and no CORS policy is configured to
 allow that — so this closes the gap cheaply without a token-issuance scheme.
 `apiClient.ts` sets this header on every mutating request.
+
+This check does **not** apply to requests authenticated via the shared-secret
+Bearer header: a CSRF attack works only because a browser automatically
+attaches cookies to a cross-site request — an `Authorization: Bearer` header
+is never automatically attached that way, so a Bearer-authenticated request
+cannot be forged by a CSRF attack in the first place. Requiring the header
+there too would have broken this spec's own stated goal (`require_admin_session`
+accepts cookie OR Bearer specifically so existing curl/CI usage of `/admin/*`
+keeps working unmodified) — an early implementation applied the header check
+universally before authentication, which technically satisfied the letter of
+this bullet but silently broke every Bearer-authenticated script until
+caught by 6 pre-existing integration tests failing during Phase E
+integration. The check now lives inside `require_admin_session` itself:
+cookie-authenticated → CSRF header required; Bearer-authenticated → exempt;
+neither → 401 (CSRF is irrelevant once auth has already failed).
+`require_csrf_header` remains applied to the login endpoint specifically
+(which has no Bearer path and still needs protection against login-CSRF).
 
 **Shared secret becomes an editable setting.**
 **(review fix, C1/C2 — the original spec's "existing snapshot/reload
@@ -287,8 +306,10 @@ Rust, unaffected by the frontend build)**:
   a test proving `/v1/*` auth actually observes a PATCHed secret without a
   restart (the single riskiest behavior in this spec, and the one the
   original draft got wrong).
-- CSRF header enforcement: a mutating request missing `X-Requested-With` is
-  rejected.
+- CSRF header enforcement: a cookie-authenticated mutating request missing
+  `X-Requested-With` is rejected (403); a Bearer-authenticated mutating
+  request missing it is NOT rejected for that reason (Bearer is exempt — see
+  above); the login endpoint (no Bearer path) still requires it.
 - Session cleanup sweep: expired rows are deleted by the background task and
   by the boot-time sweep.
 - Integration test via `tests/common::spawn_app`: login -> cookie -> an

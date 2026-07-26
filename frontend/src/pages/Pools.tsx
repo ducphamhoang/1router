@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { DndContext, DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove } from "@dnd-kit/sortable";
 import { apiJson } from "../lib/apiClient";
@@ -27,6 +27,7 @@ export function Pools() {
   const [poolId, setPoolId] = useState("");
   const [wireFormat, setWireFormat] = useState("openai");
   const [error, setError] = useState<string | null>(null);
+  const latestRequestId = useRef(0);
 
   async function loadPools() {
     setPools(await apiJson<Pool[]>("/admin/pools"));
@@ -53,11 +54,19 @@ export function Pools() {
   }
 
   async function persistMembers(poolId: string, members: PoolMember[]) {
-    await apiJson(`/admin/pools/${poolId}/members`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ members: recomputeMemberPriorities(members) })
-    });
+    const requestId = latestRequestId.current + 1;
+    latestRequestId.current = requestId;
+    try {
+      await apiJson(`/admin/pools/${poolId}/members`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ members: recomputeMemberPriorities(members) })
+      });
+    } catch (error) {
+      if (requestId === latestRequestId.current) {
+        throw error;
+      }
+    }
   }
 
   async function moveMember(pool: Pool, providerId: string, direction: -1 | 1) {
@@ -68,7 +77,11 @@ export function Pools() {
     }
     const members = arrayMove(pool.members, oldIndex, newIndex);
     setPools((current) => current.map((item) => (item.id === pool.id ? { ...item, members } : item)));
-    await persistMembers(pool.id, members);
+    try {
+      await persistMembers(pool.id, members);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Pool reorder failed.");
+    }
   }
 
   async function onDragEnd(pool: Pool, event: DragEndEvent) {

@@ -137,6 +137,92 @@ pub async fn assign_to_pool(
     Ok(priority)
 }
 
+use crate::core::model::{ProviderKind, WireFormat};
+use crate::providers::queries as provider_queries;
+use dialoguer::{Confirm, Input, Password, Select};
+
+fn theme() -> dialoguer::theme::ColorfulTheme {
+    dialoguer::theme::ColorfulTheme::default()
+}
+
+pub(crate) fn build_passthrough_row(
+    name: &str,
+    wire_format: WireFormat,
+    base_url: &str,
+    api_key: &str,
+    upstream_model: &str,
+) -> Provider {
+    let now = chrono::Utc::now();
+    Provider {
+        // The spec deliberately doubles the name as the id: one prompt fewer,
+        // and the id is what shows up in logs/stats where the name would
+        // otherwise be redundant.
+        id: name.to_string(),
+        name: name.to_string(),
+        wire_format,
+        kind: ProviderKind::Passthrough,
+        base_url: Some(base_url.to_string()),
+        api_key: Some(api_key.to_string()),
+        upstream_model: upstream_model.to_string(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Prompt for a passthrough provider and insert it.
+pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<Provider> {
+    // dialoguer blocks the calling thread. That is fine here and NOT worth
+    // wrapping in spawn_blocking: the wizard runs either before the axum
+    // listener exists (first boot) or in a process that never starts one
+    // (`1router setup`), so there is no concurrent work for it to starve.
+    let name: String = Input::with_theme(&theme())
+        .with_prompt("Provider name (also used as its id)")
+        .validate_with(|s: &String| -> Result<(), &str> {
+            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+        })
+        .interact_text()?;
+    let name = name.trim().to_string();
+
+    let wire_format = match Select::with_theme(&theme())
+        .with_prompt("Wire format")
+        .items(&["openai", "anthropic"])
+        .default(0)
+        .interact()?
+    {
+        0 => WireFormat::OpenAi,
+        _ => WireFormat::Anthropic,
+    };
+
+    println!(
+        "  note: base_url is POSTed as-is - include the full upstream path, \
+         e.g. https://api.openai.com/v1/chat/completions"
+    );
+    let base_url: String = Input::with_theme(&theme())
+        .with_prompt("Upstream base_url (full path)")
+        .interact_text()?;
+
+    let api_key: String = Password::with_theme(&theme())
+        .with_prompt("API key (input hidden)")
+        .interact()?;
+
+    let upstream_model: String = Input::with_theme(&theme())
+        .with_prompt("Upstream model (the real model name this provider expects)")
+        .interact_text()?;
+
+    let p = build_passthrough_row(
+        &name,
+        wire_format,
+        base_url.trim(),
+        api_key.trim(),
+        upstream_model.trim(),
+    );
+    provider_queries::insert_provider(db, &p)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", p.id))?;
+    println!("  created provider '{}'", p.id);
+    Ok(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +417,22 @@ mod tests {
         // still the original row (a Conflict from a second insert_pool would
         // have surfaced as an Err above)
         assert_eq!(crate::pools::queries::get_pool(&db, "pre").await.unwrap().created_at, created);
+    }
+
+    #[test]
+    fn passthrough_row_uses_the_name_as_id_and_keeps_kind_passthrough() {
+        let p = build_passthrough_row(
+            "my-openai",
+            WireFormat::OpenAi,
+            "https://api.example.com/v1/chat/completions",
+            "sk-abc",
+            "gpt-4o-mini",
+        );
+        assert_eq!(p.id, "my-openai");
+        assert_eq!(p.name, "my-openai");
+        assert_eq!(p.kind, ProviderKind::Passthrough);
+        assert_eq!(p.base_url.as_deref(), Some("https://api.example.com/v1/chat/completions"));
+        assert_eq!(p.api_key.as_deref(), Some("sk-abc"));
+        assert_eq!(p.upstream_model, "gpt-4o-mini");
     }
 }

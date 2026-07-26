@@ -7,6 +7,14 @@ pub struct TestApp {
 }
 
 pub async fn spawn_app() -> TestApp {
+    spawn_app_with_sqlite_path(None).await
+}
+
+// Lets a caller point at a persistent SQLite file instead of a throwaway temp
+// one - used by the Codex real-account e2e test so a completed OAuth login
+// (and its refresh token) survives across separate `cargo test` invocations,
+// instead of requiring a fresh browser login every single run.
+pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp {
     // Build Config directly rather than through Config::from_env() + std::env::set_var.
     // Integration tests within one file run concurrently by default; std::env is
     // process-global, so concurrent spawn_app() calls setting ROUTER_* would race
@@ -14,10 +22,16 @@ pub async fn spawn_app() -> TestApp {
     // note) - constructing the struct directly removes the shared mutable state
     // instead of just serializing access to it.
     let secret = "test-secret".to_string();
-    let db_file = tempfile::NamedTempFile::new().unwrap();
-    let db_path = db_file.path().to_str().unwrap().to_string();
-    // leak the temp file so it lives for the whole test
-    std::mem::forget(db_file);
+    let db_path = match sqlite_path {
+        Some(p) => p,
+        None => {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            let p = db_file.path().to_str().unwrap().to_string();
+            // leak the temp file so it lives for the whole test
+            std::mem::forget(db_file);
+            p
+        }
+    };
 
     let cfg = router::core::config::Config {
         listen_addr: "127.0.0.1:0".parse().unwrap(),

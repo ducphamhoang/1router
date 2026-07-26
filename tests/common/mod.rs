@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 pub struct TestApp {
     pub base_url: String,
     pub secret: String,
+    pub admin_password: String,
     pub db: SqlitePool,
 }
 
@@ -45,6 +46,23 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         drain_timeout: std::time::Duration::from_secs(30),
     };
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
+    let admin_password = "test-admin-password".to_string();
+    let admin_password_hash =
+        router::admin::auth::password::hash_password(&admin_password).unwrap();
+    sqlx::query(
+        "INSERT INTO admin_users (id, username, password_hash, updated_at)
+         VALUES (1, 'admin', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             username = excluded.username,
+             password_hash = excluded.password_hash,
+             updated_at = excluded.updated_at",
+    )
+    .bind(&admin_password_hash)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&db)
+    .await
+    .unwrap();
+
     let http = router::core::http_client::build_client(&cfg);
     let snapshot = router::core::state::load_snapshot(&db).await.unwrap();
     let log_tx = router::telemetry::request_log::spawn_writer(db.clone(), 1024, 50);
@@ -79,6 +97,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     TestApp {
         base_url: format!("http://{addr}"),
         secret,
+        admin_password,
         db,
     }
 }

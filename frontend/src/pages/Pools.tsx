@@ -12,7 +12,6 @@ type PoolMember = {
 type Pool = {
   id: string;
   wire_format: string;
-  members: PoolMember[];
 };
 
 export function recomputeMemberPriorities(members: PoolMember[]) {
@@ -24,6 +23,7 @@ export function recomputeMemberPriorities(members: PoolMember[]) {
 
 export function Pools() {
   const [pools, setPools] = useState<Pool[]>([]);
+  const [membersByPool, setMembersByPool] = useState<Record<string, PoolMember[]>>({});
   const [poolId, setPoolId] = useState("");
   const [wireFormat, setWireFormat] = useState("openai");
   const [error, setError] = useState<string | null>(null);
@@ -33,9 +33,27 @@ export function Pools() {
     setPools(await apiJson<Pool[]>("/admin/pools"));
   }
 
+  async function loadMembers(poolIds: string[]) {
+    const entries = await Promise.all(
+      poolIds.map(async (id) => {
+        const members = await apiJson<PoolMember[]>(`/admin/pools/${id}/members`);
+        return [id, members] as const;
+      })
+    );
+    setMembersByPool(Object.fromEntries(entries));
+  }
+
   useEffect(() => {
     void loadPools();
   }, []);
+
+  useEffect(() => {
+    if (pools.length === 0) {
+      setMembersByPool({});
+      return;
+    }
+    void loadMembers(pools.map((pool) => pool.id));
+  }, [pools]);
 
   async function createPool(event: FormEvent) {
     event.preventDefault();
@@ -51,17 +69,26 @@ export function Pools() {
   async function deletePool(id: string) {
     await apiJson(`/admin/pools/${id}`, { method: "DELETE" });
     setPools((current) => current.filter((pool) => pool.id !== id));
+    setMembersByPool((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
   }
 
   async function persistMembers(poolId: string, members: PoolMember[]) {
     const requestId = latestRequestId.current + 1;
     latestRequestId.current = requestId;
     try {
-      await apiJson(`/admin/pools/${poolId}/members`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ members: recomputeMemberPriorities(members) })
-      });
+      await Promise.all(
+        recomputeMemberPriorities(members).map((member) =>
+          apiJson(`/admin/pools/${poolId}/members`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(member)
+          })
+        )
+      );
     } catch (error) {
       if (requestId === latestRequestId.current) {
         throw error;
@@ -70,13 +97,14 @@ export function Pools() {
   }
 
   async function moveMember(pool: Pool, providerId: string, direction: -1 | 1) {
-    const oldIndex = pool.members.findIndex((member) => member.provider_id === providerId);
+    const poolMembers = membersByPool[pool.id] ?? [];
+    const oldIndex = poolMembers.findIndex((member) => member.provider_id === providerId);
     const newIndex = oldIndex + direction;
-    if (oldIndex < 0 || newIndex < 0 || newIndex >= pool.members.length) {
+    if (oldIndex < 0 || newIndex < 0 || newIndex >= poolMembers.length) {
       return;
     }
-    const members = arrayMove(pool.members, oldIndex, newIndex);
-    setPools((current) => current.map((item) => (item.id === pool.id ? { ...item, members } : item)));
+    const members = arrayMove(poolMembers, oldIndex, newIndex);
+    setMembersByPool((current) => ({ ...current, [pool.id]: members }));
     try {
       await persistMembers(pool.id, members);
     } catch (error) {
@@ -88,10 +116,14 @@ export function Pools() {
     if (!event.over || event.active.id === event.over.id) {
       return;
     }
-    const oldIndex = pool.members.findIndex((member) => member.provider_id === event.active.id);
-    const newIndex = pool.members.findIndex((member) => member.provider_id === event.over?.id);
-    const members = arrayMove(pool.members, oldIndex, newIndex);
-    setPools((current) => current.map((item) => (item.id === pool.id ? { ...item, members } : item)));
+    const poolMembers = membersByPool[pool.id] ?? [];
+    const oldIndex = poolMembers.findIndex((member) => member.provider_id === event.active.id);
+    const newIndex = poolMembers.findIndex((member) => member.provider_id === event.over?.id);
+    if (oldIndex < 0 || newIndex < 0) {
+      return;
+    }
+    const members = arrayMove(poolMembers, oldIndex, newIndex);
+    setMembersByPool((current) => ({ ...current, [pool.id]: members }));
     try {
       await persistMembers(pool.id, members);
     } catch (error) {
@@ -125,15 +157,15 @@ export function Pools() {
             Delete
           </button>
           <DndContext onDragEnd={(event) => onDragEnd(pool, event)}>
-            <SortableContext items={pool.members.map((member) => member.provider_id)}>
+            <SortableContext items={(membersByPool[pool.id] ?? []).map((member) => member.provider_id)}>
               <ol>
-                {pool.members.map((member, index) => (
+                {(membersByPool[pool.id] ?? []).map((member, index, members) => (
                   <li key={member.provider_id}>
                     <span>{member.provider_name ?? member.provider_id}</span>
                     <button type="button" onClick={() => moveMember(pool, member.provider_id, -1)} aria-label={`Move ${member.provider_name ?? member.provider_id} up`} disabled={index === 0}>
                       Up
                     </button>
-                    <button type="button" onClick={() => moveMember(pool, member.provider_id, 1)} aria-label={`Move ${member.provider_name ?? member.provider_id} down`} disabled={index === pool.members.length - 1}>
+                    <button type="button" onClick={() => moveMember(pool, member.provider_id, 1)} aria-label={`Move ${member.provider_name ?? member.provider_id} down`} disabled={index === members.length - 1}>
                       Down
                     </button>
                   </li>

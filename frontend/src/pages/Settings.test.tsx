@@ -10,10 +10,10 @@ describe("Settings", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url === "/admin/settings/shared-secret" && (!init || init.method === "GET")) {
-          return new Response(JSON.stringify({ shared_secret: "sec_****" }), { status: 200 });
+          return new Response(JSON.stringify({ shared_secret: "sec_****", masked: true, origin: "sidecar_file" }), { status: 200 });
         }
         if (url === "/admin/settings/shared-secret?reveal=true") {
-          return new Response(JSON.stringify({ shared_secret: "sec_real" }), { status: 200 });
+          return new Response(JSON.stringify({ shared_secret: "sec_real", masked: false, origin: "sidecar_file" }), { status: 200 });
         }
         if (url === "/admin/auth/password" && init?.method === "PATCH") {
           return new Response("{}", { status: 200 });
@@ -32,8 +32,10 @@ describe("Settings", () => {
     render(<Settings />);
 
     expect(await screen.findByDisplayValue("sec_****")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shared secret")).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Reveal shared secret" }));
     expect(await screen.findByDisplayValue("sec_real")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shared secret")).toBeEnabled();
   });
 
   it("changes_admin_password", async () => {
@@ -53,10 +55,21 @@ describe("Settings", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Password changed.");
   });
 
+  it("prevents_saving_shared_secret_until_revealed_and_edited", async () => {
+    render(<Settings />);
+
+    expect(await screen.findByRole("button", { name: "Save shared secret" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Reveal shared secret" }));
+    expect(await screen.findByRole("button", { name: "Save shared secret" })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Shared secret"), "-edited");
+    expect(screen.getByRole("button", { name: "Save shared secret" })).toBeEnabled();
+  });
+
   it("renders_shared_secret_409_message_verbatim", async () => {
     render(<Settings />);
 
-    await userEvent.clear(await screen.findByLabelText("Shared secret"));
+    await userEvent.click(await screen.findByRole("button", { name: "Reveal shared secret" }));
+    await userEvent.clear(screen.getByLabelText("Shared secret"));
     await userEvent.type(screen.getByLabelText("Shared secret"), "replacement");
     await userEvent.click(screen.getByRole("button", { name: "Save shared secret" }));
 

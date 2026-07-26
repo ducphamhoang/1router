@@ -26,7 +26,7 @@ describe("CodexOAuthPanel", () => {
 
     expect(
       screen.getByText(
-        "After you approve access, your browser will show a page that fails to load at localhost:1455 — that's expected. Copy the code value out of that page's address bar and paste it below."
+        "After you approve access, your browser will show a page that fails to load at localhost:1455 — that's expected. Copy the code and state values out of that page's address bar query string and paste them below."
       )
     ).toBeInTheDocument();
   });
@@ -40,17 +40,18 @@ describe("CodexOAuthPanel", () => {
     expect(window.open).toHaveBeenCalledWith("https://auth.example.test/start", "_blank", "noopener,noreferrer");
   });
 
-  it("completes_oauth_with_pasted_code", async () => {
+  it("completes_oauth_with_pasted_code_and_state", async () => {
     render(<CodexOAuthPanel providerId="prov_1" />);
 
     await userEvent.type(screen.getByLabelText("Code"), "abc123");
+    await userEvent.type(screen.getByLabelText("State"), "csrf-state");
     await userEvent.click(screen.getByRole("button", { name: "Complete Codex OAuth" }));
 
     expect(fetch).toHaveBeenCalledWith(
       "/admin/providers/prov_1/oauth/complete",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ code: "abc123" })
+        body: JSON.stringify({ code: "abc123", state: "csrf-state" })
       })
     );
     expect(await screen.findByRole("status")).toHaveTextContent("Codex OAuth connected.");

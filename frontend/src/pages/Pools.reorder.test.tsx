@@ -30,18 +30,23 @@ describe("Pools", () => {
             JSON.stringify([
               {
                 id: "openai",
-                wire_format: "openai",
-                members: [
-                  { provider_id: "a", provider_name: "alpha", priority: 1 },
-                  { provider_id: "b", provider_name: "beta", priority: 2 }
-                ]
+                wire_format: "openai"
               }
             ]),
             { status: 200 }
           );
         }
+        if (url === "/admin/pools/openai/members" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([
+              { pool_id: "openai", provider_id: "a", provider_name: "alpha", priority: 1 },
+              { pool_id: "openai", provider_id: "b", provider_name: "beta", priority: 2 }
+            ]),
+            { status: 200 }
+          );
+        }
         if (url === "/admin/pools" && init?.method === "POST") {
-          return new Response(JSON.stringify({ id: "anthropic", wire_format: "anthropic", members: [] }), { status: 200 });
+          return new Response(JSON.stringify({ id: "anthropic", wire_format: "anthropic" }), { status: 200 });
         }
         if (url === "/admin/pools/openai" && init?.method === "DELETE") {
           return new Response("{}", { status: 200 });
@@ -70,19 +75,15 @@ describe("Pools", () => {
     render(<Pools />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Move beta up" }));
-    await waitFor(() =>
+    await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
         "/admin/pools/openai/members",
-        expect.objectContaining({
-          method: "PUT",
-          body: JSON.stringify({
-            members: [
-              { provider_id: "b", priority: 1 },
-              { provider_id: "a", priority: 2 }
-            ]
-          })
-        })
-      )
-    );
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ provider_id: "b", priority: 1 }) })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ provider_id: "a", priority: 2 }) })
+      );
+    });
   });
 });

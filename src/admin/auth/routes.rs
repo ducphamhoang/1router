@@ -112,7 +112,7 @@ struct PasswordChangeRequest {
 
 async fn change_password(
     State(state): State<AppState>,
-    Extension(sess): Extension<session::AdminSession>,
+    sess: Option<Extension<session::AdminSession>>,
     Json(req): Json<PasswordChangeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row: Option<(String, String)> =
@@ -140,7 +140,11 @@ async fn change_password(
         .execute(&state.db)
         .await?;
 
-    session::delete_all_sessions_except(&state.db, &sess.token_hash).await?;
+    if let Some(Extension(sess)) = sess {
+        session::delete_all_sessions_except(&state.db, &sess.token_hash).await?;
+    } else {
+        session::delete_all_sessions(&state.db).await?;
+    }
 
     Ok(Json(json!({"ok": true})))
 }
@@ -433,6 +437,52 @@ mod tests {
 
         assert_eq!(kept, Some(current.token_hash));
         assert!(removed.is_none());
+
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(password::verify_password(&stored, "new-password"));
+    }
+
+    #[tokio::test]
+    async fn password_change_with_bearer_auth_deletes_all_sessions() {
+        let state = state().await;
+        seed_admin(&state.db, "old-password").await;
+        let (_raw_a, _) = session::create_session(&state.db).await.unwrap();
+        let (_raw_b, _) = session::create_session(&state.db).await.unwrap();
+
+        let app = routes()
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::middleware::require_admin_session,
+            ))
+            .with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/admin/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer test-secret")
+                    .body(Body::from(
+                        json!({"current_password":"old-password","new_password":"new-password"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let session_count: i64 = sqlx::query_scalar("SELECT count(*) FROM admin_sessions")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(session_count, 0);
 
         let stored: String =
             sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")

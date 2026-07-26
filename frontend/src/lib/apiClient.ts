@@ -7,29 +7,34 @@ type ApiErrorBody = {
   };
 };
 
-export async function apiFetch(path: string, init: RequestInit = {}) {
+type ApiFetchInit = RequestInit & {
+  skipAuthRedirect?: boolean;
+};
+
+export async function apiFetch(path: string, init: ApiFetchInit = {}) {
+  const { skipAuthRedirect, ...requestInit } = init;
   const method = (init.method ?? "GET").toUpperCase();
-  const headers = new Headers(init.headers);
+  const headers = new Headers(requestInit.headers);
 
   if (method !== "GET") {
     headers.set(CSRF_HEADER, CSRF_VALUE);
   }
 
   const response = await fetch(path, {
-    ...init,
+    ...requestInit,
     method,
     headers,
     credentials: "include"
   });
 
-  if (response.status === 401 && window.location.pathname !== "/ui/login") {
+  if (response.status === 401 && !skipAuthRedirect && window.location.pathname !== "/ui/login") {
     window.location.assign("/ui/login");
   }
 
   return response;
 }
 
-export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiJson<T>(path: string, init: ApiFetchInit = {}): Promise<T> {
   const response = await apiFetch(path, init);
   const text = await response.text();
   const body = text ? (JSON.parse(text) as ApiErrorBody | T) : undefined;

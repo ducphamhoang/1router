@@ -14,6 +14,8 @@ export function Settings() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [sharedSecret, setSharedSecret] = useState("");
+  const [sharedSecretRevealed, setSharedSecretRevealed] = useState(false);
+  const [sharedSecretEdited, setSharedSecretEdited] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,6 +23,8 @@ export function Settings() {
     const suffix = reveal ? "?reveal=true" : "";
     const body = await apiJson<SharedSecretResponse>(`/admin/settings/shared-secret${suffix}`);
     setSharedSecret(body.shared_secret);
+    setSharedSecretRevealed(!body.masked);
+    setSharedSecretEdited(false);
   }
 
   useEffect(() => {
@@ -34,6 +38,7 @@ export function Settings() {
     try {
       await apiJson("/admin/auth/password", {
         method: "PATCH",
+        skipAuthRedirect: true,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
       });
@@ -49,6 +54,14 @@ export function Settings() {
     event.preventDefault();
     setMessage(null);
     setError(null);
+    if (!sharedSecretRevealed) {
+      setError("Reveal the current shared secret before changing it.");
+      return;
+    }
+    if (!sharedSecretEdited) {
+      setError("Edit the revealed shared secret before saving it.");
+      return;
+    }
     try {
       await apiJson("/admin/settings/shared-secret", {
         method: "PATCH",
@@ -84,12 +97,21 @@ export function Settings() {
         <h2>Shared secret</h2>
         <label>
           Shared secret
-          <input value={sharedSecret} onChange={(event) => setSharedSecret(event.target.value)} />
+          <input
+            value={sharedSecret}
+            disabled={!sharedSecretRevealed}
+            onChange={(event) => {
+              setSharedSecret(event.target.value);
+              setSharedSecretEdited(true);
+            }}
+          />
         </label>
         <button type="button" onClick={() => loadSharedSecret(true)}>
           Reveal shared secret
         </button>
-        <button type="submit">Save shared secret</button>
+        <button type="submit" disabled={!sharedSecretRevealed || !sharedSecretEdited}>
+          Save shared secret
+        </button>
       </form>
     </section>
   );

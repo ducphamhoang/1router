@@ -2229,7 +2229,7 @@ git commit -m "feat: require_admin_session middleware (cookie-or-bearer fallback
 
 **Files:** Modify `src/auth/middleware.rs`
 
-**Interfaces:** Consumes nothing new. Produces a middleware E1 layers across all of `/admin/*` (both strata, including login).
+**Interfaces:** Consumes nothing new. Produces a middleware applied ONLY to the login route (see correction below), plus a shared helper the cookie-authenticated branch of `require_admin_session` (B4) also calls.
 
 ```rust
 pub async fn require_csrf_header(req: Request, next: Next) -> Response {
@@ -2248,6 +2248,10 @@ pub async fn require_csrf_header(req: Request, next: Next) -> Response {
 }
 ```
 Note: uses `axum::middleware::from_fn` (no `State`) since it needs no `AppState` — cheap, independently testable, no dependency on B1–B4.
+
+**(Implementation-time correction, found by an Opus security review during Phase E integration.)** This task's own text ("E1 layers across all of `/admin/*`, both strata, including login") describes what was actually built and merged FIRST, and it was wrong: applying this check to Bearer-authenticated requests too broke B4's own stated non-breaking-for-curl/CI goal, since Bearer credentials are never automatically attached by a browser cross-site and so were never CSRF-vulnerable in the first place. Six pre-existing integration tests (`admin_pools`, `admin_settings`, `admin_export_import`, `admin_providers`, `codex_oauth`, plus regression checks) caught this once E1 actually wired the layer in for real.
+
+**Corrected final architecture:** `require_csrf_header` (this function, unchanged above) is applied via `.layer()` to ONLY the public login route in `build_router` (E1) — login has no Bearer path and still needs protection against login-CSRF (forcing a victim's browser to log into an attacker's account). For the authenticated stratum, the equivalent check is folded directly into `require_admin_session` (B4) itself: extract the header-check logic into a shared `csrf_header_ok(method, headers) -> bool` function; `require_admin_session`'s cookie-validation success branch calls it and returns 403 if it fails (before renewing the session, so a rejected cross-site request can't be used to slide session expiry); the Bearer-validation branch does NOT call it at all. Read B4's task section and the current `src/auth/middleware.rs` for the exact resulting code — this task's diff alone is not sufficient to see the final wiring.
 
 Tests:
 - `csrf_allows_get_without_header`
@@ -5405,20 +5409,23 @@ pub fn build_router(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_admin_session));
 
     // Unauthenticated admin surface: login only (spec's I2 fix — login can't gate itself).
-    let admin_public = crate::admin::auth::routes::public_routes();
+    // (Implementation-time correction, security review during Phase E — see
+    // Task B5's corrected section.) CSRF protection for login is applied
+    // HERE, directly to admin_public, not as an outer layer across both
+    // strata. The authenticated stratum's CSRF check instead lives inside
+    // require_admin_session itself (B4), gated to the cookie-auth branch
+    // only — Bearer-authenticated requests are exempt (never CSRF-vulnerable
+    // in the first place; see B5). This also means the outer-layer
+    // fallback-merge-order fragility a prior draft of this code had (CSRF
+    // wrapping the router's 404 fallback, correct only by merge-order
+    // accident) no longer exists — there is no outer CSRF layer to wrap a
+    // fallback with.
+    let admin_public = crate::admin::auth::routes::public_routes()
+        .layer(axum::middleware::from_fn(require_csrf_header));
 
-    // CSRF applies across BOTH admin strata — login is itself a POST.
-    // (Review note) axum 0.7's .layer() also wraps the router's fallback, and
-    // on .merge() the LATER-merged router's fallback wins. Today `admin` is
-    // merged before `proxy`/`ui_assets` below, so the final fallback is the
-    // default (unwrapped) 404 - correct, but only because of this order. If
-    // `admin` were ever the LAST merge into the outer router, every
-    // unmatched non-GET request would 403 instead of 404 globally. Do not
-    // move this merge to be last.
     let admin = Router::new()
         .merge(admin_authenticated)
-        .merge(admin_public)
-        .layer(axum::middleware::from_fn(require_csrf_header));
+        .merge(admin_public);
 
     // /v1/* stays exactly as-is: require_bearer only, no cookie fallback.
     let proxy = crate::proxy::routes::routes()

@@ -2,10 +2,7 @@ import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { Login } from "./pages/Login";
 import { Pools } from "./pages/Pools";
 import { Providers } from "./pages/Providers";
-
-function Placeholder({ title }: { title: string }) {
-  return <h1>{title}</h1>;
-}
+import { Settings } from "./pages/Settings";
 
 export function App() {
   return (
@@ -19,7 +16,7 @@ export function App() {
         <Route path="/ui/login" element={<Login />} />
         <Route path="/ui/providers" element={<Providers />} />
         <Route path="/ui/pools" element={<Pools />} />
-        <Route path="/ui/settings" element={<Placeholder title="Settings" />} />
+        <Route path="/ui/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/ui/providers" replace />} />
       </Routes>
     </main>

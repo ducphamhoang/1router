@@ -62,10 +62,10 @@ async fn main() -> Result<()> {
             let s = config::generate_secret();
             config::persist_secret(&sqlite_path, &s)?;
             tracing::info!(
-                secret = %s,
                 path = ?config::secret_file_path(&sqlite_path),
-                "generated a new admin shared secret - SAVE THIS NOW, it will not be logged \
-                 again. Set ROUTER_SHARED_SECRET to control it explicitly."
+                "generated a new admin shared secret sidecar. The secret value is never logged; \
+                 read the sidecar file once and store it securely, or set ROUTER_SHARED_SECRET \
+                 to control it explicitly."
             );
             Some(s)
         }

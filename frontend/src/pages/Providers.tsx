@@ -48,8 +48,12 @@ export function Providers() {
     async function loadStates() {
       const entries = await Promise.all(
         providers.map(async (provider) => {
-          const body = await apiJson<{ state: string }>(`/admin/providers/${provider.id}/state`);
-          return [provider.id, body.state] as const;
+          try {
+            const body = await apiJson<{ state: string }>(`/admin/providers/${provider.id}/state`);
+            return [provider.id, body.state] as const;
+          } catch {
+            return [provider.id, "unknown"] as const;
+          }
         })
       );
       if (!cancelled) {

@@ -2,7 +2,9 @@ use crate::core::model::{Pool, Provider, WireFormat};
 use crate::core::state::ConfigSnapshot;
 
 pub struct Selection<'a> {
-    pub pool: &'a Pool,
+    /// `None` for a direct `<provider_id>/<model>` selection (see
+    /// `select_direct_provider` below) - there's no real pool row behind it.
+    pub pool: Option<&'a Pool>,
     /// (provider, effective upstream model) pairs, in priority order. The
     /// effective model is the member's `model_override` if set, else the
     /// provider's own `upstream_model` - this is what lets one provider
@@ -18,34 +20,64 @@ fn wire_eq(a: WireFormat, b: WireFormat) -> bool {
     )
 }
 
+/// Resolve a client-requested `model` to what to actually call.
+///
+/// Tries a real pool first (round-robin/failover across its members). If
+/// none matches, falls back to `<provider_id>/<model>` direct addressing -
+/// this exists so that a provider offering several models (e.g. DeepSeek's
+/// `deepseek-v4-flash`/`deepseek-v4-pro`) doesn't need one throwaway
+/// 1-member pool per model just to make each one callable; it's a single
+/// specific provider, so there's no failover across it, unlike a real pool.
+/// The split is unambiguous: pool ids and provider ids can never contain
+/// `/` (enforced by `validate_path_id` at creation), so this syntax can
+/// never collide with a real pool id.
 pub fn select<'a>(
     snapshot: &'a ConfigSnapshot,
     pool_id: &str,
     wire: WireFormat,
 ) -> Option<Selection<'a>> {
-    let pwm = snapshot.pools.iter().find(|p| p.pool.id == pool_id)?;
-    if !wire_eq(pwm.pool.wire_format, wire) {
-        return None;
+    if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
+        if !wire_eq(pwm.pool.wire_format, wire) {
+            return None;
+        }
+
+        let mut members = pwm.members.clone();
+        members.sort_by_key(|m| m.priority);
+
+        let providers = members
+            .iter()
+            .filter_map(|m| {
+                let provider = snapshot.providers.iter().find(|p| p.id == m.provider_id)?;
+                let model = m
+                    .model_override
+                    .clone()
+                    .unwrap_or_else(|| provider.upstream_model.clone());
+                Some((provider, model))
+            })
+            .collect();
+
+        return Some(Selection {
+            pool: Some(&pwm.pool),
+            providers,
+        });
     }
 
-    let mut members = pwm.members.clone();
-    members.sort_by_key(|m| m.priority);
+    select_direct_provider(snapshot, pool_id, wire)
+}
 
-    let providers = members
-        .iter()
-        .filter_map(|m| {
-            let provider = snapshot.providers.iter().find(|p| p.id == m.provider_id)?;
-            let model = m
-                .model_override
-                .clone()
-                .unwrap_or_else(|| provider.upstream_model.clone());
-            Some((provider, model))
-        })
-        .collect();
-
+fn select_direct_provider<'a>(
+    snapshot: &'a ConfigSnapshot,
+    requested: &str,
+    wire: WireFormat,
+) -> Option<Selection<'a>> {
+    let (provider_id, model) = requested.split_once('/')?;
+    let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
+    if !wire_eq(provider.wire_format, wire) {
+        return None;
+    }
     Some(Selection {
-        pool: &pwm.pool,
-        providers,
+        pool: None,
+        providers: vec![(provider, model.to_string())],
     })
 }
 
@@ -114,5 +146,44 @@ mod tests {
     #[test]
     fn missing_pool_returns_none() {
         assert!(select(&snap(), "nope", WireFormat::OpenAi).is_none());
+    }
+
+    #[test]
+    fn direct_provider_slash_model_routes_to_that_provider_with_that_model() {
+        let s = snap();
+        let sel = select(&s, "a/some-other-model", WireFormat::OpenAi).unwrap();
+        assert!(sel.pool.is_none());
+        assert_eq!(sel.providers.len(), 1);
+        let (provider, model) = &sel.providers[0];
+        assert_eq!(provider.id, "a");
+        assert_eq!(model, "some-other-model");
+    }
+
+    #[test]
+    fn direct_provider_addressing_only_splits_on_the_first_slash() {
+        let s = snap();
+        let sel = select(&s, "a/meta-llama/Llama-3-70b", WireFormat::OpenAi).unwrap();
+        let (provider, model) = &sel.providers[0];
+        assert_eq!(provider.id, "a");
+        assert_eq!(model, "meta-llama/Llama-3-70b");
+    }
+
+    #[test]
+    fn direct_provider_addressing_is_only_a_fallback_a_real_pool_still_wins() {
+        // "gpt-4o" is a real pool with no '/' - direct addressing never
+        // applies here regardless.
+        let s = snap();
+        let sel = select(&s, "gpt-4o", WireFormat::OpenAi).unwrap();
+        assert!(sel.pool.is_some());
+    }
+
+    #[test]
+    fn direct_provider_addressing_rejects_an_unknown_provider() {
+        assert!(select(&snap(), "nope/some-model", WireFormat::OpenAi).is_none());
+    }
+
+    #[test]
+    fn direct_provider_addressing_rejects_a_wire_format_mismatch() {
+        assert!(select(&snap(), "a/some-model", WireFormat::Anthropic).is_none());
     }
 }

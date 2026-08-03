@@ -74,15 +74,21 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 `<pool-id>` is whatever you named the pool during setup — that's the value
-clients put in `model`. There's no way to address a provider directly; every
-call routes through a pool, even a 1-member one. The setup wizard and the
-admin UI's "Make it directly callable" checkbox (see "Admin web UI" below)
-both default to creating that 1-member pool automatically, using the
-provider's own id/name, so in practice a single-provider setup still reads
-as "call the model by name" — e.g. a provider named `deepseek-flash` becomes
-`"model":"deepseek-flash"` with no extra pool-management step. Reach for a
-multi-member pool only when you want round-robin or failover across more
-than one provider under one name.
+clients put in `model` for round-robin/failover across one or more
+providers under a shared name. The setup wizard and the admin UI's "Make it
+directly callable" checkbox (see "Admin web UI" below) both default to
+creating a matching 1-member pool automatically, so a single-provider setup
+reads as "call the model by name" with no extra step.
+
+For a provider that offers several models, you don't need a 1-member pool
+per model just to make each one callable - `model` also accepts
+`<provider_id>/<model-name>` (e.g. `"model":"deepseek_api/deepseek-v4-pro"`),
+which routes directly to that one provider with that exact model, no pool
+involved. This is a pure fallback: it only kicks in when `model` doesn't
+match a real pool id, and since pool/provider ids can never contain `/`
+(rejected at creation), the two addressing modes can never collide. The
+tradeoff versus a real pool: no round-robin/failover, since you named one
+specific provider - that's the whole point of using it over a pool.
 
 ## Configuration (environment variables)
 
@@ -104,8 +110,9 @@ than one provider under one name.
 client → /v1/chat/completions or /v1/messages
            │
            ▼
-       pool lookup (by `model`)          SQLite: providers, pools,
-           │                              pool_members, provider_oauth_state
+       pool lookup (by `model`),         SQLite: providers, pools,
+       else <provider_id>/<model>         pool_members, provider_oauth_state
+           │
            ▼
    priority-ordered providers  ──fail over on retryable errors──▶ next provider
            │

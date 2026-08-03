@@ -42,6 +42,7 @@ async fn test_state(secret_origin: SecretOrigin) -> (AppState, tempfile::TempDir
         log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
+        discovered_models: Arc::new(dashmap::DashMap::new()),
     };
     (state, dir)
 }

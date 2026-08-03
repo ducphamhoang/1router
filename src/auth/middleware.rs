@@ -237,6 +237,7 @@ mod require_admin_session_tests {
             shared_secret: Arc::new(ArcSwap::from_pointee("test-secret".to_string())),
             secret_origin: SecretOrigin::SidecarFile,
             login_attempts: Arc::new(DashMap::new()),
+            discovered_models: Arc::new(DashMap::new()),
         }
     }
 

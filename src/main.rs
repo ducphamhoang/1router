@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
         log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
+        discovered_models: Arc::new(dashmap::DashMap::new()),
     };
 
     if let Err(e) = router::admin::auth::session::delete_expired(&state.db).await {
@@ -135,6 +136,7 @@ async fn main() -> Result<()> {
     }
     spawn_background_refresh(state.clone());
     router::admin::auth::cleanup::spawn_session_cleanup(state.clone());
+    router::providers::routes::warm_discovered_models_cache(&state);
 
     let router = router::app::build_router(state);
     let listener = tokio::net::TcpListener::bind(cfg.listen_addr).await?;

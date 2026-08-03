@@ -90,6 +90,16 @@ match a real pool id, and since pool/provider ids can never contain `/`
 tradeoff versus a real pool: no round-robin/failover, since you named one
 specific provider - that's the whole point of using it over a pool.
 
+`GET /v1/models` lists these `<provider_id>/<model>` combinations too,
+alongside pool ids, for every passthrough provider whose own `/models` has
+been fetched. That fetch happens automatically and in the background -
+right after a provider is created, and once for every existing provider at
+boot (so upgrading to this feature doesn't require manually re-adding
+providers) - and is cached in memory, so `/v1/models` itself never makes a
+network call. The cache is lost on restart (re-warmed at the next boot) and
+a provider whose fetch fails (dead upstream, no `/models` support) is
+simply absent from the list rather than causing an error.
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |

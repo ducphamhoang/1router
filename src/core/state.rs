@@ -17,6 +17,14 @@ pub struct ConfigSnapshot {
 
 pub type RequestLogSender = tokio::sync::mpsc::Sender<LogEntry>;
 pub type RefreshLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+/// In-memory only, by design: a cache of each provider's last successful
+/// `GET .../models` call (populated on provider creation and by the
+/// explicit "fetch models" actions), so `GET /v1/models` can list
+/// `<provider_id>/<model>` entries for free instead of calling every
+/// provider's own `/models` on every request. Losing it on restart just
+/// means those extra listings are momentarily absent until the next fetch -
+/// direct `<provider_id>/<model>` addressing itself doesn't depend on it.
+pub type DiscoveredModelsMap = Arc<dashmap::DashMap<String, Vec<String>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +55,7 @@ pub struct AppState {
     pub log_tx: RequestLogSender,
     pub refresh_locks: RefreshLocks,
     pub login_attempts: LoginAttemptMap,
+    pub discovered_models: DiscoveredModelsMap,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {

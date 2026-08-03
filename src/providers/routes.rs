@@ -102,6 +102,13 @@ async fn create(
     };
     queries::insert_provider(&s.db, &p).await?;
     reload_snapshot(&s).await?;
+
+    // Best-effort and non-blocking: the create response shouldn't wait on
+    // (or fail because of) a slow/dead upstream `/models` call. Populates
+    // GET /v1/models' <provider_id>/<model> listings without the caller
+    // having to separately hit list-models afterward.
+    spawn_bounded_discovery(s.clone(), p.clone());
+
     Ok((StatusCode::CREATED, Json(mask(&p))))
 }
 
@@ -193,45 +200,40 @@ async fn validate_model(
 
 /// A provider's `base_url` is the full chat/messages endpoint, not a base
 /// path - swap its last path segment for `models` rather than requiring a
-/// second URL field just for this. Falls back to appending `/models` if the
-/// URL doesn't end in a recognized segment (a non-standard mirror path).
+/// second URL field just for this. Falls back to proper URL parsing (rather
+/// than a raw `rfind('/')`) for a non-standard mirror path, since blind
+/// string surgery mismatches the scheme separator (`http://`) for a
+/// base_url with no path at all - `rfind('/')` on `http://host:1` finds the
+/// slash *inside* `//`, producing the nonsense host `http://models`.
 fn derive_models_url(base_url: &str) -> String {
     for suffix in ["/chat/completions", "/messages"] {
         if let Some(prefix) = base_url.strip_suffix(suffix) {
             return format!("{prefix}/models");
         }
     }
-    match base_url.rfind('/') {
-        Some(idx) => format!("{}/models", &base_url[..idx]),
-        None => format!("{base_url}/models"),
+    if let Ok(mut url) = reqwest::Url::parse(base_url) {
+        if let Ok(mut segments) = url.path_segments_mut() {
+            segments.pop_if_empty();
+            segments.pop();
+            segments.push("models");
+        }
+        url.set_query(None);
+        return url.to_string();
     }
+    format!("{base_url}/models")
 }
 
-/// Fetches the provider's own live model list (its `GET .../models`), for
-/// populating the model-override suggestions with reality instead of a
-/// static array that inevitably goes stale (see the deepseek-chat ->
-/// deepseek-v4-flash rename). Best-effort only: Codex OAuth has no
-/// discoverable models endpoint (that's why onboarding.rs probes a candidate
-/// list instead), and some passthrough mirrors won't implement `/models`
-/// either - both report `ok: false` with a reason rather than erroring, so
-/// the frontend can fall back to its static suggestions.
-async fn list_models(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
-    let provider = queries::get_provider(&s.db, &id).await?;
-    if provider.kind != ProviderKind::Passthrough {
-        return Ok(Json(json!({
-            "ok": false,
-            "reason": "this provider kind has no discoverable /models endpoint"
-        })));
-    }
-    let base_url = match &provider.base_url {
-        Some(u) => u,
-        None => return Ok(Json(json!({ "ok": false, "reason": "provider has no base_url" }))),
-    };
+/// Calls the provider's own live `GET .../models` and parses out model ids.
+/// Pure network+parse - no ProviderKind/base_url checks (those produce
+/// user-facing messages specific to the admin endpoint below) and no
+/// caching (callers decide whether/where to cache).
+async fn fetch_live_models(http: &reqwest::Client, provider: &Provider) -> Result<Vec<String>, String> {
+    let base_url = provider
+        .base_url
+        .as_ref()
+        .ok_or_else(|| "provider has no base_url".to_string())?;
 
-    let mut builder = s.http.get(derive_models_url(base_url));
+    let mut builder = http.get(derive_models_url(base_url));
     if let Some(key) = provider.api_key.as_ref() {
         builder = match provider.wire_format {
             WireFormat::OpenAi => builder.bearer_auth(key),
@@ -241,28 +243,17 @@ async fn list_models(
         };
     }
 
-    let resp = match builder.send().await {
-        Ok(r) => r,
-        Err(e) => return Ok(Json(json!({ "ok": false, "reason": e.to_string() }))),
-    };
+    let resp = builder.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         let snippet: String = text.chars().take(300).collect();
-        return Ok(Json(json!({
-            "ok": false,
-            "reason": format!("HTTP {}: {snippet}", status.as_u16())
-        })));
+        return Err(format!("HTTP {}: {snippet}", status.as_u16()));
     }
-    let body: Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            return Ok(Json(json!({
-                "ok": false,
-                "reason": format!("could not parse response as JSON: {e}")
-            })))
-        }
-    };
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse response as JSON: {e}"))?;
     let models: Vec<String> = body
         .get("data")
         .and_then(|d| d.as_array())
@@ -273,12 +264,75 @@ async fn list_models(
         })
         .unwrap_or_default();
     if models.is_empty() {
-        return Ok(Json(json!({
-            "ok": false,
-            "reason": "response had no recognizable model list (expected {\"data\":[{\"id\":...}]})"
-        })));
+        return Err("response had no recognizable model list (expected {\"data\":[{\"id\":...}]})".into());
     }
-    Ok(Json(json!({ "ok": true, "models": models })))
+    Ok(models)
+}
+
+/// Fetches and caches a provider's live model list in `state.discovered_models`
+/// so `GET /v1/models` can list `<provider_id>/<model>` entries without a
+/// network call of its own. Called both from the explicit `list-models`
+/// endpoint below and, best-effort, right after a provider is created.
+/// Best-effort only: Codex OAuth has no discoverable models endpoint
+/// (that's why onboarding.rs probes a candidate list instead), and some
+/// passthrough mirrors won't implement `/models` either - both are reported
+/// as an `Err` reason rather than panicking or retrying.
+pub(crate) async fn discover_and_cache_models(
+    state: &AppState,
+    provider: &Provider,
+) -> Result<Vec<String>, String> {
+    if provider.kind != ProviderKind::Passthrough {
+        return Err("this provider kind has no discoverable /models endpoint".into());
+    }
+    let models = fetch_live_models(&state.http, provider).await?;
+    state
+        .discovered_models
+        .insert(provider.id.clone(), models.clone());
+    Ok(models)
+}
+
+/// Discovery timeout for background probes the caller never explicitly
+/// asked for (provider creation, startup warm-up) - independent of the
+/// shared http client's own connect/idle timeouts, which are tuned for real
+/// proxy traffic and can run 10s+. A bad/placeholder base_url shouldn't tie
+/// up a background task anywhere near that long.
+const BACKGROUND_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn spawn_bounded_discovery(state: AppState, provider: Provider) {
+    if provider.kind != ProviderKind::Passthrough {
+        return;
+    }
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            BACKGROUND_DISCOVERY_TIMEOUT,
+            discover_and_cache_models(&state, &provider),
+        )
+        .await;
+    });
+}
+
+/// Warms the discovered-models cache for every existing passthrough
+/// provider at boot, so `GET /v1/models` reflects providers that were
+/// created before this feature existed (or before the process last
+/// restarted, since the cache is in-memory only) without requiring each one
+/// to be manually re-fetched or recreated. Fire-and-forget per provider,
+/// same as the auto-fetch on creation - never blocks startup.
+pub fn warm_discovered_models_cache(state: &AppState) {
+    let snapshot = state.snapshot.load();
+    for provider in snapshot.providers.iter() {
+        spawn_bounded_discovery(state.clone(), provider.clone());
+    }
+}
+
+async fn list_models(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    match discover_and_cache_models(&s, &provider).await {
+        Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
+        Err(reason) => Ok(Json(json!({ "ok": false, "reason": reason }))),
+    }
 }
 
 async fn state_stub(
@@ -332,4 +386,14 @@ mod tests {
             "https://mirror.example.com/api/models"
         );
     }
+
+    #[test]
+    fn derive_models_url_handles_a_base_url_with_no_path_at_all() {
+        // Regression: a naive `rfind('/')` matches the slash inside the
+        // scheme's `//` separator here and produces the nonsense host
+        // `http://models` instead of appending a path.
+        assert_eq!(derive_models_url("http://127.0.0.1:1"), "http://127.0.0.1:1/models");
+        assert_eq!(derive_models_url("https://api.example.com"), "https://api.example.com/models");
+    }
 }
+

@@ -47,7 +47,7 @@ async fn creating_a_provider_with_an_empty_or_slash_containing_id_is_rejected() 
         .header(&k, &v)
         .json(&json!({
             "id": "", "name": "n", "wire_format": "openai", "kind": "passthrough",
-            "base_url": "http://x", "api_key": "k", "upstream_model": "m"
+            "base_url": "http://127.0.0.1:1", "api_key": "k", "upstream_model": "m"
         }))
         .send()
         .await
@@ -59,7 +59,7 @@ async fn creating_a_provider_with_an_empty_or_slash_containing_id_is_rejected() 
         .header(&k, &v)
         .json(&json!({
             "id": "a/b", "name": "n", "wire_format": "openai", "kind": "passthrough",
-            "base_url": "http://x", "api_key": "k", "upstream_model": "m"
+            "base_url": "http://127.0.0.1:1", "api_key": "k", "upstream_model": "m"
         }))
         .send()
         .await

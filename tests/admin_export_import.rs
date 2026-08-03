@@ -13,7 +13,7 @@ async fn export_then_import_roundtrip() {
         .header(&k, &v)
         .json(&json!({
             "id": "p1", "name": "P1", "wire_format": "openai", "kind": "passthrough",
-            "base_url": "https://x", "api_key": "sk-real", "upstream_model": "m"
+            "base_url": "http://127.0.0.1:1", "api_key": "sk-real", "upstream_model": "m"
         }))
         .send()
         .await

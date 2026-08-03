@@ -13,7 +13,7 @@ async fn create_list_and_mask_api_key() {
         .header(&k, &v)
         .json(&json!({
             "id": "p1", "name": "P1", "wire_format": "openai",
-            "kind": "passthrough", "base_url": "https://api.example.com",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1",
             "api_key": "sk-supersecret", "upstream_model": "gpt-4o"
         }))
         .send()
@@ -64,7 +64,7 @@ async fn get_patch_delete_existing_provider_by_id_succeeds() {
         .header(&k, &v)
         .json(&json!({
             "id": "p1", "name": "P1", "wire_format": "openai",
-            "kind": "passthrough", "base_url": "https://api.example.com",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1",
             "api_key": "sk-secret", "upstream_model": "gpt-4o"
         }))
         .send()

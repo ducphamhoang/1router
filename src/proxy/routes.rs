@@ -56,10 +56,27 @@ async fn proxy_entry(s: AppState, wire: WireFormat, headers: HeaderMap, body: Bo
 
 async fn models(State(s): State<AppState>) -> Json<Value> {
     let snap = s.snapshot.load();
-    let data: Vec<Value> = snap
+    let mut data: Vec<Value> = snap
         .pools
         .iter()
         .map(|p| json!({ "id": p.pool.id, "object": "model", "owned_by": "1router" }))
         .collect();
+
+    // <provider_id>/<model> entries for anything a live `/models` fetch has
+    // found (on provider creation, or via the admin UI's fetch actions) -
+    // cheap, since it's an in-memory cache read, not a network call. No
+    // dedup needed against the pool ids above: pool ids can never contain
+    // '/', so the two sets can't overlap.
+    for entry in s.discovered_models.iter() {
+        let provider_id = entry.key();
+        for model in entry.value() {
+            data.push(json!({
+                "id": format!("{provider_id}/{model}"),
+                "object": "model",
+                "owned_by": "1router"
+            }));
+        }
+    }
+
     Json(json!({ "object": "list", "data": data }))
 }

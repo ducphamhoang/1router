@@ -46,9 +46,17 @@ async fn calling_provider_slash_model_routes_directly_with_no_pool_at_all() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], true);
 
+    // Provider creation also fires a background, best-effort GET .../models
+    // against this same mock server (the auto-discovery cache warm-up) -
+    // filter to the actual chat-completions POST rather than assume it's
+    // the only request received.
     let received = upstream.received_requests().await.unwrap();
-    assert_eq!(received.len(), 1);
-    let sent_body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    let posts: Vec<_> = received
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::POST)
+        .collect();
+    assert_eq!(posts.len(), 1);
+    let sent_body: serde_json::Value = serde_json::from_slice(&posts[0].body).unwrap();
     assert_eq!(sent_body["model"], "deepseek-v4-pro", "must forward the requested model, not the provider's default upstream_model");
 }
 

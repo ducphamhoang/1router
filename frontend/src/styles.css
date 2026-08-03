@@ -6,6 +6,9 @@
   --accent: #2563eb;
   --accent-fg: #ffffff;
   --danger: #dc2626;
+  --danger-fg: #ffffff;
+  --danger-soft: #fef2f2;
+  --danger-border: #f3c3c3;
   --muted: #6b7280;
   --surface: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -18,6 +21,10 @@
     --border: #33343a;
     --surface: #202125;
     --muted: #9ca3af;
+    --danger: #f87171;
+    --danger-fg: #1c1c1e;
+    --danger-soft: #2c1c1e;
+    --danger-border: #5c2b2b;
   }
 }
 
@@ -191,4 +198,343 @@ p[role="status"] {
   color: #16a34a;
   font-size: 0.9rem;
   margin: 0;
+}
+
+/* ---------- shared button intents ---------- */
+/* Destructive actions must never look like the safe accent-blue default. */
+button.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-fg);
+  font-weight: 600;
+}
+
+/* A type="button" that is still the primary call to action. */
+button.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+button.btn-danger-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--danger);
+  font-weight: 500;
+}
+
+button.btn-danger-quiet:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+button.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+button.btn-ghost:hover:not(:disabled) {
+  color: var(--fg);
+}
+
+/* ---------- pools page ---------- */
+.page-intro {
+  margin: -0.25rem 0 1.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  max-width: 52ch;
+}
+
+.empty-state {
+  margin: 0.75rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  background: var(--bg);
+}
+
+/* ---------- pool list (main view) ---------- */
+.list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+}
+
+.pool-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+button.pool-row {
+  width: 100%;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  text-align: left;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+
+button.pool-row:hover {
+  border-color: var(--accent);
+}
+
+.pool-row-id {
+  font-weight: 600;
+}
+
+.pool-row-chevron {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 1.1rem;
+}
+
+/* ---------- modal ---------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+}
+
+.modal {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem 1.5rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+}
+
+button.modal-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  padding: 0.1rem 0.5rem;
+  font-size: 1.2rem;
+  line-height: 1.2;
+  border-color: transparent;
+}
+
+.modal-header {
+  padding-right: 2rem;
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.modal-footer {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pool-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.75rem;
+}
+
+.pool-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pool-identity h2 {
+  margin: 0;
+}
+
+.badge {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.pool-meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.confirm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.9rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--danger-border);
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: var(--danger-soft);
+  font-size: 0.9rem;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Numbered priority list: rank, name, override, then a clearly separated
+   action area (reorder group first, destructive Remove last). */
+.member-list {
+  counter-reset: none;
+}
+
+.member-list .member-row {
+  gap: 0.65rem;
+}
+
+.member-rank {
+  flex: 0 0 1.5rem;
+  height: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.member-name {
+  flex: 1 1 auto;
+  font-weight: 500;
+}
+
+.member-override {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.member-override-default {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.member-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  /* the gap is the point: reorder controls read as one unit, Remove is set apart */
+  gap: 1.1rem;
+}
+
+.reorder-group {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.member-confirm > span {
+  flex: 0 0 auto;
+}
+
+.member-list button.btn-reorder {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.3;
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.reorder-group button.btn-reorder:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.reorder-group button.btn-reorder:last-child {
+  border-radius: 0 6px 6px 0;
+  margin-left: -1px;
+}
+
+.member-list button.btn-reorder:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.member-confirm {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.member-list .member-confirm button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+}
+
+.add-member-form {
+  flex-direction: row;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  max-width: none;
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+
+.add-member-form label {
+  font-size: 0.8rem;
+}
+
+.add-member-form button[type="submit"] {
+  align-self: flex-end;
+}
+
+.add-member-form .optional {
+  opacity: 0.7;
+}
+
+.add-member-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
 }

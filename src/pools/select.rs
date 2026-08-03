@@ -3,7 +3,12 @@ use crate::core::state::ConfigSnapshot;
 
 pub struct Selection<'a> {
     pub pool: &'a Pool,
-    pub providers: Vec<&'a Provider>,
+    /// (provider, effective upstream model) pairs, in priority order. The
+    /// effective model is the member's `model_override` if set, else the
+    /// provider's own `upstream_model` - this is what lets one provider
+    /// (one credential set) be shared across pools that each call a
+    /// different model.
+    pub providers: Vec<(&'a Provider, String)>,
 }
 
 fn wire_eq(a: WireFormat, b: WireFormat) -> bool {
@@ -28,7 +33,14 @@ pub fn select<'a>(
 
     let providers = members
         .iter()
-        .filter_map(|m| snapshot.providers.iter().find(|p| p.id == m.provider_id))
+        .filter_map(|m| {
+            let provider = snapshot.providers.iter().find(|p| p.id == m.provider_id)?;
+            let model = m
+                .model_override
+                .clone()
+                .unwrap_or_else(|| provider.upstream_model.clone());
+            Some((provider, model))
+        })
         .collect();
 
     Some(Selection {
@@ -59,8 +71,8 @@ mod tests {
             pools: vec![PoolWithMembers {
                 pool: Pool { id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now() },
                 members: vec![
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20 },
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10 },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None },
                 ],
             }],
         }
@@ -70,8 +82,28 @@ mod tests {
     fn orders_by_priority_ascending() {
         let s = snap();
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi).unwrap();
-        let ids: Vec<&str> = sel.providers.iter().map(|p| p.id.as_str()).collect();
+        let ids: Vec<&str> = sel.providers.iter().map(|(p, _)| p.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn model_override_replaces_provider_upstream_model() {
+        let mut s = snap();
+        s.pools[0].members.push(PoolMember {
+            pool_id: "gpt-4o".into(),
+            provider_id: "a".into(),
+            priority: 10,
+            model_override: Some("gpt-5.6-sol".into()),
+        });
+        // dedupe: replace the "a" member from `snap()` with the overridden one
+        s.pools[0].members.retain(|m| m.provider_id != "a" || m.model_override.is_some());
+
+        let sel = select(&s, "gpt-4o", WireFormat::OpenAi).unwrap();
+        let (_, model) = sel.providers.iter().find(|(p, _)| p.id == "a").unwrap();
+        assert_eq!(model, "gpt-5.6-sol");
+
+        let (_, model_b) = sel.providers.iter().find(|(p, _)| p.id == "b").unwrap();
+        assert_eq!(model_b, "m", "falls back to the provider's own upstream_model when unset");
     }
 
     #[test]

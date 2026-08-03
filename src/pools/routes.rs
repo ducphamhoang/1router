@@ -70,6 +70,8 @@ async fn list_members(
 struct PutMember {
     provider_id: String,
     priority: i64,
+    #[serde(default)]
+    model_override: Option<String>,
 }
 
 async fn put_member(
@@ -93,13 +95,17 @@ async fn put_member(
             pool_id: pool_id.clone(),
             provider_id: b.provider_id.clone(),
             priority: b.priority,
+            model_override: b.model_override.clone(),
         },
     )
     .await?;
     reload_snapshot(&s).await?;
-    Ok(Json(
-        json!({ "pool_id": pool_id, "provider_id": b.provider_id, "priority": b.priority }),
-    ))
+    Ok(Json(json!({
+        "pool_id": pool_id,
+        "provider_id": b.provider_id,
+        "priority": b.priority,
+        "model_override": b.model_override,
+    })))
 }
 
 async fn delete_member(

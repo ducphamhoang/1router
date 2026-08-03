@@ -50,7 +50,7 @@ pub async fn delete_pool(db: &SqlitePool, id: &str) -> Result<(), AppError> {
 
 pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMember>, AppError> {
     Ok(sqlx::query_as::<_, PoolMember>(
-        "SELECT pool_id, provider_id, priority FROM pool_members WHERE pool_id = ? ORDER BY priority ASC",
+        "SELECT pool_id, provider_id, priority, model_override FROM pool_members WHERE pool_id = ? ORDER BY priority ASC",
     )
     .bind(pool_id)
     .fetch_all(db)
@@ -59,12 +59,13 @@ pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMemb
 
 pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppError> {
     let res = sqlx::query(
-        "INSERT INTO pool_members (pool_id, provider_id, priority) VALUES (?, ?, ?)
-         ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority = excluded.priority",
+        "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?, ?, ?, ?)
+         ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority = excluded.priority, model_override = excluded.model_override",
     )
     .bind(&m.pool_id)
     .bind(&m.provider_id)
     .bind(m.priority)
+    .bind(&m.model_override)
     .execute(db)
     .await;
 
@@ -146,6 +147,7 @@ mod tests {
                 pool_id: "gpt-4o".into(),
                 provider_id: "p1".into(),
                 priority: 5,
+                model_override: None,
             },
         )
         .await
@@ -160,11 +162,14 @@ mod tests {
                 pool_id: "gpt-4o".into(),
                 provider_id: "p1".into(),
                 priority: 1,
+                model_override: Some("gpt-5.6-sol".into()),
             },
         )
         .await
         .unwrap();
-        assert_eq!(list_members(&db, "gpt-4o").await.unwrap()[0].priority, 1);
+        let updated = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(updated[0].priority, 1);
+        assert_eq!(updated[0].model_override.as_deref(), Some("gpt-5.6-sol"));
 
         delete_member(&db, "gpt-4o", "p1").await.unwrap();
         assert!(list_members(&db, "gpt-4o").await.unwrap().is_empty());

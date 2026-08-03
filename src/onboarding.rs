@@ -90,13 +90,17 @@ use crate::pools::queries as pool_queries;
 
 /// Add `provider` to `pool_id`, creating the pool if needed.
 ///
-/// Deliberately takes `pool_id` rather than prompting for it, so the whole
-/// DB-touching part of the pool step is unit testable; the prompt lives in
-/// `run_wizard`.
+/// Deliberately takes `pool_id` (and `model_override`) rather than prompting
+/// for them, so the whole DB-touching part of the pool step is unit
+/// testable; the prompts live in `run_wizard`. `model_override` lets the
+/// same already-authenticated provider be reused across several pools that
+/// each call a different upstream model (e.g. one Codex OAuth login serving
+/// `codex-sol`/`codex-terra`/`codex-luna` pools).
 pub async fn assign_to_pool(
     db: &sqlx::SqlitePool,
     pool_id: &str,
     provider: &Provider,
+    model_override: Option<String>,
 ) -> anyhow::Result<i64> {
     match pool_queries::get_pool(db, pool_id).await {
         Ok(_) => {}
@@ -129,6 +133,7 @@ pub async fn assign_to_pool(
             pool_id: pool_id.to_string(),
             provider_id: provider.id.clone(),
             priority,
+            model_override,
         },
     )
     .await
@@ -641,11 +646,61 @@ pub async fn run_wizard(
                 )
             })?;
         let pool_id = pool_id.trim().to_string();
-        let priority = assign_to_pool(db, &pool_id, &provider).await?;
+        let priority = assign_to_pool(db, &pool_id, &provider, None).await?;
         println!(
             "  added '{}' to pool '{pool_id}' at priority {priority}",
             provider.id
         );
+
+        // Let the same already-authenticated provider serve more pools under
+        // different upstream models (e.g. one Codex OAuth login backing
+        // codex-sol/codex-terra/codex-luna) without re-running the OAuth
+        // dance or creating duplicate provider rows.
+        let mut add_more_pools = Confirm::with_theme(&theme())
+            .with_prompt(format!(
+                "Add '{}' to another pool with a different model?",
+                provider.id
+            ))
+            .default(false)
+            .interact()?;
+        while add_more_pools {
+            let extra_pool_id: String = Input::with_theme(&theme())
+                .with_prompt("Pool id (this is the `model` name clients will request)")
+                .interact_text()?;
+            let extra_pool_id = extra_pool_id.trim().to_string();
+
+            let model_override: String = Input::with_theme(&theme())
+                .with_prompt(format!(
+                    "Model override for this pool (blank = use '{}')",
+                    provider.upstream_model
+                ))
+                .allow_empty(true)
+                .interact_text()?;
+            let model_override = model_override.trim();
+            let model_override = if model_override.is_empty() {
+                None
+            } else {
+                Some(model_override.to_string())
+            };
+
+            let priority =
+                assign_to_pool(db, &extra_pool_id, &provider, model_override.clone()).await?;
+            println!(
+                "  added '{}' to pool '{extra_pool_id}' at priority {priority}{}",
+                provider.id,
+                model_override
+                    .map(|m| format!(" (model override: '{m}')"))
+                    .unwrap_or_default()
+            );
+
+            add_more_pools = Confirm::with_theme(&theme())
+                .with_prompt(format!(
+                    "Add '{}' to yet another pool with a different model?",
+                    provider.id
+                ))
+                .default(false)
+                .interact()?;
+        }
 
         ask = Confirm::with_theme(&theme())
             .with_prompt("Add another provider?")
@@ -669,7 +724,7 @@ mod tests {
     use crate::core::model::PoolMember;
 
     fn member(priority: i64) -> PoolMember {
-        PoolMember { pool_id: "p".into(), provider_id: "x".into(), priority }
+        PoolMember { pool_id: "p".into(), provider_id: "x".into(), priority, model_override: None }
     }
 
     #[test]
@@ -790,7 +845,7 @@ mod tests {
         let p = provider("p1", WireFormat::OpenAi);
         insert_provider(&db, &p).await.unwrap();
 
-        let prio = assign_to_pool(&db, "my-pool", &p).await.unwrap();
+        let prio = assign_to_pool(&db, "my-pool", &p, None).await.unwrap();
         assert_eq!(prio, 1);
 
         let pool = crate::pools::queries::get_pool(&db, "my-pool").await.unwrap();
@@ -806,7 +861,7 @@ mod tests {
         let db = init_pool(":memory:").await.unwrap();
         let p = provider("p1", WireFormat::Anthropic);
         insert_provider(&db, &p).await.unwrap();
-        assign_to_pool(&db, "anth-pool", &p).await.unwrap();
+        assign_to_pool(&db, "anth-pool", &p, None).await.unwrap();
         assert_eq!(
             crate::pools::queries::get_pool(&db, "anth-pool").await.unwrap().wire_format,
             WireFormat::Anthropic
@@ -821,17 +876,38 @@ mod tests {
         insert_provider(&db, &first).await.unwrap();
         insert_provider(&db, &second).await.unwrap();
 
-        assign_to_pool(&db, "shared", &first).await.unwrap();
+        assign_to_pool(&db, "shared", &first, None).await.unwrap();
         // bump the incumbent to a sparse priority
         crate::pools::queries::upsert_member(
             &db,
-            &PoolMember { pool_id: "shared".into(), provider_id: "p1".into(), priority: 10 },
+            &PoolMember { pool_id: "shared".into(), provider_id: "p1".into(), priority: 10, model_override: None },
         )
         .await
         .unwrap();
 
-        let prio = assign_to_pool(&db, "shared", &second).await.unwrap();
+        let prio = assign_to_pool(&db, "shared", &second, None).await.unwrap();
         assert_eq!(prio, 11, "must go behind the incumbent, not in front of it");
+    }
+
+    #[tokio::test]
+    async fn assign_with_override_lets_one_provider_serve_several_model_pools() {
+        let db = init_pool(":memory:").await.unwrap();
+        let p = provider("codex", WireFormat::OpenAi);
+        insert_provider(&db, &p).await.unwrap();
+
+        assign_to_pool(&db, "codex-sol", &p, Some("gpt-5.6-sol".into()))
+            .await
+            .unwrap();
+        assign_to_pool(&db, "codex-luna", &p, Some("gpt-5.6-luna".into()))
+            .await
+            .unwrap();
+
+        let sol_members = crate::pools::queries::list_members(&db, "codex-sol").await.unwrap();
+        assert_eq!(sol_members[0].provider_id, "codex");
+        assert_eq!(sol_members[0].model_override.as_deref(), Some("gpt-5.6-sol"));
+
+        let luna_members = crate::pools::queries::list_members(&db, "codex-luna").await.unwrap();
+        assert_eq!(luna_members[0].model_override.as_deref(), Some("gpt-5.6-luna"));
     }
 
     #[tokio::test]
@@ -853,7 +929,7 @@ mod tests {
         .await
         .unwrap();
 
-        assign_to_pool(&db, "pre", &p).await.unwrap();
+        assign_to_pool(&db, "pre", &p, None).await.unwrap();
         // still the original row (a Conflict from a second insert_pool would
         // have surfaced as an Err above)
         assert_eq!(crate::pools::queries::get_pool(&db, "pre").await.unwrap().created_at, created);

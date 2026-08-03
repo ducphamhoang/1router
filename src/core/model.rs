@@ -42,6 +42,11 @@ pub struct PoolMember {
     pub pool_id: String,
     pub provider_id: String,
     pub priority: i64,
+    /// Overrides the provider's `upstream_model` for requests routed through
+    /// this pool/provider pairing. Lets one provider (one credential set) be
+    /// shared across several pools that each target a different upstream
+    /// model.
+    pub model_override: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

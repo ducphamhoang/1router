@@ -102,12 +102,13 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
     }
     for m in &dump.members {
         sqlx::query(
-            "INSERT INTO pool_members (pool_id, provider_id, priority) VALUES (?,?,?)
-             ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority=excluded.priority",
+            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?,?,?,?)
+             ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority=excluded.priority, model_override=excluded.model_override",
         )
         .bind(&m.pool_id)
         .bind(&m.provider_id)
         .bind(m.priority)
+        .bind(&m.model_override)
         .execute(&mut *tx)
         .await?;
     }
@@ -158,6 +159,7 @@ mod tests {
                 pool_id: "gpt-4o".into(),
                 provider_id: "does-not-exist".into(),
                 priority: 1,
+                model_override: None,
             }],
         };
 

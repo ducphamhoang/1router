@@ -78,7 +78,7 @@ pub async fn handle_proxy(
     let mut last_error_body = String::from("no provider produced a response");
     let mut last_provider = String::new();
 
-    for provider in &selection.providers {
+    for (provider, effective_model) in &selection.providers {
         let now = Instant::now();
         {
             let st = state.runtime.entry(provider.id.clone()).or_default();
@@ -88,6 +88,15 @@ pub async fn handle_proxy(
         }
         tried.push(provider.id.clone());
         last_provider = provider.id.clone();
+
+        // Adapters read `provider.upstream_model` directly; route the
+        // pool-member's effective model (its override, or the provider's own
+        // default) through a cheap per-request clone rather than threading it
+        // through the ProviderAdapter trait.
+        let provider = &Provider {
+            upstream_model: effective_model.clone(),
+            ..(*provider).clone()
+        };
 
         let adapter = adapter_for(provider, state.http.clone());
         let creds = credentials_for(&state, provider).await;

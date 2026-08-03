@@ -3,6 +3,7 @@
 *.db
 *.db-wal
 *.db-shm
+.router_secret
 .superpowers/
 frontend/node_modules/
 frontend/dist/

@@ -35,6 +35,35 @@ function describeCount(count: number) {
   return count === 0 ? "no providers" : count === 1 ? "1 provider" : `${count} providers`;
 }
 
+// Suggestions only - the input still accepts any free-text model name, since
+// upstream providers add new ones faster than this list could track.
+// DeepSeek is reachable through either wire format (its own OpenAI- and
+// Anthropic-compatible endpoints), not a format of its own - so its model
+// names belong in both lists rather than a third one keyed off nothing.
+const DEEPSEEK_MODEL_SUGGESTIONS = ["deepseek-v4-flash", "deepseek-v4-pro"];
+
+const OPENAI_MODEL_SUGGESTIONS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5-codex",
+  ...DEEPSEEK_MODEL_SUGGESTIONS
+];
+
+const ANTHROPIC_MODEL_SUGGESTIONS = [
+  "claude-fable-5",
+  "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-haiku-4-5",
+  ...DEEPSEEK_MODEL_SUGGESTIONS
+];
+
+type ValidationState = { state: "checking" | "ok" | "error"; message?: string };
+
 export function Pools() {
   const [pools, setPools] = useState<Pool[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -42,6 +71,7 @@ export function Pools() {
   const [poolId, setPoolId] = useState("");
   const [wireFormat, setWireFormat] = useState("openai");
   const [addMemberDraft, setAddMemberDraft] = useState<Record<string, { providerId: string; modelOverride: string }>>({});
+  const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [error, setError] = useState<string | null>(null);
   // The page is list-and-modal: the list identifies pools, everything you can
   // *do* to a pool happens inside a dialog so the list stays scannable.
@@ -151,6 +181,42 @@ export function Pools() {
 
   function setDraftFor(poolId: string, patch: Partial<{ providerId: string; modelOverride: string }>) {
     setAddMemberDraft((current) => ({ ...current, [poolId]: { ...draftFor(poolId), ...patch } }));
+    // Any edit to what's being added invalidates a prior "this model is
+    // reachable" check, so it can't be mistaken for a check of the new value.
+    setValidation((current) => {
+      const next = { ...current };
+      delete next[poolId];
+      return next;
+    });
+  }
+
+  async function validateModel(pool: Pool) {
+    const draft = draftFor(pool.id);
+    if (!draft.providerId) {
+      return;
+    }
+    setValidation((current) => ({ ...current, [pool.id]: { state: "checking" } }));
+    try {
+      const result = await apiJson<{ ok: boolean; status?: number; message?: string }>(
+        `/admin/providers/${encodeURIComponent(draft.providerId)}/validate-model`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: draft.modelOverride.trim() || undefined })
+        }
+      );
+      setValidation((current) => ({
+        ...current,
+        [pool.id]: result.ok
+          ? { state: "ok" }
+          : { state: "error", message: result.message || `Upstream returned HTTP ${result.status}.` }
+      }));
+    } catch (err) {
+      setValidation((current) => ({
+        ...current,
+        [pool.id]: { state: "error", message: err instanceof Error ? err.message : "Validation request failed." }
+      }));
+    }
   }
 
   // A provider's OAuth credentials (e.g. one Codex/ChatGPT login) can be
@@ -370,12 +436,49 @@ export function Pools() {
           </label>
           <label>
             Model override <span className="optional">optional</span>
-            <input
-              aria-label={`Model override for ${pool.id}`}
-              placeholder="blank = provider's own upstream_model"
-              value={draftFor(pool.id).modelOverride}
-              onChange={(event) => setDraftFor(pool.id, { modelOverride: event.target.value })}
-            />
+            <div className="model-override-row">
+              <input
+                aria-label={`Model override for ${pool.id}`}
+                placeholder="blank = provider's own upstream_model"
+                list={`model-suggestions-${pool.id}`}
+                value={draftFor(pool.id).modelOverride}
+                onChange={(event) => setDraftFor(pool.id, { modelOverride: event.target.value })}
+              />
+              <datalist id={`model-suggestions-${pool.id}`}>
+                {(pool.wire_format === "anthropic" ? ANTHROPIC_MODEL_SUGGESTIONS : OPENAI_MODEL_SUGGESTIONS).map(
+                  (model) => (
+                    <option key={model} value={model} />
+                  )
+                )}
+              </datalist>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void validateModel(pool)}
+                disabled={!draftFor(pool.id).providerId || validation[pool.id]?.state === "checking"}
+                aria-label={`Validate model for ${pool.id}`}
+              >
+                Validate
+              </button>
+            </div>
+            {validation[pool.id] ? (
+              <span
+                className={
+                  validation[pool.id].state === "ok"
+                    ? "validation-result validation-ok"
+                    : validation[pool.id].state === "error"
+                      ? "validation-result validation-error"
+                      : "validation-result"
+                }
+                role={validation[pool.id].state === "error" ? "alert" : "status"}
+              >
+                {validation[pool.id].state === "checking"
+                  ? "Sending a test request…"
+                  : validation[pool.id].state === "ok"
+                    ? "✓ Model responded successfully."
+                    : `✗ ${validation[pool.id].message}`}
+              </span>
+            ) : null}
           </label>
           <button type="submit" disabled={!draftFor(pool.id).providerId}>
             Add to pool
@@ -456,7 +559,7 @@ export function Pools() {
               <button type="button" className="btn-ghost" onClick={() => setCreateOpen(false)} aria-label="Cancel creating pool">
                 Cancel
               </button>
-              <button type="submit" aria-label="Submit new pool">
+              <button type="submit" aria-label="Submit new pool" disabled={!poolId.trim() || poolId.includes("/")}>
                 Create pool
               </button>
             </div>

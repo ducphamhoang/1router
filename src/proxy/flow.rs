@@ -14,7 +14,7 @@ use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
 use crate::proxy::backoff;
 use crate::proxy::error_response::wire_error;
 
-async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
+pub(crate) async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
     if let Ok(Some(os)) = get_oauth_state(&state.db, &provider.id).await {
         Credentials {
             api_key: provider.api_key.clone(),

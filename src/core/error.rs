@@ -53,6 +53,22 @@ impl IntoResponse for AppError {
     }
 }
 
+/// `id` becomes a URL path segment everywhere (`/admin/pools/:id`,
+/// `/admin/providers/:id/...`), so an empty or `/`-containing id can be
+/// created via the JSON body (nothing stops that at the type level) but can
+/// then never be addressed again - matchit won't route an empty segment,
+/// and a literal `/` inside one just becomes extra path segments. Reject
+/// both at creation instead of leaving an unreachable row behind.
+pub fn validate_path_id(id: &str) -> Result<(), AppError> {
+    if id.trim().is_empty() {
+        return Err(AppError::BadRequest("id must not be empty".into()));
+    }
+    if id.contains('/') {
+        return Err(AppError::BadRequest("id must not contain '/'".into()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorClass {
     Success,
@@ -104,6 +120,14 @@ mod tests {
             AppError::Internal("x".into()).into_response().status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn validate_path_id_rejects_empty_or_slash_containing_ids() {
+        assert!(validate_path_id("codex-sol").is_ok());
+        assert!(validate_path_id("").is_err());
+        assert!(validate_path_id("   ").is_err());
+        assert!(validate_path_id("a/b").is_err());
     }
 
     #[test]

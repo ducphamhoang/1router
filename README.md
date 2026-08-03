@@ -35,7 +35,10 @@ Walks you through: creating an admin secret (stored in `.router_secret` next to
 the SQLite file, mode 0600), adding one provider — either a passthrough
 OpenAI/Anthropic-compatible endpoint, or a Codex/ChatGPT account via OAuth (the
 wizard probes which `upstream_model` your account accepts) — and putting it in
-a pool. Then just run `1router`.
+a pool. It then offers to add that same provider to further pools under a
+different `model_override` (e.g. one Codex OAuth login backing separate
+`codex-sol`/`codex-terra`/`codex-luna` pools) without repeating the OAuth
+dance or creating a duplicate provider row. Then just run `1router`.
 
 The same wizard runs automatically on first boot when the database is empty,
 `ROUTER_SEED_PATH` is unset, and stdin is a terminal.
@@ -71,7 +74,15 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 `<pool-id>` is whatever you named the pool during setup — that's the value
-clients put in `model`; there's no way to address a provider directly.
+clients put in `model`. There's no way to address a provider directly; every
+call routes through a pool, even a 1-member one. The setup wizard and the
+admin UI's "Make it directly callable" checkbox (see "Admin web UI" below)
+both default to creating that 1-member pool automatically, using the
+provider's own id/name, so in practice a single-provider setup still reads
+as "call the model by name" — e.g. a provider named `deepseek-flash` becomes
+`"model":"deepseek-flash"` with no extra pool-management step. Reach for a
+multi-member pool only when you want round-robin or failover across more
+than one provider under one name.
 
 ## Configuration (environment variables)
 
@@ -126,13 +137,43 @@ what's explicitly out of scope for v1 — see:
 - [`docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`](docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md) — the `setup` wizard's design
 - [`docs/superpowers/plans/`](docs/superpowers/plans/) — task-by-task implementation plans, useful for "why is this code shaped this way" archaeology
 
+## Admin web UI
+
+With the default `ui` feature enabled, `http://<host>:8080/ui/` serves a small
+admin dashboard — Providers, Pools, and Settings — for everything the wizard's
+one-shot flow doesn't cover (editing, deleting, reordering).
+
+Login is username `admin` with its own password, separate from
+`ROUTER_SHARED_SECRET`: if headless setup didn't seed one (see "Forgot the
+admin UI password?" above), one is generated and logged **once** at first
+boot the same way the shared secret is. It's session-cookie based, not the
+`Authorization: Bearer` header used everywhere else.
+
+**Providers page**: the "New provider" form has a "Make it directly
+callable" checkbox, checked by default, which — on save — also creates a
+pool with the same id and adds the provider as its only member, so the
+provider's id becomes usable as `model` immediately with no separate trip to
+the Pools page. Uncheck it if you're adding the provider to fold into an
+existing pool yourself instead. A preset dropdown (OpenAI/Anthropic/DeepSeek)
+pre-fills wire format, base URL, and model — every field stays editable
+after picking one.
+
+**Pools page**: pools are listed by name; tapping one opens a dialog to
+manage its providers — reorder (drag or ↑/↓), remove, or add a provider with
+an optional per-pool `model_override` (what lets one provider's credentials
+serve several pools calling different upstream models). The model field
+offers common GPT/Claude model names as suggestions but takes any free text,
+and a **Validate** button next to it sends a real one-token "hi" request
+through that provider's own adapter to confirm the model name is actually
+callable before you save it.
+
 ## Admin API
 
-Once running, providers/pools/members can be managed via the admin API
+Everything the web UI does is also available as a plain HTTP API
 (`POST /admin/providers`, `POST /admin/pools`, `PUT /admin/pools/:id/members`,
-etc.), all behind the same `Authorization: Bearer <admin-secret>` header. The
-wizard only adds — there is no interactive edit/delete flow; use the admin API
-for that.
+`POST /admin/providers/:id/validate-model`, etc.), behind the same
+`Authorization: Bearer <admin-secret>` header — useful for scripting or CI.
+The setup wizard only adds; use the UI or this API for edits/deletes.
 
 ## Build & test
 
@@ -140,5 +181,11 @@ for that.
 cargo build --offline
 cargo test --offline
 ```
+
+The `ui` feature (default-on) builds the embedded admin dashboard via `npm`
+as part of `cargo build`, so it needs Node.js on the build machine (not at
+runtime — the built assets are embedded in the binary). Build with
+`--no-default-features` to skip the dashboard entirely and drop that
+dependency.
 
 See `CLAUDE.md` for full build/test conventions.

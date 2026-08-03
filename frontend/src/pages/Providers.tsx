@@ -24,6 +24,43 @@ const emptyForm: ProviderForm = {
   upstream_model: ""
 };
 
+// Pre-fills wire_format/base_url/upstream_model for a new provider; every
+// field stays editable afterward, and "Custom" (no preset applied) stays the
+// default so this never gets in the way of an unlisted provider.
+type ProviderPreset = {
+  label: string;
+  wire_format: string;
+  base_url: string;
+  upstream_model: string;
+};
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    label: "OpenAI",
+    wire_format: "openai",
+    base_url: "https://api.openai.com/v1/chat/completions",
+    upstream_model: "gpt-5.4"
+  },
+  {
+    label: "Anthropic",
+    wire_format: "anthropic",
+    base_url: "https://api.anthropic.com/v1/messages",
+    upstream_model: "claude-sonnet-5"
+  },
+  {
+    label: "DeepSeek (OpenAI-compatible)",
+    wire_format: "openai",
+    base_url: "https://api.deepseek.com/v1/chat/completions",
+    upstream_model: "deepseek-v4-flash"
+  },
+  {
+    label: "DeepSeek (Anthropic-compatible)",
+    wire_format: "anthropic",
+    base_url: "https://api.deepseek.com/anthropic/v1/messages",
+    upstream_model: "deepseek-v4-flash"
+  }
+];
+
 export function Providers() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [states, setStates] = useState<Record<string, string>>({});
@@ -31,6 +68,8 @@ export function Providers() {
   const [form, setForm] = useState<ProviderForm>(emptyForm);
   const [modalOpen, setModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preset, setPreset] = useState("custom");
+  const [exposeAsPool, setExposeAsPool] = useState(true);
 
   async function loadProviders() {
     setProviders(await apiJson<Provider[]>("/admin/providers"));
@@ -73,7 +112,26 @@ export function Providers() {
   function openNew() {
     setEditing(null);
     setForm(emptyForm);
+    setPreset("custom");
+    setExposeAsPool(true);
     setModalOpen(true);
+  }
+
+  function applyPreset(label: string) {
+    setPreset(label);
+    if (label === "custom") {
+      return;
+    }
+    const chosen = PROVIDER_PRESETS.find((preset) => preset.label === label);
+    if (!chosen) {
+      return;
+    }
+    setForm((current) => ({
+      ...current,
+      wire_format: chosen.wire_format,
+      base_url: chosen.base_url,
+      upstream_model: chosen.upstream_model
+    }));
   }
 
   function openEdit(provider: Provider) {
@@ -107,6 +165,34 @@ export function Providers() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+
+      if (!editing && exposeAsPool) {
+        // Best-effort: the provider is already saved above, so a pool-name
+        // clash here (e.g. that id is already a pool of a different
+        // wire_format) must surface as a warning, not undo the provider.
+        try {
+          await apiJson("/admin/pools", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: form.id, wire_format: form.wire_format })
+          });
+          await apiJson(`/admin/pools/${encodeURIComponent(form.id)}/members`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider_id: form.id, priority: 1 })
+          });
+        } catch (err) {
+          setError(
+            `Provider '${form.id}' was created, but could not expose it as a pool: ${
+              err instanceof Error ? err.message : "unknown error"
+            }. Add it to a pool from the Pools page instead.`
+          );
+          setModalOpen(false);
+          await loadProviders();
+          return;
+        }
+      }
+
       setModalOpen(false);
       await loadProviders();
     } catch (error) {
@@ -164,10 +250,23 @@ export function Providers() {
       {modalOpen ? (
         <form aria-label="Provider form" onSubmit={saveProvider}>
           {!editing ? (
-            <label>
-              Provider ID
-              <input value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} />
-            </label>
+            <>
+              <label>
+                Preset <span className="optional">optional</span>
+                <select value={preset} onChange={(event) => applyPreset(event.target.value)}>
+                  <option value="custom">Custom</option>
+                  {PROVIDER_PRESETS.map((p) => (
+                    <option key={p.label} value={p.label}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Provider ID
+                <input value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} />
+              </label>
+            </>
           ) : null}
           <label>
             Name
@@ -199,9 +298,22 @@ export function Providers() {
             Upstream model
             <input value={form.upstream_model} onChange={(event) => setForm({ ...form, upstream_model: event.target.value })} />
           </label>
+          {!editing ? (
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={exposeAsPool}
+                onChange={(event) => setExposeAsPool(event.target.checked)}
+              />
+              Make it directly callable (creates a matching pool, e.g. call <code>{form.id || "<id>"}</code> as the
+              model)
+            </label>
+          ) : null}
           {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
           {error ? <p role="alert">{error}</p> : null}
-          <button type="submit">Save provider</button>
+          <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
+            Save provider
+          </button>
         </form>
       ) : null}
     </section>

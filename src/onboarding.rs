@@ -150,6 +150,44 @@ fn theme() -> dialoguer::theme::ColorfulTheme {
     dialoguer::theme::ColorfulTheme::default()
 }
 
+/// Pre-fills wire_format/base_url/upstream_model for a common provider;
+/// every value is still just the prompt's *default*, editable by pressing a
+/// different key before Enter. Mirrors PROVIDER_PRESETS in
+/// frontend/src/pages/Providers.tsx - keep the two in sync if either grows.
+struct ProviderPreset {
+    label: &'static str,
+    wire_format: WireFormat,
+    base_url: &'static str,
+    upstream_model: &'static str,
+}
+
+const PROVIDER_PRESETS: [ProviderPreset; 4] = [
+    ProviderPreset {
+        label: "OpenAI",
+        wire_format: WireFormat::OpenAi,
+        base_url: "https://api.openai.com/v1/chat/completions",
+        upstream_model: "gpt-5.4",
+    },
+    ProviderPreset {
+        label: "Anthropic",
+        wire_format: WireFormat::Anthropic,
+        base_url: "https://api.anthropic.com/v1/messages",
+        upstream_model: "claude-sonnet-5",
+    },
+    ProviderPreset {
+        label: "DeepSeek (OpenAI-compatible)",
+        wire_format: WireFormat::OpenAi,
+        base_url: "https://api.deepseek.com/v1/chat/completions",
+        upstream_model: "deepseek-v4-flash",
+    },
+    ProviderPreset {
+        label: "DeepSeek (Anthropic-compatible)",
+        wire_format: WireFormat::Anthropic,
+        base_url: "https://api.deepseek.com/anthropic/v1/messages",
+        upstream_model: "deepseek-v4-flash",
+    },
+];
+
 pub(crate) fn build_passthrough_row(
     name: &str,
     wire_format: WireFormat,
@@ -188,10 +226,23 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
         .interact_text()?;
     let name = name.trim().to_string();
 
+    let mut preset_items: Vec<&str> = vec!["Custom"];
+    preset_items.extend(PROVIDER_PRESETS.iter().map(|p| p.label));
+    let preset_choice = Select::with_theme(&theme())
+        .with_prompt("Preset (pre-fills the fields below; all stay editable)")
+        .items(&preset_items)
+        .default(0)
+        .interact()?;
+    let preset = (preset_choice > 0).then(|| &PROVIDER_PRESETS[preset_choice - 1]);
+
+    let wire_format_default = match preset.map(|p| p.wire_format) {
+        Some(WireFormat::Anthropic) => 1,
+        _ => 0,
+    };
     let wire_format = match Select::with_theme(&theme())
         .with_prompt("Wire format")
         .items(["openai", "anthropic"])
-        .default(0)
+        .default(wire_format_default)
         .interact()?
     {
         0 => WireFormat::OpenAi,
@@ -202,17 +253,25 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
         "  note: base_url is POSTed as-is - include the full upstream path, \
          e.g. https://api.openai.com/v1/chat/completions"
     );
-    let base_url: String = Input::with_theme(&theme())
-        .with_prompt("Upstream base_url (full path)")
-        .interact_text()?;
+    let base_url_theme = theme();
+    let mut base_url_prompt =
+        Input::<String>::with_theme(&base_url_theme).with_prompt("Upstream base_url (full path)");
+    if let Some(p) = preset {
+        base_url_prompt = base_url_prompt.default(p.base_url.to_string());
+    }
+    let base_url: String = base_url_prompt.interact_text()?;
 
     let api_key: String = Password::with_theme(&theme())
         .with_prompt("API key (input hidden)")
         .interact()?;
 
-    let upstream_model: String = Input::with_theme(&theme())
-        .with_prompt("Upstream model (the real model name this provider expects)")
-        .interact_text()?;
+    let model_theme = theme();
+    let mut model_prompt = Input::<String>::with_theme(&model_theme)
+        .with_prompt("Upstream model (the real model name this provider expects)");
+    if let Some(p) = preset {
+        model_prompt = model_prompt.default(p.upstream_model.to_string());
+    }
+    let upstream_model: String = model_prompt.interact_text()?;
 
     let p = build_passthrough_row(
         &name,

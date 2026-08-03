@@ -40,6 +40,7 @@ async fn create(
     State(s): State<AppState>,
     Json(b): Json<CreatePool>,
 ) -> Result<(StatusCode, Json<Pool>), AppError> {
+    crate::core::error::validate_path_id(&b.id)?;
     let p = Pool {
         id: b.id,
         wire_format: b.wire_format,

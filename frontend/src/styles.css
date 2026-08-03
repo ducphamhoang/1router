@@ -538,3 +538,43 @@ button.modal-close {
   font-size: 0.8rem;
   color: var(--muted);
 }
+
+.model-override-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.model-override-row input {
+  flex: 1;
+}
+
+.model-override-row button {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.validation-result {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.validation-result.validation-ok {
+  color: #16a34a;
+}
+
+.validation-result.validation-error {
+  color: var(--danger);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-direction: row;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: auto;
+}

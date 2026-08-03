@@ -51,13 +51,13 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     label: "DeepSeek (OpenAI-compatible)",
     wire_format: "openai",
     base_url: "https://api.deepseek.com/v1/chat/completions",
-    upstream_model: "deepseek-v4-flash"
+    upstream_model: "deepseek-flash"
   },
   {
     label: "DeepSeek (Anthropic-compatible)",
     wire_format: "anthropic",
     base_url: "https://api.deepseek.com/anthropic/v1/messages",
-    upstream_model: "deepseek-v4-flash"
+    upstream_model: "deepseek-flash"
   }
 ];
 

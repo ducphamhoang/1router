@@ -40,9 +40,12 @@ function describeCount(count: number) {
 // DeepSeek is reachable through either wire format (its own OpenAI- and
 // Anthropic-compatible endpoints), not a format of its own - so its model
 // names belong in both lists rather than a third one keyed off nothing.
-const DEEPSEEK_MODEL_SUGGESTIONS = ["deepseek-v4-flash", "deepseek-v4-pro"];
+const DEEPSEEK_MODEL_SUGGESTIONS = ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"];
 
 const OPENAI_MODEL_SUGGESTIONS = [
+  "codex-luna",
+  "codex-sol",
+  "codex-vng",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -64,6 +67,11 @@ const ANTHROPIC_MODEL_SUGGESTIONS = [
 
 type ValidationState = { state: "checking" | "ok" | "error"; message?: string };
 
+// Live models fetched from the provider's own `/models` endpoint, when it
+// has one - falls back to the static suggestion arrays above when it
+// doesn't (Codex OAuth) or the call fails (e.g. a mirror without `/models`).
+type ModelFetchState = { status: "loading" } | { status: "ok"; models: string[] } | { status: "error"; message: string };
+
 export function Pools() {
   const [pools, setPools] = useState<Pool[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -72,6 +80,7 @@ export function Pools() {
   const [wireFormat, setWireFormat] = useState("openai");
   const [addMemberDraft, setAddMemberDraft] = useState<Record<string, { providerId: string; modelOverride: string }>>({});
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
+  const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
   const [error, setError] = useState<string | null>(null);
   // The page is list-and-modal: the list identifies pools, everything you can
   // *do* to a pool happens inside a dialog so the list stays scannable.
@@ -188,6 +197,42 @@ export function Pools() {
       delete next[poolId];
       return next;
     });
+    // A fetched model list is specific to the previously-chosen provider -
+    // switching providers must drop it rather than keep offering the old
+    // provider's models under the new one.
+    if (patch.providerId !== undefined) {
+      setModelFetch((current) => {
+        const next = { ...current };
+        delete next[poolId];
+        return next;
+      });
+    }
+  }
+
+  async function fetchModels(pool: Pool) {
+    const draft = draftFor(pool.id);
+    if (!draft.providerId) {
+      return;
+    }
+    setModelFetch((current) => ({ ...current, [pool.id]: { status: "loading" } }));
+    try {
+      const result = await apiJson<{ ok: boolean; models?: string[]; reason?: string }>(
+        `/admin/providers/${encodeURIComponent(draft.providerId)}/list-models`
+      );
+      if (result.ok && result.models && result.models.length > 0) {
+        setModelFetch((current) => ({ ...current, [pool.id]: { status: "ok", models: result.models! } }));
+      } else {
+        setModelFetch((current) => ({
+          ...current,
+          [pool.id]: { status: "error", message: result.reason ?? "No models returned." }
+        }));
+      }
+    } catch (err) {
+      setModelFetch((current) => ({
+        ...current,
+        [pool.id]: { status: "error", message: err instanceof Error ? err.message : "Fetching models failed." }
+      }));
+    }
   }
 
   async function validateModel(pool: Pool) {
@@ -296,6 +341,7 @@ export function Pools() {
     const members = membersByPool[pool.id] ?? [];
     const eligibleProviders = providers.filter((provider) => provider.wire_format === pool.wire_format);
     const poolDeleteKey = `pool:${pool.id}`;
+    const fetchState = modelFetch[pool.id];
     return (
       <Modal label={`Pool ${pool.id}`} onClose={closeDetail}>
         <header className="modal-header">
@@ -445,12 +491,24 @@ export function Pools() {
                 onChange={(event) => setDraftFor(pool.id, { modelOverride: event.target.value })}
               />
               <datalist id={`model-suggestions-${pool.id}`}>
-                {(pool.wire_format === "anthropic" ? ANTHROPIC_MODEL_SUGGESTIONS : OPENAI_MODEL_SUGGESTIONS).map(
-                  (model) => (
-                    <option key={model} value={model} />
-                  )
-                )}
+                {(fetchState?.status === "ok"
+                  ? fetchState.models
+                  : pool.wire_format === "anthropic"
+                    ? ANTHROPIC_MODEL_SUGGESTIONS
+                    : OPENAI_MODEL_SUGGESTIONS
+                ).map((model) => (
+                  <option key={model} value={model} />
+                ))}
               </datalist>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void fetchModels(pool)}
+                disabled={!draftFor(pool.id).providerId || fetchState?.status === "loading"}
+                aria-label={`Fetch models for ${pool.id}`}
+              >
+                {fetchState?.status === "loading" ? "Fetching…" : "Fetch models"}
+              </button>
               <button
                 type="button"
                 className="btn-ghost"
@@ -461,6 +519,15 @@ export function Pools() {
                 Validate
               </button>
             </div>
+            {fetchState?.status === "ok" ? (
+              <span className="validation-result validation-ok" role="status">
+                ✓ Showing {fetchState.models.length} live model{fetchState.models.length === 1 ? "" : "s"} from the provider.
+              </span>
+            ) : fetchState?.status === "error" ? (
+              <span className="validation-result validation-error" role="alert">
+                ✗ Could not fetch live models ({fetchState.message}) — showing static suggestions instead.
+              </span>
+            ) : null}
             {validation[pool.id] ? (
               <span
                 className={

@@ -162,16 +162,23 @@ after picking one.
 manage its providers — reorder (drag or ↑/↓), remove, or add a provider with
 an optional per-pool `model_override` (what lets one provider's credentials
 serve several pools calling different upstream models). The model field
-offers common GPT/Claude model names as suggestions but takes any free text,
-and a **Validate** button next to it sends a real one-token "hi" request
-through that provider's own adapter to confirm the model name is actually
-callable before you save it.
+offers common GPT/Claude/DeepSeek model names as static suggestions, plus a
+**Fetch models** button that calls the provider's own `GET .../models` live
+and replaces the suggestions with its real, current list — since a
+hardcoded list inevitably goes stale (e.g. DeepSeek's `deepseek-chat` ->
+`deepseek-v4-flash` rename). This only works for passthrough providers with
+a `/models` endpoint; Codex OAuth providers (no discoverable models
+endpoint) and mirrors that don't implement `/models` fall back to the
+static suggestions with an inline reason why. A **Validate** button next to
+it sends a real one-token "hi" request through that provider's own adapter
+to confirm the chosen model name is actually callable before you save it.
 
 ## Admin API
 
 Everything the web UI does is also available as a plain HTTP API
 (`POST /admin/providers`, `POST /admin/pools`, `PUT /admin/pools/:id/members`,
-`POST /admin/providers/:id/validate-model`, etc.), behind the same
+`POST /admin/providers/:id/validate-model`,
+`GET /admin/providers/:id/list-models`, etc.), behind the same
 `Authorization: Bearer <admin-secret>` header — useful for scripting or CI.
 The setup wizard only adds; use the UI or this API for edits/deletes.
 

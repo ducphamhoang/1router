@@ -4,7 +4,9 @@ use std::sync::Arc;
 use router::core::config::{self, Config, SecretSource};
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
-use router::core::state::{load_snapshot, AppState, SecretOrigin};
+use router::core::state::{
+    ensure_direct_pools_for_unassigned_providers, load_snapshot, AppState, SecretOrigin,
+};
 use router::onboarding;
 use router::providers::refresh_task::spawn_background_refresh;
 use router::seed::seed_if_configured;
@@ -107,6 +109,8 @@ async fn main() -> Result<()> {
         let http = reqwest::Client::new();
         onboarding::run_wizard(&db, &http, &sqlite_path).await?;
     }
+
+    ensure_direct_pools_for_unassigned_providers(&db).await?;
 
     let cfg = Config::from_env_with_secret(secret)?;
     let http = build_client(&cfg);

@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::core::error::AppError;
 use crate::core::model::{Provider, ProviderKind, WireFormat};
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 use crate::core::runtime::ProviderStatus;
 use crate::core::state::{reload_snapshot, AppState};
 use crate::providers::adapter::adapter_for;
@@ -25,6 +26,7 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/providers/:id/test", post(test_stub))
         .route("/admin/providers/:id/state", get(state_stub))
         .route("/admin/providers/:id/validate-model", post(validate_model))
+        .route("/admin/providers/:id/list-models", get(list_models))
 }
 
 fn mask(p: &Provider) -> Value {
@@ -189,6 +191,96 @@ async fn validate_model(
     }
 }
 
+/// A provider's `base_url` is the full chat/messages endpoint, not a base
+/// path - swap its last path segment for `models` rather than requiring a
+/// second URL field just for this. Falls back to appending `/models` if the
+/// URL doesn't end in a recognized segment (a non-standard mirror path).
+fn derive_models_url(base_url: &str) -> String {
+    for suffix in ["/chat/completions", "/messages"] {
+        if let Some(prefix) = base_url.strip_suffix(suffix) {
+            return format!("{prefix}/models");
+        }
+    }
+    match base_url.rfind('/') {
+        Some(idx) => format!("{}/models", &base_url[..idx]),
+        None => format!("{base_url}/models"),
+    }
+}
+
+/// Fetches the provider's own live model list (its `GET .../models`), for
+/// populating the model-override suggestions with reality instead of a
+/// static array that inevitably goes stale (see the deepseek-chat ->
+/// deepseek-v4-flash rename). Best-effort only: Codex OAuth has no
+/// discoverable models endpoint (that's why onboarding.rs probes a candidate
+/// list instead), and some passthrough mirrors won't implement `/models`
+/// either - both report `ok: false` with a reason rather than erroring, so
+/// the frontend can fall back to its static suggestions.
+async fn list_models(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    if provider.kind != ProviderKind::Passthrough {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "this provider kind has no discoverable /models endpoint"
+        })));
+    }
+    let base_url = match &provider.base_url {
+        Some(u) => u,
+        None => return Ok(Json(json!({ "ok": false, "reason": "provider has no base_url" }))),
+    };
+
+    let mut builder = s.http.get(derive_models_url(base_url));
+    if let Some(key) = provider.api_key.as_ref() {
+        builder = match provider.wire_format {
+            WireFormat::OpenAi => builder.bearer_auth(key),
+            WireFormat::Anthropic => builder
+                .header("x-api-key", key)
+                .header("anthropic-version", ANTHROPIC_VERSION),
+        };
+    }
+
+    let resp = match builder.send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(Json(json!({ "ok": false, "reason": e.to_string() }))),
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": format!("HTTP {}: {snippet}", status.as_u16())
+        })));
+    }
+    let body: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(Json(json!({
+                "ok": false,
+                "reason": format!("could not parse response as JSON: {e}")
+            })))
+        }
+    };
+    let models: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "response had no recognizable model list (expected {\"data\":[{\"id\":...}]})"
+        })));
+    }
+    Ok(Json(json!({ "ok": true, "models": models })))
+}
+
 async fn state_stub(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -215,4 +307,29 @@ async fn state_stub(
         "status": status,
         "unavailable_in_secs": until_secs,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_models_url;
+
+    #[test]
+    fn derive_models_url_swaps_the_known_endpoint_suffixes() {
+        assert_eq!(
+            derive_models_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            derive_models_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn derive_models_url_falls_back_to_swapping_the_last_segment() {
+        assert_eq!(
+            derive_models_url("https://mirror.example.com/api/completion"),
+            "https://mirror.example.com/api/models"
+        );
+    }
 }

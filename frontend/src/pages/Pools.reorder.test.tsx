@@ -243,6 +243,10 @@ describe("Pools", () => {
     const openaiDialog = await openPool("openai");
     const openaiInput = within(openaiDialog).getByLabelText("Model override for openai");
     const openaiList = openaiDialog.querySelector(`#${openaiInput.getAttribute("list")}`) as HTMLDataListElement;
+    expect(openaiList.querySelector('option[value="codex-luna"]')).not.toBeNull();
+    expect(openaiList.querySelector('option[value="codex-sol"]')).not.toBeNull();
+    expect(openaiList.querySelector('option[value="codex-vng"]')).not.toBeNull();
+    expect(openaiList.querySelector('option[value="deepseek-flash"]')).not.toBeNull();
     expect(openaiList.querySelector('option[value="gpt-5.6-sol"]')).not.toBeNull();
     expect(openaiList.querySelector('option[value="claude-sonnet-5"]')).toBeNull();
     expect(openaiList.querySelector('option[value="deepseek-v4-flash"]')).not.toBeNull();
@@ -256,6 +260,7 @@ describe("Pools", () => {
     expect(claudeList.querySelector('option[value="gpt-5.6-sol"]')).toBeNull();
     // DeepSeek has no wire_format of its own - it's reachable through either,
     // so its models must show up as suggestions regardless of pool format.
+    expect(claudeList.querySelector('option[value="deepseek-flash"]')).not.toBeNull();
     expect(claudeList.querySelector('option[value="deepseek-v4-flash"]')).not.toBeNull();
   });
 
@@ -306,6 +311,86 @@ describe("Pools", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Validate model for openai" }));
 
     expect(await within(dialog).findByText("✗ model not found")).toBeInTheDocument();
+  });
+
+  it("fetches_the_providers_live_model_list_and_uses_it_as_datalist_options", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/pools" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([{ id: "openai", wire_format: "openai" }]), { status: 200 });
+        }
+        if (url === "/admin/pools/openai/members" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([{ id: "a", name: "alpha", wire_format: "openai", upstream_model: "gpt-4o" }]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/providers/a/list-models" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify({ ok: true, models: ["live-model-1", "live-model-2"] }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Pools />);
+    const dialog = await openPool("openai");
+
+    expect(within(dialog).getByRole("button", { name: "Fetch models for openai" })).toBeDisabled();
+
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "a");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Fetch models for openai" }));
+
+    expect(await within(dialog).findByText(/Showing 2 live models from the provider\./)).toBeInTheDocument();
+    const input = within(dialog).getByLabelText("Model override for openai");
+    const list = dialog.querySelector(`#${input.getAttribute("list")}`) as HTMLDataListElement;
+    expect(list.querySelector('option[value="live-model-1"]')).not.toBeNull();
+    expect(list.querySelector('option[value="gpt-5.6-sol"]')).toBeNull();
+  });
+
+  it("falls_back_to_static_suggestions_when_the_provider_has_no_models_endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/pools" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([{ id: "openai", wire_format: "openai" }]), { status: 200 });
+        }
+        if (url === "/admin/pools/openai/members" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([{ id: "cx", name: "codex", wire_format: "openai", upstream_model: "pending" }]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/providers/cx/list-models" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify({ ok: false, reason: "this provider kind has no discoverable /models endpoint" }),
+            { status: 200 }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Pools />);
+    const dialog = await openPool("openai");
+
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "cx");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Fetch models for openai" }));
+
+    expect(
+      await within(dialog).findByText(/Could not fetch live models .*no discoverable \/models endpoint/)
+    ).toBeInTheDocument();
+    const input = within(dialog).getByLabelText("Model override for openai");
+    const list = dialog.querySelector(`#${input.getAttribute("list")}`) as HTMLDataListElement;
+    expect(list.querySelector('option[value="gpt-5.6-sol"]')).not.toBeNull();
   });
 
   it("clears_a_stale_validation_result_as_soon_as_the_model_or_provider_choice_changes", async () => {

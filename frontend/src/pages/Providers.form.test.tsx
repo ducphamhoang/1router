@@ -86,7 +86,7 @@ describe("Providers", () => {
 
     expect(screen.getByLabelText("Wire format")).toHaveValue("anthropic");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.deepseek.com/anthropic/v1/messages");
-    expect(screen.getByLabelText("Upstream model")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("deepseek-flash");
 
     // still fully editable after a preset is applied
     await userEvent.clear(screen.getByLabelText("Base URL"));

@@ -30,6 +30,15 @@ pub struct Provider {
     pub updated_at: DateTime<Utc>,
 }
 
+impl Provider {
+    pub fn supports_wire(&self, w: WireFormat) -> bool {
+        match self.kind {
+            ProviderKind::OauthCodex => true,
+            ProviderKind::Passthrough => self.wire_format == w,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Pool {
     pub id: String,
@@ -94,5 +103,29 @@ mod tests {
     fn provider_kind_serializes_with_snake_case() {
         assert_eq!(serde_json::to_string(&ProviderKind::OauthCodex).unwrap(), "\"oauth_codex\"");
         assert_eq!(serde_json::to_string(&ProviderKind::Passthrough).unwrap(), "\"passthrough\"");
+    }
+
+    #[test]
+    fn provider_supports_wire_depends_on_kind() {
+        let codex = Provider {
+            id: "cx".into(),
+            name: "Codex".into(),
+            wire_format: WireFormat::OpenAi,
+            kind: ProviderKind::OauthCodex,
+            base_url: None,
+            api_key: None,
+            upstream_model: "gpt-5-codex".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert!(codex.supports_wire(WireFormat::OpenAi));
+        assert!(codex.supports_wire(WireFormat::Anthropic));
+
+        let passthrough = Provider {
+            kind: ProviderKind::Passthrough,
+            ..codex.clone()
+        };
+        assert!(passthrough.supports_wire(WireFormat::OpenAi));
+        assert!(!passthrough.supports_wire(WireFormat::Anthropic));
     }
 }

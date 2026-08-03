@@ -5,7 +5,8 @@ use bytes::Bytes;
 use chrono::Utc;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
-use crate::core::model::Provider;
+use crate::core::model::{Provider, WireFormat};
+use crate::providers::adapter::codex::claude_bridge;
 use crate::providers::adapter::codex::refresh;
 use crate::providers::adapter::codex::transform;
 use crate::providers::adapter::{Credentials, ProviderAdapter};
@@ -17,11 +18,12 @@ const CODEX_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct CodexAdapter {
     provider: Provider,
     http: reqwest::Client,
+    client_wire: WireFormat,
 }
 
 impl CodexAdapter {
-    pub fn new(provider: Provider, http: reqwest::Client) -> Self {
-        Self { provider, http }
+    pub fn new(provider: Provider, http: reqwest::Client, client_wire: WireFormat) -> Self {
+        Self { provider, http, client_wire }
     }
 }
 
@@ -34,6 +36,14 @@ impl ProviderAdapter for CodexAdapter {
     ) -> Result<reqwest::Request, AppError> {
         let client_json: serde_json::Value = serde_json::from_slice(client_body)
             .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // A provider with wire_format = "anthropic" serves /v1/messages
+        // clients (Claude Code) directly - bridge its Claude-shaped body into
+        // the OpenAI Chat-Completions shape the rest of this pipeline speaks
+        // before doing anything else.
+        let client_json = match self.client_wire {
+            WireFormat::Anthropic => claude_bridge::claude_to_openai_request(&client_json),
+            WireFormat::OpenAi => client_json,
+        };
         // session id: prompt_cache_key ties to a stable per-provider id for now.
         let session_id = format!("1router-{}", self.provider.id);
         let mut transformed = transform::transform_request(&client_json, &session_id);
@@ -78,6 +88,7 @@ impl ProviderAdapter for CodexAdapter {
         client_wanted_stream: bool,
     ) -> Result<Response, AppError> {
         let status = upstream.status();
+        let is_anthropic = matches!(self.client_wire, WireFormat::Anthropic);
         if client_wanted_stream {
             // Responses-API SSE events (response.created, output_text.delta,
             // function_call_arguments.delta, ...) don't match what an
@@ -86,9 +97,13 @@ impl ProviderAdapter for CodexAdapter {
             // translate event-by-event instead of passing the body through.
             use futures::StreamExt;
             let stream = upstream.bytes_stream().boxed();
-            let converted =
+            let openai_chunks =
                 transform::convert_sse_stream(stream, self.provider.upstream_model.clone());
-            return Ok((status, Body::from_stream(converted)).into_response());
+            if is_anthropic {
+                let claude_sse = claude_bridge::convert_openai_sse_to_claude_sse(openai_chunks);
+                return Ok((status, Body::from_stream(claude_sse)).into_response());
+            }
+            return Ok((status, Body::from_stream(openai_chunks)).into_response());
         }
         // aggregate: client did not ask to stream, but Codex is forced to stream upstream
         let text = upstream
@@ -100,7 +115,11 @@ impl ProviderAdapter for CodexAdapter {
                 "codex embedded error: {err_type}"
             )));
         }
-        let json = transform::aggregate_sse(&text);
+        let json = transform::aggregate_sse(&text, &self.provider.upstream_model);
+        if is_anthropic {
+            let claude_json = claude_bridge::openai_json_to_claude_message(&json);
+            return Ok((StatusCode::OK, axum::Json(claude_json)).into_response());
+        }
         Ok((StatusCode::OK, axum::Json(json)).into_response())
     }
 
@@ -163,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_targets_responses_api_with_headers() {
-        let a = CodexAdapter::new(prov(), reqwest::Client::new());
+        let a = CodexAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "gpt-4o", "messages": [], "temperature": 0.5
@@ -187,5 +206,70 @@ mod tests {
         // the client's `model` (a pool id, e.g. "gpt-4o") is not a real Codex
         // model - it must be rewritten to the provider's upstream_model.
         assert_eq!(sent["model"], "gpt-5-codex");
+    }
+
+    #[tokio::test]
+    async fn build_request_bridges_anthropic_wire_format_to_responses_api() {
+        let mut provider = prov();
+        provider.wire_format = WireFormat::OpenAi;
+        let a = CodexAdapter::new(provider, reqwest::Client::new(), WireFormat::Anthropic);
+        // A Claude Code /v1/messages request: system + a text message.
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "gpt-4o",
+                "system": "be concise",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let req = a.build_request(&body, &creds()).await.unwrap();
+
+        assert_eq!(
+            req.url().as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        // Claude's `system`/`messages` were bridged into the Responses API's
+        // `input` shape, same as an OpenAI-shaped request would be.
+        assert!(sent.get("messages").is_none());
+        assert_eq!(sent["input"][0]["role"], "developer");
+        assert_eq!(sent["input"][0]["content"][0]["text"], "be concise");
+        assert_eq!(sent["input"][1]["role"], "user");
+        assert_eq!(sent["input"][1]["content"][0]["text"], "hi");
+        assert_eq!(sent["model"], "gpt-5-codex");
+    }
+
+    #[tokio::test]
+    async fn transform_response_bridges_to_anthropic_wire_format_independent_of_provider_wire() {
+        let provider = prov();
+        let a = CodexAdapter::new(provider, reqwest::Client::new(), WireFormat::Anthropic);
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"hello\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n",
+        );
+        let upstream = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(200)
+                .body(Bytes::from(sse))
+                .unwrap(),
+        );
+
+        let response = a.transform_response(upstream, false).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["type"], "message");
+        assert_eq!(json["content"][0]["text"], "hello");
+        assert_eq!(json["stop_reason"], "end_turn");
+        assert_eq!(json["usage"]["input_tokens"], 2);
+        assert_eq!(json["usage"]["output_tokens"], 1);
+        // Regression: aggregate_sse used to omit `model` entirely, so the
+        // non-streaming Claude response always reported "unknown" even
+        // though the streaming path correctly reported the real model.
+        assert_eq!(json["model"], "gpt-5-codex");
     }
 }

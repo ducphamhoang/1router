@@ -13,13 +13,6 @@ pub struct Selection<'a> {
     pub providers: Vec<(&'a Provider, String)>,
 }
 
-fn wire_eq(a: WireFormat, b: WireFormat) -> bool {
-    matches!(
-        (a, b),
-        (WireFormat::OpenAi, WireFormat::OpenAi) | (WireFormat::Anthropic, WireFormat::Anthropic)
-    )
-}
-
 /// Resolve a client-requested `model` to what to actually call.
 ///
 /// Tries a real pool first (round-robin/failover across its members). If
@@ -37,7 +30,7 @@ pub fn select<'a>(
     wire: WireFormat,
 ) -> Option<Selection<'a>> {
     if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
-        if !wire_eq(pwm.pool.wire_format, wire) {
+        if pwm.pool.wire_format != wire {
             return None;
         }
 
@@ -72,7 +65,7 @@ fn select_direct_provider<'a>(
 ) -> Option<Selection<'a>> {
     let (provider_id, model) = requested.split_once('/')?;
     let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
-    if !wire_eq(provider.wire_format, wire) {
+    if !provider.supports_wire(wire) {
         return None;
     }
     Some(Selection {
@@ -185,5 +178,16 @@ mod tests {
     #[test]
     fn direct_provider_addressing_rejects_a_wire_format_mismatch() {
         assert!(select(&snap(), "a/some-model", WireFormat::Anthropic).is_none());
+    }
+
+    #[test]
+    fn direct_codex_provider_addressing_supports_both_wire_formats() {
+        let mut s = snap();
+        s.providers[0].kind = ProviderKind::OauthCodex;
+        for wire in [WireFormat::OpenAi, WireFormat::Anthropic] {
+            let sel = select(&s, "a/gpt-5-codex", wire).unwrap();
+            assert_eq!(sel.providers[0].0.id, "a");
+            assert_eq!(sel.providers[0].1, "gpt-5-codex");
+        }
     }
 }

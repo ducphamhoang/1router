@@ -427,11 +427,24 @@ pub async fn add_codex_provider(
         .interact_text()?;
     let name = name.trim().to_string();
 
+    let wire_format = match Select::with_theme(&theme())
+        .with_prompt("Which client format should this ChatGPT account serve?")
+        .items([
+            "anthropic - Claude Code (POST /v1/messages)",
+            "openai - Cursor, OpenAI SDK clients (POST /v1/chat/completions)",
+        ])
+        .default(0)
+        .interact()?
+    {
+        0 => WireFormat::Anthropic,
+        _ => WireFormat::OpenAi,
+    };
+
     let now = chrono::Utc::now();
     let mut provider = Provider {
         id: name.clone(),
         name,
-        wire_format: WireFormat::OpenAi,
+        wire_format,
         kind: ProviderKind::OauthCodex,
         base_url: None,
         api_key: None,

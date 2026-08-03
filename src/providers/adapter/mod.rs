@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
-use crate::core::model::{Provider, ProviderKind};
+use crate::core::model::{Provider, ProviderKind, WireFormat};
 
 #[derive(Clone, Debug, Default)]
 pub struct Credentials {
@@ -40,12 +40,20 @@ pub trait ProviderAdapter: Send + Sync {
 }
 
 pub fn adapter_for(provider: &Provider, http: reqwest::Client) -> Box<dyn ProviderAdapter> {
+    adapter_for_wire(provider, http, provider.wire_format)
+}
+
+pub fn adapter_for_wire(
+    provider: &Provider,
+    http: reqwest::Client,
+    client_wire: WireFormat,
+) -> Box<dyn ProviderAdapter> {
     match provider.kind {
         ProviderKind::Passthrough => {
             Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
         }
         ProviderKind::OauthCodex => {
-            Box::new(codex::CodexAdapter::new(provider.clone(), http))
+            Box::new(codex::CodexAdapter::new(provider.clone(), http, client_wire))
         }
     }
 }

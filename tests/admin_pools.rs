@@ -63,6 +63,20 @@ async fn create_provider(db: &sqlx::SqlitePool, id: &str, wire: WireFormat) {
     .unwrap();
 }
 
+async fn create_codex_provider(db: &sqlx::SqlitePool, id: &str, wire: WireFormat) {
+    sqlx::query(
+        "INSERT INTO providers
+            (id, name, wire_format, kind, base_url, api_key, upstream_model, created_at, updated_at)
+         VALUES (?, ?, ?, 'oauth_codex', NULL, NULL, 'gpt-5-codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(wire)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
 fn auth_header(secret: &str) -> (&'static str, String) {
     ("authorization", format!("Bearer {secret}"))
 }
@@ -162,4 +176,35 @@ async fn wire_format_mismatch_is_400() {
         .await
         .unwrap();
     assert_eq!(m.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn codex_provider_can_join_a_pool_with_a_different_stored_wire_format() {
+    let state = test_state().await;
+    create_codex_provider(&state.db, "cx", WireFormat::OpenAi).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let c = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "claude", "wire_format": "anthropic" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.status(), StatusCode::CREATED);
+
+    let m = router
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/claude/members",
+            secret.as_str(),
+            json!({ "provider_id": "cx", "priority": 10 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(m.status(), StatusCode::OK);
 }

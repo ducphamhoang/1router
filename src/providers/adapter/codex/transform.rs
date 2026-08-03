@@ -177,9 +177,10 @@ fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
     sse_body.split("\n\n").filter_map(parse_sse_block).collect()
 }
 
-pub fn aggregate_sse(sse_body: &str) -> Value {
+pub fn aggregate_sse(sse_body: &str, model: &str) -> Value {
     let mut content = String::new();
     let mut resp_id = String::new();
+    let mut usage: Option<Value> = None;
     for (event, data) in sse_events(sse_body) {
         if event.ends_with("output_text.delta") {
             if let Some(d) = data["delta"].as_str() {
@@ -189,17 +190,31 @@ pub fn aggregate_sse(sse_body: &str) -> Value {
             if let Some(id) = data["response"]["id"].as_str() {
                 resp_id = id.to_string();
             }
+            if let Some(u) = data["response"]["usage"].as_object() {
+                let prompt = u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let completion = u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                usage = Some(json!({
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": prompt + completion
+                }));
+            }
         }
     }
-    json!({
+    let mut out = json!({
         "id": resp_id,
         "object": "chat.completion",
+        "model": model,
         "choices": [{
             "index": 0,
             "message": { "role": "assistant", "content": content },
             "finish_reason": "stop"
         }]
-    })
+    });
+    if let Some(u) = usage {
+        out["usage"] = u;
+    }
+    out
 }
 
 pub fn sse_embedded_error(sse_body: &str) -> Option<String> {
@@ -309,7 +324,17 @@ pub fn chat_chunk_for_event(
         }
         "response.completed" => {
             let finish = if state.saw_tool_call { "tool_calls" } else { "stop" };
-            Some(chat_chunk(state, model, json!({}), Some(finish)))
+            let mut chunk = chat_chunk(state, model, json!({}), Some(finish));
+            if let Some(usage) = data["response"]["usage"].as_object() {
+                let prompt = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let completion = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                chunk["usage"] = json!({
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": prompt + completion
+                });
+            }
+            Some(chunk)
         }
         _ => None,
     }
@@ -662,9 +687,10 @@ mod tests {
         let sse = "event: response.output_text.delta\ndata: {\"delta\":\"Hello \"}\n\n\
                    event: response.output_text.delta\ndata: {\"delta\":\"world\"}\n\n\
                    event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}\n\n";
-        let out = aggregate_sse(sse);
+        let out = aggregate_sse(sse, "gpt-5.4");
         let text = out["choices"][0]["message"]["content"].as_str().unwrap();
         assert_eq!(text, "Hello world");
+        assert_eq!(out["model"], "gpt-5.4");
     }
 
     #[test]

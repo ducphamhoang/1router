@@ -82,13 +82,11 @@ async fn put_member(
 ) -> Result<Json<Value>, AppError> {
     let pool = queries::get_pool(&s.db, &pool_id).await?;
     let provider = pq::get_provider(&s.db, &b.provider_id).await?;
-    if !matches!(
-        (pool.wire_format, provider.wire_format),
-        (WireFormat::OpenAi, WireFormat::OpenAi) | (WireFormat::Anthropic, WireFormat::Anthropic)
-    ) {
-        return Err(AppError::BadRequest(
-            "provider wire_format does not match pool wire_format".into(),
-        ));
+    if !provider.supports_wire(pool.wire_format) {
+        return Err(AppError::BadRequest(format!(
+            "provider '{}' is a {:?} provider with wire_format {:?} and cannot serve a {:?} pool; passthrough providers cannot translate between formats",
+            provider.id, provider.kind, provider.wire_format, pool.wire_format
+        )));
     }
     queries::upsert_member(
         &s.db,

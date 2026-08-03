@@ -8,7 +8,7 @@ use crate::core::error::{ErrorClass, RefreshError};
 use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::state::AppState;
 use crate::pools::select::select;
-use crate::providers::adapter::{adapter_for, Credentials};
+use crate::providers::adapter::{adapter_for_wire, Credentials};
 use crate::providers::queries::get_oauth_state;
 use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
 use crate::proxy::backoff;
@@ -98,7 +98,7 @@ pub async fn handle_proxy(
             ..(*provider).clone()
         };
 
-        let adapter = adapter_for(provider, state.http.clone());
+        let adapter = adapter_for_wire(provider, state.http.clone(), wire);
         let creds = credentials_for(&state, provider).await;
 
         let req = match adapter.build_request(&body, &creds).await {

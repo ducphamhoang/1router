@@ -38,7 +38,12 @@ wizard probes which `upstream_model` your account accepts) — and putting it in
 a pool. It then offers to add that same provider to further pools under a
 different `model_override` (e.g. one Codex OAuth login backing separate
 `codex-sol`/`codex-terra`/`codex-luna` pools) without repeating the OAuth
-dance or creating a duplicate provider row. Then just run `1router`.
+dance or creating a duplicate provider row. A Codex provider can also be
+added to pools of *either* client-facing wire format at once - the same
+ChatGPT account can back an `openai`-format pool for OpenAI-SDK clients
+(Cursor, OpenCode, ...) and an `anthropic`-format pool for Claude Code
+simultaneously, with per-request translation handling the difference (see
+"Wire formats" below). Then just run `1router`.
 
 The same wizard runs automatically on first boot when the database is empty,
 `ROUTER_SEED_PATH` is unset, and stdin is a terminal.
@@ -99,6 +104,22 @@ providers) - and is cached in memory, so `/v1/models` itself never makes a
 network call. The cache is lost on restart (re-warmed at the next boot) and
 a provider whose fetch fails (dead upstream, no `/models` support) is
 simply absent from the list rather than causing an error.
+
+### Wire formats
+
+Two client-facing routes: `POST /v1/chat/completions` (OpenAI Chat
+Completions shape) and `POST /v1/messages` (Anthropic Messages shape, what
+Claude Code speaks). Ordinary passthrough providers are pure config and
+speak whichever one format their `wire_format` says - a pool must stay
+homogeneous, so a passthrough provider can only join a pool matching its
+own format.
+
+The Codex/ChatGPT-OAuth adapter is the exception: it translates per-request
+based on the route actually hit, not a stored field, so one Codex provider
+row (one OAuth credential set) can be a member of an `openai`-format pool
+and an `anthropic`-format pool at the same time - e.g. serving OpenCode over
+`/v1/chat/completions` and Claude Code over `/v1/messages` from the same
+ChatGPT account, no duplicate provider/OAuth needed.
 
 ## Configuration (environment variables)
 

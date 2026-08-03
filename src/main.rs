@@ -36,6 +36,16 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
         let db = init_pool(&sqlite_path).await?;
+
+        // `--reset-admin-password` is a standalone recovery path, not part of
+        // the provider/pool wizard: someone who forgot the admin UI password
+        // but can still run the CLI already has filesystem access to the DB,
+        // so this intentionally doesn't ask for the old password.
+        if std::env::args().nth(2).as_deref() == Some("--reset-admin-password") {
+            onboarding::reset_admin_password(&db).await?;
+            return Ok(());
+        }
+
         // build_client needs a Config, and a Config needs a secret - which the
         // wizard may be about to create. Use a plain client for the wizard's
         // own requests (only the OAuth exchange + model probes) rather than

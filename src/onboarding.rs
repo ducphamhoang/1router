@@ -485,6 +485,46 @@ pub async fn resolve_or_prompt_admin_password(db: &sqlx::SqlitePool) -> anyhow::
     Ok(())
 }
 
+/// Overwrites the admin UI password (setting one if none exists yet) and
+/// invalidates every existing session. Only reachable via
+/// `1router setup --reset-admin-password`, which - like `1router setup`
+/// itself - requires a real TTY on stdin.
+///
+/// Deliberately unauthenticated by design: anyone who can run the CLI on
+/// this host already has filesystem access to the sqlite DB and
+/// `.router_secret`, so gating this behind the *old* password wouldn't add
+/// real protection - it would just remove the only recovery path for an
+/// operator who forgot it, forcing a manual `DELETE FROM admin_users` via
+/// sqlite3 instead.
+pub async fn reset_admin_password(db: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let plain: String = Password::with_theme(&theme())
+        .with_prompt("New admin UI password (username: admin)")
+        .with_confirmation("Confirm", "passwords did not match")
+        .interact()?;
+    if plain.trim().is_empty() {
+        anyhow::bail!("admin password cannot be empty");
+    }
+
+    let hash = crate::admin::auth::password::hash_password(&plain)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO admin_users (id, username, password_hash, updated_at)
+         VALUES (1, 'admin', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at",
+    )
+    .bind(&hash)
+    .bind(&now)
+    .execute(db)
+    .await?;
+
+    crate::admin::auth::session::delete_all_sessions(db)
+        .await
+        .map_err(|e| anyhow::anyhow!("password reset but failed to clear old sessions: {e}"))?;
+
+    println!("Admin UI password reset. All existing sessions have been logged out.");
+    Ok(())
+}
+
 /// Resolve the admin secret, prompting to generate-or-enter one if none
 /// exists yet, and persist it to the sidecar file.
 ///

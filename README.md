@@ -40,6 +40,16 @@ a pool. Then just run `1router`.
 The same wizard runs automatically on first boot when the database is empty,
 `ROUTER_SEED_PATH` is unset, and stdin is a terminal.
 
+### Forgot the admin UI password?
+
+    1router setup --reset-admin-password
+
+Prompts for a new admin UI password (username stays `admin`) and logs out
+every existing session. No current-password check: anyone who can run the
+CLI already has filesystem access to the sqlite DB and `.router_secret`, so
+requiring the old password here wouldn't add real protection — it would just
+remove the only recovery path for an operator who forgot it.
+
 **Headless deployments** (Docker, systemd) never prompt: set
 `ROUTER_SHARED_SECRET` (recommended) and `ROUTER_SEED_PATH` to a config JSON
 file. If no secret is available at all, one is generated, saved to

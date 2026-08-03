@@ -44,8 +44,24 @@ impl ProviderAdapter for CodexAdapter {
             WireFormat::Anthropic => claude_bridge::claude_to_openai_request(&client_json),
             WireFormat::OpenAi => client_json,
         };
-        // session id: prompt_cache_key ties to a stable per-provider id for now.
-        let session_id = format!("1router-{}", self.provider.id);
+        // prompt_cache_key hints which backend replica/cache scope Codex
+        // routes a request to for prefix-cache locality. Scope it by pool
+        // alias (self.provider.upstream_model is already the per-pool
+        // model_override by the time build_request runs - see
+        // proxy::flow::handle_proxy) and by client wire format, not just
+        // provider id - otherwise every pool sharing this OAuth account
+        // (and, since one Codex provider can now serve both wire formats,
+        // every distinct client population) would interleave under one key,
+        // diluting cache-hit locality even though no data ever crosses
+        // between them.
+        let wire_tag = match self.client_wire {
+            WireFormat::OpenAi => "openai",
+            WireFormat::Anthropic => "anthropic",
+        };
+        let session_id = format!(
+            "1router-{}-{}-{}",
+            self.provider.id, self.provider.upstream_model, wire_tag
+        );
         let mut transformed = transform::transform_request(&client_json, &session_id);
         // The client's `model` is the pool id, not a real Codex model name -
         // rewrite to the provider's actual upstream model, matching
@@ -206,6 +222,30 @@ mod tests {
         // the client's `model` (a pool id, e.g. "gpt-4o") is not a real Codex
         // model - it must be rewritten to the provider's upstream_model.
         assert_eq!(sent["model"], "gpt-5-codex");
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_key_is_scoped_by_pool_alias_and_client_wire() {
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({"messages": []})).unwrap());
+
+        let mut openai_provider = prov();
+        openai_provider.upstream_model = "gpt-5.6-sol".into();
+        let a = CodexAdapter::new(openai_provider, reqwest::Client::new(), WireFormat::OpenAi);
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["prompt_cache_key"], "1router-cx-gpt-5.6-sol-openai");
+
+        // Same provider id, same pool alias, but the Anthropic-facing wire
+        // format - must get a distinct key so Claude Code's and OpenAI-SDK
+        // clients' traffic don't interleave under one cache-routing hint.
+        let mut anthropic_provider = prov();
+        anthropic_provider.upstream_model = "gpt-5.6-sol".into();
+        let b = CodexAdapter::new(anthropic_provider, reqwest::Client::new(), WireFormat::Anthropic);
+        let req2 = b.build_request(&body, &creds()).await.unwrap();
+        let sent2: serde_json::Value =
+            serde_json::from_slice(req2.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent2["prompt_cache_key"], "1router-cx-gpt-5.6-sol-anthropic");
     }
 
     #[tokio::test]

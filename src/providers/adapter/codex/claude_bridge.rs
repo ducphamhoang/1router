@@ -208,14 +208,26 @@ fn finish_to_stop_reason(reason: &str) -> &'static str {
     }
 }
 
-fn usage_from(value: &Value) -> (i64, i64) {
-    match value.get("usage") {
-        Some(u) => (
-            u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-        ),
-        None => (0, 0),
+/// Anthropic's `usage.input_tokens` counts only freshly-processed tokens -
+/// cache hits are reported separately via `cache_read_input_tokens` - whereas
+/// OpenAI's `prompt_tokens` counts everything. Subtract so a client summing
+/// `input_tokens + cache_read_input_tokens` gets the same total Codex billed,
+/// not a double-count.
+fn usage_from(value: &Value) -> Value {
+    let Some(u) = value.get("usage") else {
+        return json!({ "input_tokens": 0, "output_tokens": 0 });
+    };
+    let prompt = u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let completion = u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_i64().unwrap_or(0);
+    let mut out = json!({
+        "input_tokens": (prompt - cached).max(0),
+        "output_tokens": completion
+    });
+    if cached > 0 {
+        out["cache_read_input_tokens"] = json!(cached);
     }
+    out
 }
 
 /// Aggregated (non-streaming) OpenAI chat.completion JSON -> Anthropic
@@ -228,7 +240,6 @@ pub fn openai_json_to_claude_message(value: &Value) -> Value {
     let choice = &value["choices"][0];
     let content_text = choice["message"]["content"].as_str().unwrap_or("").to_string();
     let finish = choice["finish_reason"].as_str().unwrap_or("stop");
-    let (input_tokens, output_tokens) = usage_from(value);
 
     json!({
         "id": id,
@@ -238,7 +249,7 @@ pub fn openai_json_to_claude_message(value: &Value) -> Value {
         "content": [{ "type": "text", "text": content_text }],
         "stop_reason": finish_to_stop_reason(finish),
         "stop_sequence": null,
-        "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+        "usage": usage_from(value)
     })
 }
 
@@ -360,12 +371,11 @@ pub fn openai_chunk_to_claude_events(
         for tool in state.tool_calls.values() {
             events.push(("content_block_stop".into(), json!({ "index": tool.block_index })));
         }
-        let (input_tokens, output_tokens) = usage_from(chunk);
         events.push((
             "message_delta".into(),
             json!({
                 "delta": { "stop_reason": finish_to_stop_reason(finish), "stop_sequence": null },
-                "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+                "usage": usage_from(chunk)
             }),
         ));
         events.push(("message_stop".into(), json!({})));
@@ -566,6 +576,24 @@ mod tests {
     }
 
     #[test]
+    fn stream_finish_reports_cache_read_tokens_and_deducts_them_from_input() {
+        let mut state = ClaudeStreamState::new();
+        state.message_start_sent = true;
+        let chunk = json!({
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 10,
+                "prompt_tokens_details": { "cached_tokens": 80 }
+            }
+        });
+        let events = openai_chunk_to_claude_events(&chunk, &mut state);
+        let usage = &events[0].1["usage"];
+        assert_eq!(usage["input_tokens"], 20);
+        assert_eq!(usage["output_tokens"], 10);
+        assert_eq!(usage["cache_read_input_tokens"], 80);
+    }
+
+    #[test]
     fn tool_calls_finish_reason_maps_to_tool_use_stop_reason() {
         let mut state = ClaudeStreamState::new();
         state.message_start_sent = true;
@@ -585,6 +613,22 @@ mod tests {
         assert_eq!(out["role"], "assistant");
         assert_eq!(out["content"][0]["text"], "hello");
         assert_eq!(out["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn non_streaming_json_reports_cache_read_tokens() {
+        let input = json!({
+            "id": "resp_1", "model": "gpt-5-codex",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 50, "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 40 }
+            }
+        });
+        let out = openai_json_to_claude_message(&input);
+        assert_eq!(out["usage"]["input_tokens"], 10);
+        assert_eq!(out["usage"]["output_tokens"], 5);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 40);
     }
 
     fn block_from(bytes_chunks: Vec<&str>) -> Vec<Result<Bytes, std::io::Error>> {

@@ -177,6 +177,32 @@ fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
     sse_body.split("\n\n").filter_map(parse_sse_block).collect()
 }
 
+/// Turn a Responses-API `response.usage` object into a Chat-Completions-shaped
+/// `usage` value, carrying `prompt_tokens_details.cached_tokens` through so
+/// downstream (claude_bridge) can report real cache-hit counts instead of
+/// silently dropping them - the Responses API's own automatic prefix caching
+/// happens regardless of which client wire format a request came in on;
+/// this only affects whether we *report* it.
+fn chat_completions_usage(usage: &Value) -> Option<Value> {
+    let usage = usage.as_object()?;
+    let prompt = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let completion = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cached = usage
+        .get("input_tokens_details")
+        .and_then(|v| v.get("cached_tokens"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut out = json!({
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion
+    });
+    if cached > 0 {
+        out["prompt_tokens_details"] = json!({ "cached_tokens": cached });
+    }
+    Some(out)
+}
+
 pub fn aggregate_sse(sse_body: &str, model: &str) -> Value {
     let mut content = String::new();
     let mut resp_id = String::new();
@@ -190,15 +216,7 @@ pub fn aggregate_sse(sse_body: &str, model: &str) -> Value {
             if let Some(id) = data["response"]["id"].as_str() {
                 resp_id = id.to_string();
             }
-            if let Some(u) = data["response"]["usage"].as_object() {
-                let prompt = u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                let completion = u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                usage = Some(json!({
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "total_tokens": prompt + completion
-                }));
-            }
+            usage = chat_completions_usage(&data["response"]["usage"]);
         }
     }
     let mut out = json!({
@@ -325,14 +343,8 @@ pub fn chat_chunk_for_event(
         "response.completed" => {
             let finish = if state.saw_tool_call { "tool_calls" } else { "stop" };
             let mut chunk = chat_chunk(state, model, json!({}), Some(finish));
-            if let Some(usage) = data["response"]["usage"].as_object() {
-                let prompt = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                let completion = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                chunk["usage"] = json!({
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "total_tokens": prompt + completion
-                });
+            if let Some(usage) = chat_completions_usage(&data["response"]["usage"]) {
+                chunk["usage"] = usage;
             }
             Some(chunk)
         }
@@ -623,6 +635,31 @@ mod tests {
         state.saw_tool_call = true;
         let chunk = chat_chunk_for_event(&mut state, "response.completed", &json!({}), "m").unwrap();
         assert_eq!(chunk["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn chat_chunk_for_completed_carries_cached_token_count() {
+        let mut state = SseChunkState::new();
+        let data = json!({
+            "response": {
+                "usage": {
+                    "input_tokens": 100, "output_tokens": 10,
+                    "input_tokens_details": { "cached_tokens": 80 }
+                }
+            }
+        });
+        let chunk = chat_chunk_for_event(&mut state, "response.completed", &data, "m").unwrap();
+        assert_eq!(chunk["usage"]["prompt_tokens"], 100);
+        assert_eq!(chunk["usage"]["prompt_tokens_details"]["cached_tokens"], 80);
+    }
+
+    #[test]
+    fn aggregate_sse_carries_cached_token_count() {
+        let sse = "event: response.completed\n\
+                   data: {\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":50,\"output_tokens\":5,\
+                   \"input_tokens_details\":{\"cached_tokens\":40}}}}\n\n";
+        let out = aggregate_sse(sse, "m");
+        assert_eq!(out["usage"]["prompt_tokens_details"]["cached_tokens"], 40);
     }
 
     #[test]

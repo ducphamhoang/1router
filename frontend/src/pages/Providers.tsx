@@ -50,7 +50,7 @@ export function Providers() {
       const entries = await Promise.all(
         providers.map(async (provider) => {
           try {
-            const body = await apiJson<{ status: string }>(`/admin/providers/${provider.id}/state`);
+            const body = await apiJson<{ status: string }>(`/admin/providers/${encodeURIComponent(provider.id)}/state`);
             return [provider.id, body.status] as const;
           } catch {
             return [provider.id, "unknown"] as const;
@@ -102,7 +102,7 @@ export function Providers() {
             ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
           }
         : form;
-      await apiJson(editing ? `/admin/providers/${editing.id}` : "/admin/providers", {
+      await apiJson(editing ? `/admin/providers/${encodeURIComponent(editing.id)}` : "/admin/providers", {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -115,8 +115,12 @@ export function Providers() {
   }
 
   async function deleteProvider(provider: Provider) {
-    await apiJson(`/admin/providers/${provider.id}`, { method: "DELETE" });
-    setProviders((current) => current.filter((item) => item.id !== provider.id));
+    try {
+      await apiJson(`/admin/providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
+      setProviders((current) => current.filter((item) => item.id !== provider.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Deleting provider failed.");
+    }
   }
 
   return (

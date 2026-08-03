@@ -23,6 +23,15 @@ describe("Settings", () => {
             status: 409
           });
         }
+        if (url === "/admin/pools" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([
+              { id: "codex-sol", wire_format: "openai" },
+              { id: "claude-main", wire_format: "anthropic" }
+            ]),
+            { status: 200 }
+          );
+        }
         return new Response("{}", { status: 404 });
       })
     );
@@ -34,7 +43,7 @@ describe("Settings", () => {
     expect(await screen.findByDisplayValue("sec_****")).toBeInTheDocument();
     expect(screen.getByLabelText("Shared secret")).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Reveal shared secret" }));
-    expect(await screen.findByDisplayValue("sec_real")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Shared secret")).toHaveValue("sec_real");
     expect(screen.getByLabelText("Shared secret")).toBeEnabled();
   });
 
@@ -63,6 +72,24 @@ describe("Settings", () => {
     expect(await screen.findByRole("button", { name: "Save shared secret" })).toBeDisabled();
     await userEvent.type(screen.getByLabelText("Shared secret"), "-edited");
     expect(screen.getByRole("button", { name: "Save shared secret" })).toBeEnabled();
+  });
+
+  it("shows_connect_guide_with_base_url_and_available_models_grouped_by_wire_format", async () => {
+    render(<Settings />);
+
+    expect(await screen.findByText("codex-sol")).toBeInTheDocument();
+    expect(await screen.findByText("claude-main")).toBeInTheDocument();
+    expect(screen.getByLabelText("Base URL")).toHaveValue(`${window.location.origin}/v1`);
+    // the API key field starts masked, independent of the "Shared secret" form's own reveal state
+    expect(screen.getByLabelText("API key for client connections")).toHaveDisplayValue(/•+/);
+  });
+
+  it("reveal_button_in_connect_guide_shows_the_real_shared_secret", async () => {
+    render(<Settings />);
+    await screen.findByText("codex-sol");
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    expect(await screen.findByLabelText("API key for client connections")).toHaveValue("sec_real");
   });
 
   it("renders_shared_secret_409_message_verbatim", async () => {

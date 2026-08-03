@@ -10,6 +10,8 @@ type SharedSecretResponse = {
   origin: "env" | "sidecar_file";
 };
 
+type Pool = { id: string; wire_format: string };
+
 export function Settings() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -18,6 +20,7 @@ export function Settings() {
   const [sharedSecretEdited, setSharedSecretEdited] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pools, setPools] = useState<Pool[]>([]);
 
   async function loadSharedSecret(reveal = false) {
     const suffix = reveal ? "?reveal=true" : "";
@@ -29,7 +32,23 @@ export function Settings() {
 
   useEffect(() => {
     void loadSharedSecret(false);
+    void apiJson<Pool[]>("/admin/pools").then(setPools).catch(() => setPools([]));
   }, []);
+
+  const baseUrl = `${window.location.origin}/v1`;
+  const exampleModel = pools[0]?.id ?? "<pool-id>";
+  const anthropicPools = pools.filter((p) => p.wire_format === "anthropic");
+  const openaiPools = pools.filter((p) => p.wire_format === "openai");
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage("Copied to clipboard.");
+    } catch {
+      // Clipboard access can be denied/unavailable (permissions, non-HTTPS,
+      // headless test env) - the value is still shown on screen to copy by hand.
+    }
+  }
 
   async function changePassword(event: FormEvent) {
     event.preventDefault();
@@ -113,6 +132,82 @@ export function Settings() {
           Save shared secret
         </button>
       </form>
+
+      <section aria-labelledby="connect-title">
+        <h2 id="connect-title">Connect a client</h2>
+        <p>
+          Point any OpenAI-compatible client (or a plain <code>curl</code>) at 1router by setting its base URL and
+          API key below. Anthropic-format clients (Claude Code, etc.) use the same base host with{" "}
+          <code>/v1/messages</code> instead of <code>/v1/chat/completions</code>.
+        </p>
+
+        <label>
+          Base URL
+          <div className="model-override-row">
+            <input readOnly value={baseUrl} aria-label="Base URL" />
+            <button type="button" className="btn-ghost" onClick={() => void copy(baseUrl)}>
+              Copy
+            </button>
+          </div>
+        </label>
+
+        <label>
+          API key
+          <div className="model-override-row">
+            <input
+              readOnly
+              value={sharedSecretRevealed ? sharedSecret : "•".repeat(12)}
+              aria-label="API key for client connections"
+            />
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => (sharedSecretRevealed ? void copy(sharedSecret) : void loadSharedSecret(true))}
+            >
+              {sharedSecretRevealed ? "Copy" : "Reveal"}
+            </button>
+          </div>
+        </label>
+
+        <h3>Available models</h3>
+        {pools.length === 0 ? (
+          <p>No pools yet — add a provider on the Providers page first.</p>
+        ) : (
+          <>
+            {openaiPools.length > 0 ? (
+              <>
+                <p>OpenAI-compatible (use with `/v1/chat/completions`):</p>
+                <ul>
+                  {openaiPools.map((p) => (
+                    <li key={p.id}>
+                      <code>{p.id}</code>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            {anthropicPools.length > 0 ? (
+              <>
+                <p>Anthropic-compatible (use with `/v1/messages`):</p>
+                <ul>
+                  {anthropicPools.map((p) => (
+                    <li key={p.id}>
+                      <code>{p.id}</code>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </>
+        )}
+
+        <pre>
+          {`curl ${baseUrl}/chat/completions \\
+  -H "Authorization: Bearer ${sharedSecretRevealed ? sharedSecret : "<your-api-key>"}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${exampleModel}","messages":[{"role":"user","content":"hi"}]}'`}
+        </pre>
+      </section>
     </section>
   );
 }

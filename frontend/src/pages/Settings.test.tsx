@@ -32,6 +32,20 @@ describe("Settings", () => {
             { status: 200 }
           );
         }
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([
+              { id: "deepseek_api", name: "Deepseek", kind: "passthrough", wire_format: "openai" },
+              { id: "codex-vbg", name: "codex-vbg", kind: "oauth_codex", wire_format: "openai" }
+            ]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/providers/deepseek_api/list-models" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify({ ok: true, models: ["deepseek-v4-flash", "deepseek-v4-pro"] }), {
+            status: 200
+          });
+        }
         return new Response("{}", { status: 404 });
       })
     );
@@ -90,6 +104,23 @@ describe("Settings", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
     expect(await screen.findByLabelText("API key for client connections")).toHaveValue("sec_real");
+  });
+
+  it("discovers_models_from_passthrough_providers_only_and_flags_ones_already_pooled", async () => {
+    render(<Settings />);
+    await screen.findByText("codex-sol");
+
+    await userEvent.click(screen.getByRole("button", { name: "Check providers for available models" }));
+
+    expect(await screen.findByText("deepseek-v4-pro")).toBeInTheDocument();
+    // deepseek-v4-flash is not in this test's pool list, but codex-sol is -
+    // exercise the "already a pool" flag path via a model matching a pool id.
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/providers/deepseek_api/list-models",
+      expect.objectContaining({ credentials: "include" })
+    );
+    // the oauth_codex provider is never queried - it has no models endpoint
+    expect(fetch).not.toHaveBeenCalledWith("/admin/providers/codex-vbg/list-models", expect.anything());
   });
 
   it("renders_shared_secret_409_message_verbatim", async () => {

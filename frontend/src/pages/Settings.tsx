@@ -11,6 +11,12 @@ type SharedSecretResponse = {
 };
 
 type Pool = { id: string; wire_format: string };
+type Provider = { id: string; name: string; kind: string; wire_format: string };
+
+// Per-provider result of calling its own GET .../models - kept separate
+// from `pools` because it's a real network call to each provider, so it's
+// triggered on demand rather than on every Settings page load.
+type Discovery = { status: "loading" } | { status: "ok"; models: string[] } | { status: "error"; message: string };
 
 export function Settings() {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -21,6 +27,9 @@ export function Settings() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pools, setPools] = useState<Pool[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [discovery, setDiscovery] = useState<Record<string, Discovery>>({});
+  const [discovering, setDiscovering] = useState(false);
 
   async function loadSharedSecret(reveal = false) {
     const suffix = reveal ? "?reveal=true" : "";
@@ -33,12 +42,45 @@ export function Settings() {
   useEffect(() => {
     void loadSharedSecret(false);
     void apiJson<Pool[]>("/admin/pools").then(setPools).catch(() => setPools([]));
+    void apiJson<Provider[]>("/admin/providers").then(setProviders).catch(() => setProviders([]));
   }, []);
 
   const baseUrl = `${window.location.origin}/v1`;
   const exampleModel = pools[0]?.id ?? "<pool-id>";
   const anthropicPools = pools.filter((p) => p.wire_format === "anthropic");
   const openaiPools = pools.filter((p) => p.wire_format === "openai");
+  const poolIds = new Set(pools.map((p) => p.id));
+  const discoverableProviders = providers.filter((p) => p.kind === "passthrough");
+
+  async function discoverModels() {
+    setDiscovering(true);
+    await Promise.all(
+      discoverableProviders.map(async (provider) => {
+        setDiscovery((current) => ({ ...current, [provider.id]: { status: "loading" } }));
+        try {
+          const result = await apiJson<{ ok: boolean; models?: string[]; reason?: string }>(
+            `/admin/providers/${encodeURIComponent(provider.id)}/list-models`
+          );
+          setDiscovery((current) => ({
+            ...current,
+            [provider.id]:
+              result.ok && result.models
+                ? { status: "ok", models: result.models }
+                : { status: "error", message: result.reason ?? "No models returned." }
+          }));
+        } catch (err) {
+          setDiscovery((current) => ({
+            ...current,
+            [provider.id]: {
+              status: "error",
+              message: err instanceof Error ? err.message : "Fetching models failed."
+            }
+          }));
+        }
+      })
+    );
+    setDiscovering(false);
+  }
 
   async function copy(text: string) {
     try {
@@ -207,6 +249,52 @@ export function Settings() {
   -H "Content-Type: application/json" \\
   -d '{"model":"${exampleModel}","messages":[{"role":"user","content":"hi"}]}'`}
         </pre>
+
+        <h3>Other models available from your providers</h3>
+        <p>
+          The list above is what clients can actually call right now (<code>model</code> = a pool id). A provider
+          often supports more models than the one it's currently pooled under — check here, then add one via a{" "}
+          <code>model_override</code> on the Pools page to make it callable.
+        </p>
+        <button
+          type="button"
+          onClick={() => void discoverModels()}
+          disabled={discovering || discoverableProviders.length === 0}
+        >
+          {discovering ? "Checking providers…" : "Check providers for available models"}
+        </button>
+        {discoverableProviders.length === 0 ? (
+          <p>No passthrough providers to check (Codex OAuth providers have no discoverable model list).</p>
+        ) : (
+          <ul>
+            {discoverableProviders.map((provider) => {
+              const result = discovery[provider.id];
+              if (!result) {
+                return null;
+              }
+              return (
+                <li key={provider.id}>
+                  <strong>{provider.name}</strong>{" "}
+                  {result.status === "loading" ? (
+                    "checking…"
+                  ) : result.status === "error" ? (
+                    <span className="validation-result validation-error">{result.message}</span>
+                  ) : (
+                    <span>
+                      {result.models.map((model, index) => (
+                        <span key={model}>
+                          {index > 0 ? ", " : ""}
+                          <code>{model}</code>
+                          {poolIds.has(model) ? " (already a pool)" : ""}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </section>
     </section>
   );

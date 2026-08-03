@@ -190,15 +190,20 @@ static suggestions with an inline reason why. A **Validate** button next to
 it sends a real one-token "hi" request through that provider's own adapter
 to confirm the chosen model name is actually callable before you save it.
 
-**Settings page**: the "Connect a client" section's "Check providers for
-available models" button calls every passthrough provider's live `/models`
-list and shows what each one actually offers - useful for spotting a model
-your provider supports that isn't callable yet (no pool/`model_override`
-points at it), so you know what to add on the Pools page. This is
-deliberately kept separate from `GET /v1/models`: that endpoint only ever
-lists pool ids, i.e. exactly what a client can call right now - a
-provider's raw catalog isn't callable until it's actually in a pool, so
-mixing the two would make `/v1/models` list non-functional entries.
+**Settings page**: the "Connect a client" section shows the base URL, the
+shared secret (same reveal/mask flow as elsewhere), and the available
+pools grouped by wire format, plus a copy-pasteable curl example - so
+wiring up an OpenAI/Anthropic-compatible client is a matter of reading one
+section instead of piecing those values together from other pages. Its
+"Check providers for available models" button calls every passthrough
+provider's live `/models` list and shows what each one actually offers -
+useful for spotting a model your provider supports that isn't callable yet
+(no pool/`model_override` points at it), so you know what to add on the
+Pools page. This is deliberately kept separate from `GET /v1/models`: that
+endpoint only ever lists pool ids, i.e. exactly what a client can call
+right now - a provider's raw catalog isn't callable until it's actually in
+a pool, so mixing the two would make `/v1/models` list non-functional
+entries.
 
 ## Admin API
 

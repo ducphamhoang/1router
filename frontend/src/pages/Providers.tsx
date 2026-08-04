@@ -25,40 +25,77 @@ const emptyForm: ProviderForm = {
   upstream_model: ""
 };
 
-// Pre-fills wire_format/base_url/upstream_model for a new provider; every
-// field stays editable afterward, and "Custom" (no preset applied) stays the
-// default so this never gets in the way of an unlisted provider.
-type ProviderPreset = {
+// Picking a template sets `kind` (+ a default wire_format the provider
+// itself may not even care about - see below) and prefills a suggested
+// id/name; every field, including kind, stays editable afterward, and
+// "Custom" (no template applied) stays the default so this never gets in
+// the way of an unlisted provider. Mirrors PROVIDER_TEMPLATES in
+// src/onboarding.rs - keep the two in sync if either grows.
+type ProviderTemplate = {
   label: string;
+  kind: string;
+  // Only meaningful for passthrough: a passthrough provider hits exactly
+  // one upstream wire shape, so this also picks which single wire_format
+  // pool "Make it directly callable" auto-creates. OAuth-kind providers
+  // (Codex, Command Code) bridge Anthropic<->OpenAI themselves and serve
+  // both client formats regardless of this value - the field is hidden
+  // from the form for those kinds; this default just seeds the one pool
+  // auto-created on save. Add the provider to a second pool of the other
+  // wire_format from the Pools page if you need both routes callable.
   wire_format: string;
-  base_url: string;
-  upstream_model: string;
+  suggestedId: string;
+  base_url?: string;
+  upstream_model?: string;
 };
 
-const PROVIDER_PRESETS: ProviderPreset[] = [
+const PROVIDER_TEMPLATES: ProviderTemplate[] = [
   {
     label: "OpenAI",
+    kind: "passthrough",
     wire_format: "openai",
+    suggestedId: "openai",
     base_url: "https://api.openai.com/v1/chat/completions",
     upstream_model: "gpt-5.4"
   },
   {
     label: "Anthropic",
+    kind: "passthrough",
     wire_format: "anthropic",
+    suggestedId: "anthropic",
     base_url: "https://api.anthropic.com/v1/messages",
     upstream_model: "claude-sonnet-5"
   },
   {
     label: "DeepSeek (OpenAI-compatible)",
+    kind: "passthrough",
     wire_format: "openai",
+    suggestedId: "deepseek-openai",
     base_url: "https://api.deepseek.com/v1/chat/completions",
     upstream_model: "deepseek-flash"
   },
   {
     label: "DeepSeek (Anthropic-compatible)",
+    kind: "passthrough",
     wire_format: "anthropic",
+    suggestedId: "deepseek-anthropic",
     base_url: "https://api.deepseek.com/anthropic/v1/messages",
     upstream_model: "deepseek-flash"
+  },
+  {
+    label: "Codex (ChatGPT account)",
+    kind: "oauth_codex",
+    wire_format: "anthropic",
+    suggestedId: "codex",
+    // Placeholder until the model is discovered/set after Connect - mirrors
+    // PENDING_MODEL in src/onboarding.rs.
+    upstream_model: "pending"
+  },
+  {
+    label: "Command Code",
+    kind: "oauth_command_code",
+    wire_format: "anthropic",
+    suggestedId: "command-code",
+    upstream_model: "pending"
   }
 ];
 
@@ -71,6 +108,11 @@ export function Providers() {
   const [error, setError] = useState<string | null>(null);
   const [preset, setPreset] = useState("custom");
   const [exposeAsPool, setExposeAsPool] = useState(true);
+  // Tracks whether the user has typed their own id/name since the modal
+  // opened, so applying a template never clobbers something they already
+  // typed - only the untouched default gets overwritten.
+  const [idTouched, setIdTouched] = useState(false);
+  const [nameTouched, setNameTouched] = useState(false);
 
   async function loadProviders() {
     setProviders(await apiJson<Provider[]>("/admin/providers"));
@@ -115,23 +157,29 @@ export function Providers() {
     setForm(emptyForm);
     setPreset("custom");
     setExposeAsPool(true);
+    setIdTouched(false);
+    setNameTouched(false);
     setModalOpen(true);
   }
 
-  function applyPreset(label: string) {
+  function applyTemplate(label: string) {
     setPreset(label);
     if (label === "custom") {
       return;
     }
-    const chosen = PROVIDER_PRESETS.find((preset) => preset.label === label);
+    const chosen = PROVIDER_TEMPLATES.find((template) => template.label === label);
     if (!chosen) {
       return;
     }
     setForm((current) => ({
       ...current,
+      kind: chosen.kind,
       wire_format: chosen.wire_format,
-      base_url: chosen.base_url,
-      upstream_model: chosen.upstream_model
+      id: idTouched ? current.id : chosen.suggestedId,
+      name: nameTouched ? current.name : chosen.label,
+      base_url: chosen.base_url ?? "",
+      api_key: chosen.kind === "passthrough" ? current.api_key : "",
+      upstream_model: chosen.upstream_model ?? current.upstream_model
     }));
   }
 
@@ -161,11 +209,14 @@ export function Providers() {
             ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
           }
         : form;
-      await apiJson(editing ? `/admin/providers/${encodeURIComponent(editing.id)}` : "/admin/providers", {
-        method: editing ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
+      const saved = await apiJson<Provider>(
+        editing ? `/admin/providers/${encodeURIComponent(editing.id)}` : "/admin/providers",
+        {
+          method: editing ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }
+      );
 
       if (!editing && exposeAsPool) {
         // Best-effort: the provider is already saved above, so a pool-name
@@ -188,13 +239,27 @@ export function Providers() {
               err instanceof Error ? err.message : "unknown error"
             }. Add it to a pool from the Pools page instead.`
           );
-          setModalOpen(false);
+          if (saved.kind !== "passthrough") {
+            setEditing(saved);
+            setForm({ ...saved, api_key: "" });
+          } else {
+            setModalOpen(false);
+          }
           await loadProviders();
           return;
         }
       }
 
-      setModalOpen(false);
+      // An OAuth-kind provider isn't usable yet - it still needs Connect (Codex)
+      // or a pasted key (Command Code). Rather than closing the modal and
+      // making the operator find it again via Edit, flip straight into edit
+      // mode so that panel appears immediately.
+      if (!editing && saved.kind !== "passthrough") {
+        setEditing(saved);
+        setForm({ ...saved, api_key: "" });
+      } else {
+        setModalOpen(false);
+      }
       await loadProviders();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Provider save failed.");
@@ -253,32 +318,37 @@ export function Providers() {
           {!editing ? (
             <>
               <label>
-                Preset <span className="optional">optional</span>
-                <select value={preset} onChange={(event) => applyPreset(event.target.value)}>
+                Template <span className="optional">optional</span>
+                <select value={preset} onChange={(event) => applyTemplate(event.target.value)}>
                   <option value="custom">Custom</option>
-                  {PROVIDER_PRESETS.map((p) => (
-                    <option key={p.label} value={p.label}>
-                      {p.label}
+                  {PROVIDER_TEMPLATES.map((t) => (
+                    <option key={t.label} value={t.label}>
+                      {t.label}
                     </option>
                   ))}
                 </select>
               </label>
               <label>
                 Provider ID
-                <input value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} />
+                <input
+                  value={form.id}
+                  onChange={(event) => {
+                    setIdTouched(true);
+                    setForm({ ...form, id: event.target.value });
+                  }}
+                />
               </label>
             </>
           ) : null}
           <label>
             Name
-            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-          </label>
-          <label>
-            Wire format
-            <select value={form.wire_format} onChange={(event) => setForm({ ...form, wire_format: event.target.value })}>
-              <option value="openai">openai</option>
-              <option value="anthropic">anthropic</option>
-            </select>
+            <input
+              value={form.name}
+              onChange={(event) => {
+                setNameTouched(true);
+                setForm({ ...form, name: event.target.value });
+              }}
+            />
           </label>
           <label>
             Kind
@@ -288,14 +358,33 @@ export function Providers() {
               <option value="oauth_command_code">oauth_command_code</option>
             </select>
           </label>
-          <label>
-            Base URL
-            <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-          </label>
-          <label>
-            API key
-            <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
-          </label>
+          {form.kind === "passthrough" ? (
+            <>
+              <label>
+                Wire format
+                <select
+                  value={form.wire_format}
+                  onChange={(event) => setForm({ ...form, wire_format: event.target.value })}
+                >
+                  <option value="openai">openai</option>
+                  <option value="anthropic">anthropic</option>
+                </select>
+              </label>
+              <label>
+                Base URL
+                <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+              </label>
+              <label>
+                API key
+                <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
+              </label>
+            </>
+          ) : (
+            <p className="hint">
+              This kind connects via {form.kind === "oauth_codex" ? "OAuth" : "an API key"}, not a base URL - save to
+              continue setup below.
+            </p>
+          )}
           <label>
             Upstream model
             <input value={form.upstream_model} onChange={(event) => setForm({ ...form, upstream_model: event.target.value })} />

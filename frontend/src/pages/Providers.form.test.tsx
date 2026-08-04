@@ -28,7 +28,8 @@ describe("Providers", () => {
           return new Response(JSON.stringify({ provider_id: "prov_1", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
         }
         if (url === "/admin/providers" && init?.method === "POST") {
-          return new Response(JSON.stringify({ ...providers[0], id: "prov_2", name: "anthropic" }), { status: 200 });
+          const sent = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ ...providers[0], ...sent, id: sent.id ?? "prov_2" }), { status: 200 });
         }
         if (url === "/admin/pools" && init?.method === "POST") {
           return new Response(JSON.stringify({ id: "prov_2", wire_format: "anthropic" }), { status: 201 });
@@ -84,20 +85,63 @@ describe("Providers", () => {
     expect(screen.getByRole("option", { name: "oauth_command_code" })).toBeInTheDocument();
   });
 
-  it("choosing_a_preset_prefills_wire_format_base_url_and_model_but_stays_editable", async () => {
+  it("choosing_a_template_prefills_wire_format_base_url_and_model_but_stays_editable", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
 
-    await userEvent.selectOptions(screen.getByLabelText(/Preset/), "DeepSeek (Anthropic-compatible)");
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "DeepSeek (Anthropic-compatible)");
 
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
     expect(screen.getByLabelText("Wire format")).toHaveValue("anthropic");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.deepseek.com/anthropic/v1/messages");
     expect(screen.getByLabelText("Upstream model")).toHaveValue("deepseek-flash");
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("deepseek-anthropic");
+    expect(screen.getByLabelText("Name")).toHaveValue("DeepSeek (Anthropic-compatible)");
 
-    // still fully editable after a preset is applied
+    // still fully editable after a template is applied
     await userEvent.clear(screen.getByLabelText("Base URL"));
     await userEvent.type(screen.getByLabelText("Base URL"), "https://my-mirror.example.com/v1/messages");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://my-mirror.example.com/v1/messages");
+
+    // and typing a custom id afterward isn't clobbered by re-picking a template
+    await userEvent.clear(screen.getByLabelText("Provider ID"));
+    await userEvent.type(screen.getByLabelText("Provider ID"), "my-deepseek");
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "DeepSeek (OpenAI-compatible)");
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("my-deepseek");
+  });
+
+  it("choosing_the_command_code_template_selects_its_kind_and_hides_passthrough_only_fields", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
+
+    expect(screen.getByLabelText("Kind")).toHaveValue("oauth_command_code");
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("command-code");
+    expect(screen.getByLabelText("Name")).toHaveValue("Command Code");
+    expect(screen.queryByLabelText("Wire format")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  });
+
+  it("creating_an_oauth_kind_provider_flips_the_modal_into_edit_mode_for_the_connect_step", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
+    // Skip pool auto-creation here - it's covered by its own tests, and this
+    // test only cares about the create -> edit-mode transition.
+    await userEvent.click(screen.getByLabelText(/Make it directly callable/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining("\"kind\":\"oauth_command_code\"") })
+      )
+    );
+    // still open, now in edit mode with the paste-key panel visible
+    expect(await screen.findByRole("button", { name: "Save Command Code key" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Provider ID")).not.toBeInTheDocument();
   });
 
   it("exposes_the_new_provider_as_a_matching_1_member_pool_by_default", async () => {

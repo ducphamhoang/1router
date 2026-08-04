@@ -158,35 +158,35 @@ fn theme() -> dialoguer::theme::ColorfulTheme {
 
 /// Pre-fills wire_format/base_url/upstream_model for a common provider;
 /// every value is still just the prompt's *default*, editable by pressing a
-/// different key before Enter. Mirrors PROVIDER_PRESETS in
+/// different key before Enter. Mirrors PROVIDER_TEMPLATES in
 /// frontend/src/pages/Providers.tsx - keep the two in sync if either grows.
-struct ProviderPreset {
+struct ProviderTemplate {
     label: &'static str,
     wire_format: WireFormat,
     base_url: &'static str,
     upstream_model: &'static str,
 }
 
-const PROVIDER_PRESETS: [ProviderPreset; 4] = [
-    ProviderPreset {
+const PROVIDER_TEMPLATES: [ProviderTemplate; 4] = [
+    ProviderTemplate {
         label: "OpenAI",
         wire_format: WireFormat::OpenAi,
         base_url: "https://api.openai.com/v1/chat/completions",
         upstream_model: "gpt-5.4",
     },
-    ProviderPreset {
+    ProviderTemplate {
         label: "Anthropic",
         wire_format: WireFormat::Anthropic,
         base_url: "https://api.anthropic.com/v1/messages",
         upstream_model: "claude-sonnet-5",
     },
-    ProviderPreset {
+    ProviderTemplate {
         label: "DeepSeek (OpenAI-compatible)",
         wire_format: WireFormat::OpenAi,
         base_url: "https://api.deepseek.com/v1/chat/completions",
         upstream_model: "deepseek-flash",
     },
-    ProviderPreset {
+    ProviderTemplate {
         label: "DeepSeek (Anthropic-compatible)",
         wire_format: WireFormat::Anthropic,
         base_url: "https://api.deepseek.com/anthropic/v1/messages",
@@ -237,13 +237,13 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     let name = name.trim().to_string();
 
     let mut preset_items: Vec<&str> = vec!["Custom"];
-    preset_items.extend(PROVIDER_PRESETS.iter().map(|p| p.label));
+    preset_items.extend(PROVIDER_TEMPLATES.iter().map(|p| p.label));
     let preset_choice = Select::with_theme(&theme())
-        .with_prompt("Preset (pre-fills the fields below; all stay editable)")
+        .with_prompt("Template (pre-fills the fields below; all stay editable)")
         .items(&preset_items)
         .default(0)
         .interact()?;
-    let preset = (preset_choice > 0).then(|| &PROVIDER_PRESETS[preset_choice - 1]);
+    let preset = (preset_choice > 0).then(|| &PROVIDER_TEMPLATES[preset_choice - 1]);
 
     let wire_format_default = match preset.map(|p| p.wire_format) {
         Some(WireFormat::Anthropic) => 1,
@@ -340,18 +340,15 @@ pub async fn add_commandcode_provider(
         })
         .interact_text()?;
     let name = name.trim().to_string();
-    let wire_format = match Select::with_theme(&theme())
-        .with_prompt("Which client format should this Command Code account serve?")
-        .items([
-            "anthropic - Claude Code (POST /v1/messages)",
-            "openai - Cursor, OpenAI SDK clients (POST /v1/chat/completions)",
-        ])
-        .default(0)
-        .interact()?
-    {
-        0 => WireFormat::Anthropic,
-        _ => WireFormat::OpenAi,
-    };
+    // No wire-format prompt here: this adapter bridges Anthropic<->OpenAI
+    // itself (see providers::adapter::codex::claude_bridge, reused by the
+    // Command Code adapter), so the provider already serves both client
+    // formats regardless of what's stored here. The value only matters as
+    // the default wire_format for the pool this wizard step may auto-create
+    // below; add the provider to a second pool of the other wire_format from
+    // the Pools page (or another `1router setup` pass) if you need both
+    // routes callable.
+    let wire_format = WireFormat::Anthropic;
     let now = chrono::Utc::now();
     let mut provider = Provider {
         id: name.clone(),
@@ -578,18 +575,14 @@ pub async fn add_codex_provider(
         .interact_text()?;
     let name = name.trim().to_string();
 
-    let wire_format = match Select::with_theme(&theme())
-        .with_prompt("Which client format should this ChatGPT account serve?")
-        .items([
-            "anthropic - Claude Code (POST /v1/messages)",
-            "openai - Cursor, OpenAI SDK clients (POST /v1/chat/completions)",
-        ])
-        .default(0)
-        .interact()?
-    {
-        0 => WireFormat::Anthropic,
-        _ => WireFormat::OpenAi,
-    };
+    // No wire-format prompt here: the Codex adapter bridges Anthropic<->OpenAI
+    // itself (claude_bridge), so the provider already serves both client
+    // formats regardless of what's stored here. The value only matters as
+    // the default wire_format for the pool this wizard step may auto-create
+    // below; add the provider to a second pool of the other wire_format from
+    // the Pools page (or another `1router setup` pass) if you need both
+    // routes callable.
+    let wire_format = WireFormat::Anthropic;
 
     let now = chrono::Utc::now();
     let mut provider = Provider {

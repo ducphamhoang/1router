@@ -77,23 +77,37 @@ async fn direct_provider_addressing_returns_400_for_an_unknown_provider() {
 }
 
 #[tokio::test]
-async fn direct_provider_addressing_respects_wire_format() {
+async fn direct_provider_addressing_translates_across_wire_formats() {
+    // `PassthroughAdapter` now translates between wire formats (universal
+    // passthrough translation), so hitting the OpenAI-shaped endpoint
+    // against an Anthropic-wire-format provider via direct addressing
+    // resolves and translates rather than 400ing - same as a pool would.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"
+        })))
+        .mount(&upstream)
+        .await;
+
     let app = spawn_app().await;
-    add_provider(&app, "claude_api", "anthropic", "https://unused.example.com").await;
+    add_provider(&app, "claude_api", "anthropic", &format!("{}/v1/messages", upstream.uri())).await;
 
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
-    // hitting the OpenAI-shaped endpoint against an Anthropic provider must
-    // not match - same rule a real pool enforces.
     let resp = client
         .post(format!("{}/v1/chat/completions", app.base_url))
         .header(k, v)
-        .json(&json!({ "model": "claude_api/claude-sonnet-5", "messages": [] }))
+        .json(&json!({ "model": "claude_api/claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}] }))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "hi");
 }
 
 /// A real pool still takes priority even when a provider of the same name

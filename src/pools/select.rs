@@ -61,13 +61,10 @@ pub fn select<'a>(
 fn select_direct_provider<'a>(
     snapshot: &'a ConfigSnapshot,
     requested: &str,
-    wire: WireFormat,
+    _wire: WireFormat,
 ) -> Option<Selection<'a>> {
     let (provider_id, model) = requested.split_once('/')?;
     let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
-    if !provider.supports_wire(wire) {
-        return None;
-    }
     Some(Selection {
         pool: None,
         providers: vec![(provider, model.to_string())],
@@ -176,8 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn direct_provider_addressing_rejects_a_wire_format_mismatch() {
-        assert!(select(&snap(), "a/some-model", WireFormat::Anthropic).is_none());
+    fn direct_provider_addressing_translates_a_wire_format_mismatch() {
+        // "a" is an OpenAi-wire-format passthrough provider; since
+        // `PassthroughAdapter` now translates, direct addressing from the
+        // Anthropic route still resolves to it rather than falling through.
+        let s = snap();
+        let sel = select(&s, "a/some-model", WireFormat::Anthropic).unwrap();
+        assert_eq!(sel.providers[0].0.id, "a");
     }
 
     #[test]

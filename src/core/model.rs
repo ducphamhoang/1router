@@ -31,15 +31,6 @@ pub struct Provider {
     pub updated_at: DateTime<Utc>,
 }
 
-impl Provider {
-    pub fn supports_wire(&self, w: WireFormat) -> bool {
-        match self.kind {
-            ProviderKind::OauthCodex | ProviderKind::OauthCommandCode => true,
-            ProviderKind::Passthrough => self.wire_format == w,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Pool {
     pub id: String,
@@ -122,36 +113,5 @@ mod tests {
         );
         let command_code: ProviderKind = serde_json::from_str("\"oauth_command_code\"").unwrap();
         assert_eq!(command_code, ProviderKind::OauthCommandCode);
-    }
-
-    #[test]
-    fn provider_supports_wire_depends_on_kind() {
-        let codex = Provider {
-            id: "cx".into(),
-            name: "Codex".into(),
-            wire_format: WireFormat::OpenAi,
-            kind: ProviderKind::OauthCodex,
-            base_url: None,
-            api_key: None,
-            upstream_model: "gpt-5-codex".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        assert!(codex.supports_wire(WireFormat::OpenAi));
-        assert!(codex.supports_wire(WireFormat::Anthropic));
-
-        let command_code = Provider {
-            kind: ProviderKind::OauthCommandCode,
-            ..codex.clone()
-        };
-        assert!(command_code.supports_wire(WireFormat::OpenAi));
-        assert!(command_code.supports_wire(WireFormat::Anthropic));
-
-        let passthrough = Provider {
-            kind: ProviderKind::Passthrough,
-            ..codex.clone()
-        };
-        assert!(passthrough.supports_wire(WireFormat::OpenAi));
-        assert!(!passthrough.supports_wire(WireFormat::Anthropic));
     }
 }

@@ -111,17 +111,27 @@ simply absent from the list rather than causing an error.
 
 Two client-facing routes: `POST /v1/chat/completions` (OpenAI Chat
 Completions shape) and `POST /v1/messages` (Anthropic Messages shape, what
-Claude Code speaks). Ordinary passthrough providers are pure config and
-speak whichever one format their `wire_format` says - a pool must stay
-homogeneous, so a passthrough provider can only join a pool matching its
-own format.
+Claude Code speaks). Every provider kind can serve either route: a
+provider's own `wire_format` describes what its *upstream* speaks, not what
+clients are limited to. If a client's request shape doesn't match the
+provider's own format, 1router translates it (and translates the response
+back) - a plain passthrough Anthropic-compatible endpoint (e.g. an
+`api.anthropic.com`-style provider) can serve `/v1/chat/completions`
+clients directly, and vice versa, with no per-provider config needed beyond
+its own `wire_format`. This holds for streaming responses too. The
+Codex/ChatGPT-OAuth and Command Code adapters translate the same way, just
+against their own proprietary upstream shapes instead of a second wire
+format.
 
-The Codex/ChatGPT-OAuth and Command Code adapters are the exceptions: they translate per-request
-based on the route actually hit, not a stored field, so one Codex provider
-row (one OAuth credential set) can be a member of an `openai`-format pool
-and an `anthropic`-format pool at the same time - e.g. serving OpenCode over
-`/v1/chat/completions` and Claude Code over `/v1/messages` from the same
-ChatGPT account, no duplicate provider/OAuth needed.
+One thing this does *not* change: a **pool**'s own `wire_format` still pins
+it to one client-facing route, set at creation - a pool created with
+`wire_format: anthropic` only ever answers `/v1/messages`, regardless of
+what any of its member providers' own formats are. Serving both client
+routes from one credential still means either direct `<provider_id>/<model>`
+addressing (works from either route now, for every provider kind) or two
+separate pool rows for the same provider - e.g. one Codex OAuth login
+backing an `openai`-format pool for OpenCode and an `anthropic`-format pool
+for Claude Code simultaneously, no duplicate provider/OAuth needed.
 
 ## Configuration (environment variables)
 
@@ -151,9 +161,10 @@ client → /v1/chat/completions or /v1/messages
            │
            ▼
      ProviderAdapter (per provider `kind`)
-       ├─ passthrough:  forwards the request as-is (OpenAI or Anthropic wire
-       │                format) to `base_url`, `Authorization`/`x-api-key` set
-       │                from the stored `api_key`.
+       ├─ passthrough:  forwards to `base_url` in the provider's own wire
+       │                format, translating from the client's if it
+       │                differs; `Authorization`/`x-api-key` set from the
+       │                stored `api_key`.
        ├─ oauth_codex:  rewrites Chat-Completions `messages` into the
        │                Responses API's `input`, and targets Codex using
        │                a refreshable OAuth access token.
@@ -178,6 +189,8 @@ what's explicitly out of scope for v1 — see:
 - [`docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`](docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md) — the `setup` wizard's design
 - [`docs/superpowers/specs/2026-08-04-commandcode-provider-design.md`](docs/superpowers/specs/2026-08-04-commandcode-provider-design.md) — Command Code adapter design
 - [`docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md`](docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md) — Command Code implementation plan
+- [`docs/superpowers/specs/2026-08-04-universal-passthrough-translation-design.md`](docs/superpowers/specs/2026-08-04-universal-passthrough-translation-design.md) — universal passthrough wire-format translation (v0.3.2) design
+- [`docs/superpowers/plans/2026-08-04-universal-passthrough-translation-implementation.md`](docs/superpowers/plans/2026-08-04-universal-passthrough-translation-implementation.md) — its implementation plan
 - [`docs/superpowers/plans/`](docs/superpowers/plans/) — task-by-task implementation plans, useful for "why is this code shaped this way" archaeology
 
 ## Admin web UI
@@ -215,6 +228,24 @@ endpoint) and mirrors that don't implement `/models` fall back to the
 static suggestions with an inline reason why. A **Validate** button next to
 it sends a real one-token "hi" request through that provider's own adapter
 to confirm the chosen model name is actually callable before you save it.
+
+For a Command Code provider specifically, the Providers page shows a
+**Login with browser** button alongside a paste-key fallback (mirroring the
+`1router setup` wizard's own Command Code step): it opens commandcode.ai in
+a new tab against a short-lived local callback listener the same way the
+CLI wizard does, polls for completion, and on success fetches Command
+Code's model list and validates the key against it automatically — no
+separate "Validate" click needed. This only works when the admin UI is
+being viewed on the same machine running 1router, since commandcode.ai's
+login page posts the result to `http://localhost:<port>` from the
+browser's own machine; a remote admin UI should use the paste-key fallback
+instead. The paste-key path validates the key by probing Command Code's own
+models with a real minimal request (biased toward cheap/free-tier models
+first, so a flagship-only probe doesn't spuriously 403 with
+`MODEL_NOT_IN_PLAN` on an otherwise-valid key) rather than trusting the key
+at face value. Either path is reflected in `GET /admin/providers`'s
+`credential_configured` field, which the UI uses to show "a key is already
+saved" instead of implying no credential exists yet.
 
 **Settings page**: the "Connect a client" section shows the base URL, the
 shared secret (same reveal/mask flow as elsewhere), and the available

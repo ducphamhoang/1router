@@ -148,7 +148,11 @@ async fn create_pool_add_member() {
 }
 
 #[tokio::test]
-async fn wire_format_mismatch_is_400() {
+async fn passthrough_provider_can_join_a_pool_with_a_different_stored_wire_format() {
+    // `PassthroughAdapter` now translates between wire formats (see the
+    // universal passthrough translation design doc), so a provider whose
+    // own wire_format differs from the pool's is no longer rejected - it
+    // behaves the same as the Codex/Command Code adapters already did.
     let state = test_state().await;
     create_provider(&state.db, "anth", WireFormat::Anthropic).await;
     let router = build_router(state.clone());
@@ -175,7 +179,7 @@ async fn wire_format_mismatch_is_400() {
         ))
         .await
         .unwrap();
-    assert_eq!(m.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(m.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -80,14 +80,8 @@ async fn put_member(
     Path(pool_id): Path<String>,
     Json(b): Json<PutMember>,
 ) -> Result<Json<Value>, AppError> {
-    let pool = queries::get_pool(&s.db, &pool_id).await?;
-    let provider = pq::get_provider(&s.db, &b.provider_id).await?;
-    if !provider.supports_wire(pool.wire_format) {
-        return Err(AppError::BadRequest(format!(
-            "provider '{}' is a {:?} provider with wire_format {:?} and cannot serve a {:?} pool; passthrough providers cannot translate between formats",
-            provider.id, provider.kind, provider.wire_format, pool.wire_format
-        )));
-    }
+    queries::get_pool(&s.db, &pool_id).await?;
+    pq::get_provider(&s.db, &b.provider_id).await?;
     queries::upsert_member(
         &s.db,
         &PoolMember {

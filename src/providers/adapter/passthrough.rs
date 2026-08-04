@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{Provider, WireFormat};
+use crate::providers::adapter::codex::claude_bridge;
 use crate::providers::adapter::{Credentials, ProviderAdapter};
 use crate::proxy::backoff;
 
@@ -13,11 +14,20 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct PassthroughAdapter {
     provider: Provider,
     http: reqwest::Client,
+    client_wire: WireFormat,
 }
 
 impl PassthroughAdapter {
-    pub fn new(provider: Provider, http: reqwest::Client) -> Self {
-        Self { provider, http }
+    pub fn new(provider: Provider, http: reqwest::Client, client_wire: WireFormat) -> Self {
+        Self {
+            provider,
+            http,
+            client_wire,
+        }
+    }
+
+    fn translates(&self) -> bool {
+        self.client_wire != self.provider.wire_format
     }
 }
 
@@ -28,8 +38,16 @@ impl ProviderAdapter for PassthroughAdapter {
         client_body: &Bytes,
         creds: &Credentials,
     ) -> Result<reqwest::Request, AppError> {
-        let mut json: serde_json::Value = serde_json::from_slice(client_body)
+        let client_json: serde_json::Value = serde_json::from_slice(client_body)
             .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+        let mut json = if self.translates() {
+            match self.client_wire {
+                WireFormat::Anthropic => claude_bridge::claude_to_openai_request(&client_json),
+                WireFormat::OpenAi => claude_bridge::openai_to_claude_request(&client_json),
+            }
+        } else {
+            client_json
+        };
         if let Some(obj) = json.as_object_mut() {
             obj.insert(
                 "model".into(),
@@ -59,20 +77,59 @@ impl ProviderAdapter for PassthroughAdapter {
     async fn transform_response(
         &self,
         upstream: reqwest::Response,
-        _client_wanted_stream: bool,
+        client_wanted_stream: bool,
     ) -> Result<Response, AppError> {
         let status = upstream.status();
         let mut resp_headers = HeaderMap::new();
         for (k, v) in upstream.headers().iter() {
-            if k.as_str().eq_ignore_ascii_case("transfer-encoding") {
+            if k.as_str().eq_ignore_ascii_case("transfer-encoding")
+                || k.as_str().eq_ignore_ascii_case("content-length")
+            {
                 continue;
             }
             resp_headers.insert(k.clone(), v.clone());
         }
-        let stream = upstream.bytes_stream();
-        let body = Body::from_stream(stream);
-        let mut response = (status, body).into_response();
+
+        if !self.translates() {
+            let body = Body::from_stream(upstream.bytes_stream());
+            let mut response = (status, body).into_response();
+            *response.headers_mut() = resp_headers;
+            return Ok(response);
+        }
+
+        if client_wanted_stream {
+            let framed = claude_bridge::reframe_sse_blocks(upstream.bytes_stream());
+            let body = match self.client_wire {
+                WireFormat::Anthropic => {
+                    Body::from_stream(claude_bridge::convert_openai_sse_to_claude_sse(framed))
+                }
+                WireFormat::OpenAi => {
+                    Body::from_stream(claude_bridge::convert_claude_sse_to_openai_sse(framed))
+                }
+            };
+            let mut response = (status, body).into_response();
+            *response.headers_mut() = resp_headers;
+            response
+                .headers_mut()
+                .insert("content-type", "text/event-stream".parse().unwrap());
+            return Ok(response);
+        }
+
+        let bytes = upstream
+            .bytes()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to read upstream body: {e}")))?;
+        let upstream_json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| AppError::Internal(format!("invalid upstream JSON: {e}")))?;
+        let translated = match self.client_wire {
+            WireFormat::Anthropic => claude_bridge::openai_json_to_claude_message(&upstream_json),
+            WireFormat::OpenAi => claude_bridge::claude_json_to_openai_message(&upstream_json),
+        };
+        let mut response = (status, axum::Json(translated)).into_response();
         *response.headers_mut() = resp_headers;
+        response
+            .headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
         Ok(response)
     }
 
@@ -126,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_rewrites_model_and_sets_auth() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new());
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "gpt-4o", "messages": []
@@ -152,7 +209,7 @@ mod tests {
     async fn build_request_uses_anthropic_headers_for_anthropic_wire_format() {
         let mut p = prov();
         p.wire_format = WireFormat::Anthropic;
-        let a = PassthroughAdapter::new(p, reqwest::Client::new());
+        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::Anthropic);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({ "model": "claude", "messages": [] })).unwrap(),
         );
@@ -175,7 +232,95 @@ mod tests {
 
     #[test]
     fn needs_refresh_is_false() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new());
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
         assert!(!a.needs_refresh(&creds()));
+    }
+
+    #[tokio::test]
+    async fn build_request_translates_anthropic_client_to_openai_provider() {
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "claude-x", "system": "be nice", "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["model"], "real-model");
+        assert_eq!(sent["messages"][0]["role"], "system");
+        assert_eq!(sent["messages"][0]["content"], "be nice");
+        assert_eq!(sent["messages"][1]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn build_request_translates_openai_client_to_anthropic_provider() {
+        let mut p = prov();
+        p.wire_format = WireFormat::Anthropic;
+        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["model"], "real-model");
+        assert_eq!(sent["messages"][0]["content"], "hi");
+        assert!(sent.get("max_tokens").is_some(), "Anthropic requires max_tokens");
+    }
+
+    fn upstream_response(body: &str) -> reqwest::Response {
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn transform_response_translates_openai_json_to_claude_when_client_is_anthropic() {
+        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
+        let openai_json = serde_json::json!({
+            "id": "resp_1", "model": "real-model",
+            "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]
+        })
+        .to_string();
+        let response = a
+            .transform_response(upstream_response(&openai_json), false)
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(out["type"], "message");
+        assert_eq!(out["content"][0]["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn transform_response_translates_claude_json_to_openai_when_client_is_openai() {
+        let mut p = prov();
+        p.wire_format = WireFormat::Anthropic;
+        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let claude_json = serde_json::json!({
+            "id": "msg_1", "model": "real-model", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hello"}]
+        })
+        .to_string();
+        let response = a
+            .transform_response(upstream_response(&claude_json), false)
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(out["object"], "chat.completion");
+        assert_eq!(out["choices"][0]["message"]["content"], "hello");
     }
 }

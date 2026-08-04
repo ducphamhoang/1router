@@ -50,9 +50,11 @@ pub fn adapter_for_wire(
     client_wire: WireFormat,
 ) -> Box<dyn ProviderAdapter> {
     match provider.kind {
-        ProviderKind::Passthrough => {
-            Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
-        }
+        ProviderKind::Passthrough => Box::new(passthrough::PassthroughAdapter::new(
+            provider.clone(),
+            http,
+            client_wire,
+        )),
         ProviderKind::OauthCodex => Box::new(codex::CodexAdapter::new(
             provider.clone(),
             http,

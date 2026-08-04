@@ -17,6 +17,9 @@ new work should branch directly off `master`. See:
   smoke checklist: `docs/superpowers/plans/2026-07-26-onboarding-wizard-smoke.md`
 - Command Code provider — design: `docs/superpowers/specs/2026-08-04-commandcode-provider-design.md`,
   plan: `docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md`
+- Universal passthrough wire-format translation (v0.3.2) — design:
+  `docs/superpowers/specs/2026-08-04-universal-passthrough-translation-design.md`,
+  plan (done): `docs/superpowers/plans/2026-08-04-universal-passthrough-translation-implementation.md`
 - Release/publishing — design: `docs/superpowers/specs/2026-07-26-release-publishing-design.md`,
   plan (done): `docs/superpowers/plans/2026-07-26-release-publishing.md`,
   GHCR checklist: `docs/superpowers/plans/2026-07-26-release-publishing-ghcr-checklist.md`

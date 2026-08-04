@@ -82,3 +82,65 @@ async fn streaming_passthrough_preserves_sse_body() {
     let text = resp.text().await.unwrap();
     assert!(text.contains("[DONE]"));
 }
+
+#[tokio::test]
+async fn streaming_passthrough_translates_openai_upstream_to_claude_client() {
+    let upstream = MockServer::start().await;
+    // Deliberately split across two response chunks mid-block to exercise
+    // `reframe_sse_blocks` reassembling before translation.
+    let sse = "data: {\"id\":\"r1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
+        data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n\
+        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client
+        .post(format!("{}/admin/pools", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "id": "claude-pool", "wire_format": "anthropic" }))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(
+            &json!({ "id": "p2", "name": "p2", "wire_format": "openai", "kind": "passthrough",
+            "base_url": format!("{}/v1/chat/completions", upstream.uri()),
+            "api_key": "sk", "upstream_model": "m" }),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .put(format!("{}/admin/pools/claude-pool/members", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "provider_id": "p2", "priority": 1 }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/v1/messages", app.base_url))
+        .header(k, v)
+        .json(&json!({ "model": "claude-pool", "messages": [{"role": "user", "content": "hi"}], "stream": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("event: message_start"));
+    assert!(text.contains("\"text\":\"Hi\""));
+    assert!(text.contains("event: message_stop"));
+    assert!(!text.contains("[DONE]"));
+}

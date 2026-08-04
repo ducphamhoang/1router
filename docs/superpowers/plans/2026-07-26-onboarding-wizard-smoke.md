@@ -149,6 +149,21 @@ rebuilding, and re-running section H.
 - [ ] Revert the `CANDIDATE_MODELS` edit and rebuild before committing
       anything. **Do not commit the bogus list.**
 
+## J. Command Code provider (browser callback or paste fallback)
+
+- [ ] In a fresh setup, choose **Command Code (commandcode.ai browser login)**.
+- [ ] Select the client wire format; confirm the printed studio URL contains
+      the encoded `http://localhost:<port>/callback` and state token.
+- [ ] Complete the browser login and confirm the callback stores the key in
+      `provider_oauth_state` as both access and refresh tokens while
+      `providers.api_key` remains `NULL`.
+- [ ] If the callback listener cannot bind or times out, confirm the wizard
+      prints the URL and reaches the hidden paste-key prompt without hanging.
+- [ ] Confirm model discovery offers the unauthenticated Command Code model
+      list, and that the selected model is persisted as `upstream_model`.
+- [ ] Confirm both `/v1/chat/completions` and `/v1/messages` work through the
+      resulting pool; the admin UI should use its separate paste-key flow.
+
 ---
 
 ## Final verification checklist

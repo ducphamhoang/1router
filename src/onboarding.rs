@@ -16,8 +16,13 @@ use crate::core::model::PoolMember;
 /// way to find the right value is to try candidates against a live login.
 /// Kept in sync BY HAND with tests/e2e_real_providers.rs::codex_end_to_end_real;
 /// if you update one, update the other (see the spec's accepted-risk section).
-pub const CANDIDATE_MODELS: [&str; 5] =
-    ["gpt-5.4", "gpt-5-codex", "gpt-5.1-codex", "gpt-5", "codex-mini-latest"];
+pub const CANDIDATE_MODELS: [&str; 5] = [
+    "gpt-5.4",
+    "gpt-5-codex",
+    "gpt-5.1-codex",
+    "gpt-5",
+    "codex-mini-latest",
+];
 
 /// Placeholder `upstream_model` for a Codex provider whose real model is not
 /// known yet (set at create time, and left in place if every probe fails).
@@ -143,6 +148,7 @@ pub async fn assign_to_pool(
 }
 
 use crate::core::model::{ProviderKind, WireFormat};
+use crate::providers::adapter::commandcode::browser_login::{self, AuthListener, LoginError};
 use crate::providers::queries as provider_queries;
 use dialoguer::{Confirm, Input, Password, Select};
 
@@ -221,7 +227,11 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     let name: String = Input::with_theme(&theme())
         .with_prompt("Provider name (also used as its id)")
         .validate_with(|s: &String| -> Result<(), &str> {
-            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+            if s.trim().is_empty() {
+                Err("name cannot be empty")
+            } else {
+                Ok(())
+            }
         })
         .interact_text()?;
     let name = name.trim().to_string();
@@ -287,6 +297,140 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     Ok(p)
 }
 
+pub async fn store_commandcode_key(
+    db: &sqlx::SqlitePool,
+    provider_id: &str,
+    key: &str,
+) -> Result<(), AppError> {
+    provider_queries::upsert_oauth_tokens(
+        db,
+        provider_id,
+        Some(key),
+        Some(key),
+        None,
+        Some(browser_login::far_future_expiry()),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+async fn paste_commandcode_key() -> anyhow::Result<String> {
+    Ok(tokio::task::spawn_blocking(|| {
+        Password::with_theme(&theme())
+            .with_prompt("Paste your Command Code API key")
+            .interact()
+            .map(|key| browser_login::sanitize_api_key(&key))
+            .map_err(anyhow::Error::from)
+    })
+    .await??)
+}
+
+pub async fn add_commandcode_provider(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+) -> anyhow::Result<Provider> {
+    let name: String = Input::with_theme(&theme())
+        .with_prompt("Provider name (also used as its id)")
+        .validate_with(|s: &String| -> Result<(), &str> {
+            if s.trim().is_empty() {
+                Err("name cannot be empty")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    let name = name.trim().to_string();
+    let wire_format = match Select::with_theme(&theme())
+        .with_prompt("Which client format should this Command Code account serve?")
+        .items([
+            "anthropic - Claude Code (POST /v1/messages)",
+            "openai - Cursor, OpenAI SDK clients (POST /v1/chat/completions)",
+        ])
+        .default(0)
+        .interact()?
+    {
+        0 => WireFormat::Anthropic,
+        _ => WireFormat::OpenAi,
+    };
+    let now = chrono::Utc::now();
+    let mut provider = Provider {
+        id: name.clone(),
+        name,
+        wire_format,
+        kind: ProviderKind::OauthCommandCode,
+        base_url: None,
+        api_key: None,
+        upstream_model: PENDING_MODEL.to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    provider_queries::insert_provider(db, &provider)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", provider.id))?;
+
+    let state_token = uuid::Uuid::new_v4().to_string();
+    let key = match browser_login::bind_listener().await {
+        Ok((listener, port)) => {
+            let auth = AuthListener::new(listener, port, state_token.clone());
+            let url = auth.authorize_url();
+            let task = tokio::spawn(auth.wait());
+            println!("\n=== Command Code login ===\nOpen this URL (it is also printed for headless use):\n\n{url}\n");
+            browser_login::open_in_browser(&url);
+            match task.await? {
+                Ok(callback) => browser_login::validate_state(&state_token, callback)
+                    .map(|callback| callback.api_key)
+                    .map_err(|e| anyhow::anyhow!("Command Code login failed: {e:?}")),
+                Err(LoginError::Timeout) => {
+                    println!("Automatic transfer failed or timed out.");
+                    paste_commandcode_key().await
+                }
+                Err(LoginError::Denied(reason)) => {
+                    anyhow::bail!("Command Code login denied: {reason}")
+                }
+                Err(error) => anyhow::bail!("Command Code login failed: {error:?}"),
+            }
+        }
+        Err(error) => {
+            eprintln!("Could not bind the Command Code callback listener ({error}); falling back to paste.");
+            paste_commandcode_key().await
+        }
+    }?;
+    if key.trim().is_empty() {
+        anyhow::bail!("Command Code API key cannot be empty");
+    }
+    store_commandcode_key(db, &provider.id, &key).await?;
+
+    let models = crate::providers::routes::fetch_commandcode_models(http).await;
+    let model = match models {
+        Ok(models) => {
+            let choice = Select::with_theme(&theme())
+                .with_prompt("Command Code model")
+                .items(&models)
+                .default(0)
+                .interact()?;
+            models[choice].clone()
+        }
+        Err(reason) => {
+            eprintln!("Model discovery failed ({reason}); enter the upstream model manually.");
+            Input::<String>::with_theme(&theme())
+                .with_prompt("Command Code upstream model")
+                .default(PENDING_MODEL.to_string())
+                .interact_text()?
+        }
+    };
+    provider_queries::update_provider(
+        db,
+        &provider.id,
+        &ProviderPatch {
+            upstream_model: Some(model.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    provider.upstream_model = model;
+    Ok(provider)
+}
+
 use crate::providers::adapter::codex::oauth;
 use crate::providers::adapter::{adapter_for, Credentials};
 use crate::providers::oauth_routes::complete_oauth_exchange;
@@ -335,7 +479,10 @@ pub(crate) async fn persist_probe_result(
             provider_queries::update_provider(
                 db,
                 &provider.id,
-                &ProviderPatch { upstream_model: Some(model.clone()), ..Default::default() },
+                &ProviderPatch {
+                    upstream_model: Some(model.clone()),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| anyhow::anyhow!("failed to set upstream_model: {e}"))?;
@@ -422,7 +569,11 @@ pub async fn add_codex_provider(
     let name: String = Input::with_theme(&theme())
         .with_prompt("Provider name (also used as its id)")
         .validate_with(|s: &String| -> Result<(), &str> {
-            if s.trim().is_empty() { Err("name cannot be empty") } else { Ok(()) }
+            if s.trim().is_empty() {
+                Err("name cannot be empty")
+            } else {
+                Ok(())
+            }
         })
         .interact_text()?;
     let name = name.trim().to_string();
@@ -689,14 +840,18 @@ pub async fn run_wizard(
     while ask {
         let kind = Select::with_theme(&theme())
             .with_prompt("Provider kind")
-            .items(["passthrough (OpenAI/Anthropic-compatible API key)",
-                     "Codex OAuth (ChatGPT account)"])
+            .items([
+                "passthrough (OpenAI/Anthropic-compatible API key)",
+                "Codex OAuth (ChatGPT account)",
+                "Command Code (commandcode.ai browser login)",
+            ])
             .default(0)
             .interact()?;
 
         let provider = match kind {
             0 => add_passthrough_provider(db).await?,
-            _ => add_codex_provider(db, http).await?,
+            1 => add_codex_provider(db, http).await?,
+            _ => add_commandcode_provider(db, http).await?,
         };
 
         // Pool id: what clients will send as `model`. The provider row above
@@ -796,7 +951,12 @@ mod tests {
     use crate::core::model::PoolMember;
 
     fn member(priority: i64) -> PoolMember {
-        PoolMember { pool_id: "p".into(), provider_id: "x".into(), priority, model_override: None }
+        PoolMember {
+            pool_id: "p".into(),
+            provider_id: "x".into(),
+            priority,
+            model_override: None,
+        }
     }
 
     #[test]
@@ -847,7 +1007,11 @@ mod tests {
             let t = t.clone();
             async move {
                 t.lock().unwrap().push(m.clone());
-                if m == "b" { Ok((200, "{}".into())) } else { Ok((400, "nope".into())) }
+                if m == "b" {
+                    Ok((200, "{}".into()))
+                } else {
+                    Ok((400, "nope".into()))
+                }
             }
         })
         .await;
@@ -858,10 +1022,8 @@ mod tests {
 
     #[tokio::test]
     async fn probe_reports_every_failure_when_none_succeed() {
-        let out = probe_first_success(&["a", "b"], |m| async move {
-            Ok((404, format!("no {m}")))
-        })
-        .await;
+        let out =
+            probe_first_success(&["a", "b"], |m| async move { Ok((404, format!("no {m}"))) }).await;
 
         match out {
             ProbeOutcome::AllFailed(fs) => {
@@ -876,7 +1038,11 @@ mod tests {
     #[tokio::test]
     async fn probe_treats_transport_error_as_a_failed_attempt_and_continues() {
         let out = probe_first_success(&["a", "b"], |m| async move {
-            if m == "a" { Err("connection reset".into()) } else { Ok((200, "{}".into())) }
+            if m == "a" {
+                Err("connection reset".into())
+            } else {
+                Ok((200, "{}".into()))
+            }
         })
         .await;
         assert!(matches!(out, ProbeOutcome::Found(ref m) if m == "b"));
@@ -888,7 +1054,13 @@ mod tests {
         // the spec calls them out as a pair that goes stale together.
         assert_eq!(
             CANDIDATE_MODELS,
-            ["gpt-5.4", "gpt-5-codex", "gpt-5.1-codex", "gpt-5", "codex-mini-latest"]
+            [
+                "gpt-5.4",
+                "gpt-5-codex",
+                "gpt-5.1-codex",
+                "gpt-5",
+                "codex-mini-latest"
+            ]
         );
     }
 
@@ -920,9 +1092,13 @@ mod tests {
         let prio = assign_to_pool(&db, "my-pool", &p, None).await.unwrap();
         assert_eq!(prio, 1);
 
-        let pool = crate::pools::queries::get_pool(&db, "my-pool").await.unwrap();
+        let pool = crate::pools::queries::get_pool(&db, "my-pool")
+            .await
+            .unwrap();
         assert_eq!(pool.wire_format, WireFormat::OpenAi);
-        let members = crate::pools::queries::list_members(&db, "my-pool").await.unwrap();
+        let members = crate::pools::queries::list_members(&db, "my-pool")
+            .await
+            .unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].provider_id, "p1");
         assert_eq!(members[0].priority, 1);
@@ -935,7 +1111,10 @@ mod tests {
         insert_provider(&db, &p).await.unwrap();
         assign_to_pool(&db, "anth-pool", &p, None).await.unwrap();
         assert_eq!(
-            crate::pools::queries::get_pool(&db, "anth-pool").await.unwrap().wire_format,
+            crate::pools::queries::get_pool(&db, "anth-pool")
+                .await
+                .unwrap()
+                .wire_format,
             WireFormat::Anthropic
         );
     }
@@ -952,7 +1131,12 @@ mod tests {
         // bump the incumbent to a sparse priority
         crate::pools::queries::upsert_member(
             &db,
-            &PoolMember { pool_id: "shared".into(), provider_id: "p1".into(), priority: 10, model_override: None },
+            &PoolMember {
+                pool_id: "shared".into(),
+                provider_id: "p1".into(),
+                priority: 10,
+                model_override: None,
+            },
         )
         .await
         .unwrap();
@@ -974,12 +1158,22 @@ mod tests {
             .await
             .unwrap();
 
-        let sol_members = crate::pools::queries::list_members(&db, "codex-sol").await.unwrap();
+        let sol_members = crate::pools::queries::list_members(&db, "codex-sol")
+            .await
+            .unwrap();
         assert_eq!(sol_members[0].provider_id, "codex");
-        assert_eq!(sol_members[0].model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            sol_members[0].model_override.as_deref(),
+            Some("gpt-5.6-sol")
+        );
 
-        let luna_members = crate::pools::queries::list_members(&db, "codex-luna").await.unwrap();
-        assert_eq!(luna_members[0].model_override.as_deref(), Some("gpt-5.6-luna"));
+        let luna_members = crate::pools::queries::list_members(&db, "codex-luna")
+            .await
+            .unwrap();
+        assert_eq!(
+            luna_members[0].model_override.as_deref(),
+            Some("gpt-5.6-luna")
+        );
     }
 
     #[tokio::test]
@@ -1004,7 +1198,13 @@ mod tests {
         assign_to_pool(&db, "pre", &p, None).await.unwrap();
         // still the original row (a Conflict from a second insert_pool would
         // have surfaced as an Err above)
-        assert_eq!(crate::pools::queries::get_pool(&db, "pre").await.unwrap().created_at, created);
+        assert_eq!(
+            crate::pools::queries::get_pool(&db, "pre")
+                .await
+                .unwrap()
+                .created_at,
+            created
+        );
     }
 
     #[test]
@@ -1019,7 +1219,10 @@ mod tests {
         assert_eq!(p.id, "my-openai");
         assert_eq!(p.name, "my-openai");
         assert_eq!(p.kind, ProviderKind::Passthrough);
-        assert_eq!(p.base_url.as_deref(), Some("https://api.example.com/v1/chat/completions"));
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://api.example.com/v1/chat/completions")
+        );
         assert_eq!(p.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(p.upstream_model, "gpt-4o-mini");
     }
@@ -1039,7 +1242,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(p.upstream_model, "gpt-5.4");
-        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        let stored = crate::providers::queries::get_provider(&db, "cx")
+            .await
+            .unwrap();
         assert_eq!(stored.upstream_model, "gpt-5.4");
     }
 
@@ -1060,7 +1265,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(p.upstream_model, PENDING_MODEL);
-        let stored = crate::providers::queries::get_provider(&db, "cx").await.unwrap();
+        let stored = crate::providers::queries::get_provider(&db, "cx")
+            .await
+            .unwrap();
         assert_eq!(stored.upstream_model, PENDING_MODEL);
     }
 
@@ -1069,8 +1276,38 @@ mod tests {
         let db = init_pool(":memory:").await.unwrap();
         assert!(providers_table_is_empty(&db).await.unwrap());
 
-        insert_provider(&db, &provider("p1", WireFormat::OpenAi)).await.unwrap();
+        insert_provider(&db, &provider("p1", WireFormat::OpenAi))
+            .await
+            .unwrap();
         assert!(!providers_table_is_empty(&db).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn store_commandcode_key_writes_access_and_refresh_and_a_far_future_expiry() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = provider("cc", WireFormat::OpenAi);
+        p.kind = ProviderKind::OauthCommandCode;
+        p.api_key = None;
+        p.base_url = None;
+        insert_provider(&db, &p).await.unwrap();
+
+        store_commandcode_key(&db, "cc", "cc-key-123")
+            .await
+            .unwrap();
+        let state = crate::providers::queries::get_oauth_state(&db, "cc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.access_token.as_deref(), Some("cc-key-123"));
+        assert_eq!(state.refresh_token.as_deref(), Some("cc-key-123"));
+        assert!(state.id_token.is_none());
+        assert_eq!(state.provider_data, serde_json::json!({}));
+        assert!(state.access_expires_at.unwrap() > Utc::now() + chrono::Duration::days(3000));
+        assert!(crate::providers::queries::get_provider(&db, "cc")
+            .await
+            .unwrap()
+            .api_key
+            .is_none());
     }
 }
 
@@ -1087,11 +1324,10 @@ mod admin_bootstrap_tests {
 
         resolve_or_prompt_admin_password(&db).await.unwrap();
 
-        let row: (i64, String) =
-            sqlx::query_as("SELECT count(*), username FROM admin_users")
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let row: (i64, String) = sqlx::query_as("SELECT count(*), username FROM admin_users")
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(row.0, 1);
         assert_eq!(row.1, "admin");
 
@@ -1120,11 +1356,10 @@ mod admin_bootstrap_tests {
 
         resolve_or_prompt_admin_password(&db).await.unwrap();
 
-        let row: (i64, String) =
-            sqlx::query_as("SELECT count(*), password_hash FROM admin_users")
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let row: (i64, String) = sqlx::query_as("SELECT count(*), password_hash FROM admin_users")
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(row.0, 1);
         assert_eq!(row.1, "sentinel");
     }

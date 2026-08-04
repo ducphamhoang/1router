@@ -11,6 +11,7 @@ type Provider = {
   base_url?: string;
   api_key?: string;
   upstream_model: string;
+  credential_configured?: boolean;
 };
 
 type ProviderForm = Provider;
@@ -113,6 +114,13 @@ export function Providers() {
   // typed - only the untouched default gets overwritten.
   const [idTouched, setIdTouched] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
+  // Populated once a Command Code credential is confirmed on file (either
+  // already saved, or just established via login/paste in
+  // CommandCodeKeyPanel) - lets the Upstream model field below switch from a
+  // disabled placeholder to a real picker instead of the operator guessing a
+  // model id blind.
+  const [commandCodeModels, setCommandCodeModels] = useState<string[]>([]);
+  const [commandCodeCredentialConfirmed, setCommandCodeCredentialConfirmed] = useState(false);
 
   async function loadProviders() {
     setProviders(await apiJson<Provider[]>("/admin/providers"));
@@ -159,6 +167,8 @@ export function Providers() {
     setExposeAsPool(true);
     setIdTouched(false);
     setNameTouched(false);
+    setCommandCodeModels([]);
+    setCommandCodeCredentialConfirmed(false);
     setModalOpen(true);
   }
 
@@ -194,6 +204,8 @@ export function Providers() {
       api_key: "",
       upstream_model: provider.upstream_model
     });
+    setCommandCodeModels([]);
+    setCommandCodeCredentialConfirmed(Boolean(provider.credential_configured));
     setModalOpen(true);
   }
 
@@ -385,10 +397,45 @@ export function Providers() {
               continue setup below.
             </p>
           )}
+          {editing && form.kind === "oauth_command_code" ? (
+            <CommandCodeKeyPanel
+              providerId={editing.id}
+              hasCredential={commandCodeCredentialConfirmed}
+              onCredentialSaved={(models) => {
+                setCommandCodeCredentialConfirmed(true);
+                setCommandCodeModels(models);
+                setForm((current) =>
+                  models.length && (!current.upstream_model || current.upstream_model === "pending")
+                    ? { ...current, upstream_model: models[0] }
+                    : current
+                );
+              }}
+            />
+          ) : null}
           <label>
             Upstream model
-            <input value={form.upstream_model} onChange={(event) => setForm({ ...form, upstream_model: event.target.value })} />
+            {form.kind === "oauth_command_code" && commandCodeModels.length > 0 ? (
+              <select
+                value={form.upstream_model}
+                onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
+              >
+                {commandCodeModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={form.upstream_model}
+                onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
+                disabled={form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed}
+              />
+            )}
           </label>
+          {form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed ? (
+            <p className="hint">Log in or paste an API key above to fetch the model list.</p>
+          ) : null}
           {!editing ? (
             <label className="checkbox-row">
               <input
@@ -401,7 +448,6 @@ export function Providers() {
             </label>
           ) : null}
           {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
-          {editing && form.kind === "oauth_command_code" ? <CommandCodeKeyPanel providerId={editing.id} /> : null}
           {error ? <p role="alert">{error}</p> : null}
           <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
             Save provider

@@ -1,6 +1,9 @@
+use std::sync::OnceLock;
+
 use axum::extract::{Path, State};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use dashmap::DashMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -10,6 +13,7 @@ use crate::core::model::ProviderKind;
 use crate::core::state::{reload_snapshot, AppState};
 use crate::onboarding::store_commandcode_key;
 use crate::providers::adapter::codex::oauth;
+use crate::providers::adapter::commandcode::browser_login::{self, AuthListener, LoginError};
 use crate::providers::queries;
 
 pub fn routes() -> Router<AppState> {
@@ -19,6 +23,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/admin/providers/:id/commandcode/key",
             post(set_commandcode_key),
+        )
+        .route(
+            "/admin/providers/:id/commandcode/browser-login/start",
+            post(start_commandcode_browser_login),
+        )
+        .route(
+            "/admin/providers/:id/commandcode/browser-login/status",
+            get(commandcode_browser_login_status),
         )
 }
 
@@ -135,4 +147,97 @@ async fn set_commandcode_key(
     store_commandcode_key(&s.db, &id, key).await?;
     reload_snapshot(&s).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Status of an in-flight admin-UI Command Code browser login, keyed by
+/// provider id. Deliberately a process-global map rather than an `AppState`
+/// field: the login itself is a short-lived background task started by one
+/// HTTP request and polled by later ones, not durable app state, and this
+/// avoids touching every `AppState { .. }` construction site (tests
+/// included) for a field only these two handlers need.
+#[derive(Clone)]
+enum CommandCodeLoginStatus {
+    Pending,
+    Success,
+    Error(String),
+}
+
+fn commandcode_logins() -> &'static DashMap<String, CommandCodeLoginStatus> {
+    static MAP: OnceLock<DashMap<String, CommandCodeLoginStatus>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+/// Bind the same localhost callback listener the CLI wizard uses
+/// (`onboarding::add_commandcode_provider`) and open its authorize URL for
+/// the admin UI to `window.open`. Only works when the browser completing the
+/// commandcode.ai login runs on the same host as this server, since
+/// commandcode.ai's page posts the result to `http://localhost:<port>` from
+/// the browser's own machine - true for the common self-hosted case where
+/// the admin UI is opened on the machine running 1router, not for a remote
+/// admin UI accessed over the network.
+async fn start_commandcode_browser_login(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    if provider.kind != ProviderKind::OauthCommandCode {
+        return Err(AppError::BadRequest(
+            "provider is not oauth_command_code".into(),
+        ));
+    }
+    let (listener, port) = browser_login::bind_listener()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to bind callback listener: {e}")))?;
+    let state_token = Uuid::new_v4().to_string();
+    let auth = AuthListener::new(listener, port, state_token.clone());
+    let url = auth.authorize_url();
+
+    commandcode_logins().insert(id.clone(), CommandCodeLoginStatus::Pending);
+
+    let db = s.db.clone();
+    let provider_id = id.clone();
+    tokio::spawn(async move {
+        let outcome = match auth.wait().await {
+            Ok(callback) => browser_login::validate_state(&state_token, callback)
+                .map_err(|e| format!("{e:?}"))
+                .map(|callback| callback.api_key),
+            Err(LoginError::Denied(reason)) => Err(format!("login denied: {reason}")),
+            Err(LoginError::Timeout) => Err("login timed out".to_string()),
+            Err(error) => Err(format!("{error:?}")),
+        };
+        let status = match outcome {
+            Ok(key) => match store_commandcode_key(&db, &provider_id, &key).await {
+                Ok(()) => CommandCodeLoginStatus::Success,
+                Err(e) => CommandCodeLoginStatus::Error(format!("failed to store key: {e}")),
+            },
+            Err(message) => CommandCodeLoginStatus::Error(message),
+        };
+        commandcode_logins().insert(provider_id, status);
+    });
+
+    Ok(Json(json!({ "authorize_url": url })))
+}
+
+async fn commandcode_browser_login_status(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let status = commandcode_logins().get(&id).map(|entry| entry.clone());
+    let succeeded = matches!(status, Some(CommandCodeLoginStatus::Success));
+    let terminal = succeeded || matches!(status, Some(CommandCodeLoginStatus::Error(_)));
+    let body = match status {
+        None => json!({ "status": "not_started" }),
+        Some(CommandCodeLoginStatus::Pending) => json!({ "status": "pending" }),
+        Some(CommandCodeLoginStatus::Success) => json!({ "status": "success" }),
+        Some(CommandCodeLoginStatus::Error(message)) => {
+            json!({ "status": "error", "error": message })
+        }
+    };
+    if terminal {
+        commandcode_logins().remove(&id);
+    }
+    if succeeded {
+        reload_snapshot(&s).await?;
+    }
+    Ok(Json(body))
 }

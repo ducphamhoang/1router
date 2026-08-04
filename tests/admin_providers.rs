@@ -106,6 +106,56 @@ async fn get_patch_delete_existing_provider_by_id_succeeds() {
 }
 
 #[tokio::test]
+async fn provider_response_reports_credential_configured_once_the_commandcode_key_is_saved() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    let created: serde_json::Value = client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"cc-1"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(created["credential_configured"], false);
+
+    let before = client
+        .get(format!("{}/admin/providers/cc", app.base_url))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(before["credential_configured"], false);
+
+    client
+        .post(format!("{}/admin/providers/cc/commandcode/key", app.base_url))
+        .header(&k, &v)
+        .json(&json!({"api_key":"cc-secret"}))
+        .send()
+        .await
+        .unwrap();
+
+    let after = client
+        .get(format!("{}/admin/providers/cc", app.base_url))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(after["credential_configured"], true);
+
+    let list = client
+        .get(format!("{}/admin/providers", app.base_url))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(list[0]["credential_configured"], true);
+}
+
+#[tokio::test]
 async fn commandcode_key_endpoint_stores_the_key() {
     let app = spawn_app().await;
     let client = reqwest::Client::new();
@@ -193,4 +243,145 @@ async fn create_provider_accepts_the_new_kind() {
         response.json::<serde_json::Value>().await.unwrap()["kind"],
         "oauth_command_code"
     );
+}
+
+#[tokio::test]
+async fn commandcode_browser_login_start_rejects_a_non_commandcode_provider() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"p","name":"p","wire_format":"openai","kind":"passthrough","base_url":"http://127.0.0.1:1","api_key":"k","upstream_model":"m"})).send().await.unwrap();
+    let response = client
+        .post(format!(
+            "{}/admin/providers/p/commandcode/browser-login/start",
+            app.base_url
+        ))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn commandcode_browser_login_status_is_not_started_for_an_unknown_provider() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    let response = client
+        .get(format!(
+            "{}/admin/providers/nope/commandcode/browser-login/status",
+            app.base_url
+        ))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["status"],
+        "not_started"
+    );
+}
+
+fn parse_authorize_url_query(url: &str) -> (String, String) {
+    let query = url.split('?').nth(1).expect("authorize_url has a query string");
+    let mut callback = String::new();
+    let mut state = String::new();
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').expect("query pair has a value");
+        let decoded = urlencoding::decode(value).unwrap().into_owned();
+        match key {
+            "callback" => callback = decoded,
+            "state" => state = decoded,
+            _ => {}
+        }
+    }
+    (callback, state)
+}
+
+#[tokio::test]
+async fn commandcode_browser_login_completes_end_to_end() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})).send().await.unwrap();
+
+    let start = client
+        .post(format!(
+            "{}/admin/providers/cc/commandcode/browser-login/start",
+            app.base_url
+        ))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(start.status(), 200);
+    let start_body: serde_json::Value = start.json().await.unwrap();
+    let authorize_url = start_body["authorize_url"].as_str().unwrap();
+
+    let pending = client
+        .get(format!(
+            "{}/admin/providers/cc/commandcode/browser-login/status",
+            app.base_url
+        ))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(pending["status"], "pending");
+
+    let (callback_url, state) = parse_authorize_url_query(authorize_url);
+    let port = reqwest::Url::parse(&callback_url).unwrap().port().unwrap();
+
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/callback"))
+        .json(&json!({"apiKey":"cc-secret","state":state,"userId":"u1","userName":"User","keyName":"cli"}))
+        .send()
+        .await
+        .unwrap();
+
+    let mut status = json!({"status": "pending"});
+    for _ in 0..50 {
+        status = client
+            .get(format!(
+                "{}/admin/providers/cc/commandcode/browser-login/status",
+                app.base_url
+            ))
+            .header(&k, &v)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if status["status"] != "pending" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status["status"], "success");
+
+    let state_row = router::providers::queries::get_oauth_state(&app.db, "cc")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state_row.access_token.as_deref(), Some("cc-secret"));
+
+    let followup = client
+        .get(format!(
+            "{}/admin/providers/cc/commandcode/browser-login/status",
+            app.base_url
+        ))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(followup["status"], "not_started");
 }

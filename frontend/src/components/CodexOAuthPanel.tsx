@@ -18,7 +18,13 @@ export function CodexOAuthPanel({ providerId }: { providerId: string }) {
   }
 
   async function completeOAuth(event: FormEvent) {
+    // stopPropagation matters here, not just style: this form is nested
+    // inside the provider form (invalid HTML, but React's DOM API builds it
+    // that way regardless), so the native submit event bubbles to the outer
+    // form's onSubmit too - without this, completing OAuth also submits
+    // "Save provider" and closes the whole modal.
     event.preventDefault();
+    event.stopPropagation();
     setError(null);
     setMessage(null);
     try {

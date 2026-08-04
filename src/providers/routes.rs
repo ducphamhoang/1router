@@ -30,7 +30,11 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/providers/:id/list-models", get(list_models))
 }
 
-fn mask(p: &Provider) -> Value {
+/// For OAuth-kind providers `p.api_key` is always empty - the real
+/// credential lives in `provider_oauth_state.access_token` - so
+/// `credential_configured` is what the admin UI checks to know a key/login
+/// is already on file, distinct from whatever's masked below.
+fn mask(p: &Provider, credential_configured: bool) -> Value {
     let masked = p.api_key.as_ref().map(|k| {
         let tail = k
             .chars()
@@ -50,14 +54,31 @@ fn mask(p: &Provider) -> Value {
         "base_url": &p.base_url,
         "api_key": masked,
         "upstream_model": &p.upstream_model,
+        "credential_configured": credential_configured,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     })
 }
 
+fn is_oauth_kind(kind: ProviderKind) -> bool {
+    matches!(kind, ProviderKind::OauthCodex | ProviderKind::OauthCommandCode)
+}
+
 async fn list(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
     let ps = queries::list_providers(&s.db).await?;
-    Ok(Json(Value::Array(ps.iter().map(mask).collect())))
+    let configured_ids = queries::oauth_configured_provider_ids(&s.db).await?;
+    Ok(Json(Value::Array(
+        ps.iter()
+            .map(|p| {
+                let credential_configured = if is_oauth_kind(p.kind) {
+                    configured_ids.contains(&p.id)
+                } else {
+                    p.api_key.is_some()
+                };
+                mask(p, credential_configured)
+            })
+            .collect(),
+    )))
 }
 
 async fn get_one(
@@ -65,7 +86,12 @@ async fn get_one(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let p = queries::get_provider(&s.db, &id).await?;
-    Ok(Json(mask(&p)))
+    let credential_configured = if is_oauth_kind(p.kind) {
+        queries::oauth_credential_configured(&s.db, &id).await?
+    } else {
+        p.api_key.is_some()
+    };
+    Ok(Json(mask(&p, credential_configured)))
 }
 
 #[derive(Deserialize)]
@@ -110,7 +136,11 @@ async fn create(
     // having to separately hit list-models afterward.
     spawn_bounded_discovery(s.clone(), p.clone());
 
-    Ok((StatusCode::CREATED, Json(mask(&p))))
+    // A brand-new provider never has a credential on file yet - OAuth-kind
+    // ones need a follow-up Connect/browser-login/paste step, passthrough
+    // ones already reflect `p.api_key` directly.
+    let credential_configured = !is_oauth_kind(p.kind) && p.api_key.is_some();
+    Ok((StatusCode::CREATED, Json(mask(&p, credential_configured))))
 }
 
 async fn patch(
@@ -120,7 +150,12 @@ async fn patch(
 ) -> Result<Json<Value>, AppError> {
     let p = queries::update_provider(&s.db, &id, &patch).await?;
     reload_snapshot(&s).await?;
-    Ok(Json(mask(&p)))
+    let credential_configured = if is_oauth_kind(p.kind) {
+        queries::oauth_credential_configured(&s.db, &id).await?
+    } else {
+        p.api_key.is_some()
+    };
+    Ok(Json(mask(&p, credential_configured)))
 }
 
 async fn delete(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, AppError> {

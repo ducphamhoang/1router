@@ -43,6 +43,19 @@ describe("Providers", () => {
         if (url === "/admin/providers/prov_1" && init?.method === "DELETE") {
           return new Response("{}", { status: 200 });
         }
+        if (url === "/admin/providers/command-code/commandcode/key" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url === "/admin/providers/command-code/list-models") {
+          return new Response(JSON.stringify({ ok: true, models: ["cc-model-a", "cc-model-b"] }), { status: 200 });
+        }
+        if (url === "/admin/providers/command-code/validate-model" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true, status: 200 }), { status: 200 });
+        }
+        if (url === "/admin/providers/command-code" && init?.method === "PATCH") {
+          const sent = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ ...providers[0], id: "command-code", ...sent }), { status: 200 });
+        }
         return new Response("{}", { status: 404 });
       })
     );
@@ -139,9 +152,38 @@ describe("Providers", () => {
         expect.objectContaining({ method: "POST", body: expect.stringContaining("\"kind\":\"oauth_command_code\"") })
       )
     );
-    // still open, now in edit mode with the paste-key panel visible
-    expect(await screen.findByRole("button", { name: "Save Command Code key" })).toBeInTheDocument();
+    // still open, now in edit mode with the validate-key panel visible
+    expect(await screen.findByRole("button", { name: "Validate key" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Provider ID")).not.toBeInTheDocument();
+  });
+
+  it("command_code_upstream_model_becomes_a_populated_select_after_the_key_is_validated", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
+    await userEvent.click(screen.getByLabelText(/Make it directly callable/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    expect(await screen.findByRole("button", { name: "Validate key" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Upstream model")).toBeDisabled();
+    expect(screen.getByText("Log in or paste an API key above to fetch the model list.")).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("API key"), "cc-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Validate key" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Upstream model")).not.toBeDisabled());
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("cc-model-a");
+    expect(screen.getByRole("option", { name: "cc-model-b" })).toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText("Upstream model"), "cc-model-b");
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers/command-code",
+        expect.objectContaining({ method: "PATCH", body: expect.stringContaining("\"upstream_model\":\"cc-model-b\"") })
+      )
+    );
   });
 
   it("exposes_the_new_provider_as_a_matching_1_member_pool_by_default", async () => {

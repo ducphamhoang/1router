@@ -140,9 +140,12 @@ pub fn transform_request(client_json: &Value, thread_id: &str, working_dir: &str
         "temperature": 0.3,
         "stream": true
     });
-    params["system"] = system_prompt(&messages)
-        .map(Value::String)
-        .unwrap_or(Value::Null);
+    // commandcode.ai's API validates `params.system` as a string, not
+    // nullable - a request with no system message (e.g. the admin UI's
+    // validate-model probe, or any real chat with no system prompt) sent
+    // `null` here and was rejected with a 400 ("expected string, received
+    // null at \"params.system\"") before this was caught.
+    params["system"] = Value::String(system_prompt(&messages).unwrap_or_default());
 
     json!({
         "config": {
@@ -468,6 +471,16 @@ mod tests {
             out["params"]["messages"],
             json!([{"role":"user","content":"hi"}])
         );
+    }
+
+    #[test]
+    fn transform_request_sends_an_empty_string_system_when_no_system_message_is_present() {
+        // Regression: commandcode.ai validates `params.system` as a string,
+        // not nullable - sending `null` here (the prior behavior for a
+        // system-message-less request) was rejected with a 400.
+        let input = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
+        let out = transform_request(&input, "t", "/p");
+        assert_eq!(out["params"]["system"], "");
     }
 
     #[test]

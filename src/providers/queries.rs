@@ -144,6 +144,33 @@ pub async fn delete_provider(db: &SqlitePool, id: &str) -> Result<(), AppError> 
     }
 }
 
+/// Whether a usable credential is on file for an OAuth-kind provider
+/// (Codex's access token, or Command Code's API key, stashed as
+/// `access_token` in `provider_oauth_state` either way). Passthrough
+/// providers carry their key on the `providers.api_key` column instead and
+/// don't need this - callers check `Provider.api_key` directly for those.
+pub async fn oauth_credential_configured(db: &SqlitePool, provider_id: &str) -> Result<bool, AppError> {
+    Ok(get_oauth_state(db, provider_id)
+        .await?
+        .and_then(|s| s.access_token)
+        .is_some())
+}
+
+/// Batch form of [`oauth_credential_configured`], for `GET /admin/providers`
+/// listing every provider at once instead of one `provider_oauth_state`
+/// lookup per row.
+pub async fn oauth_configured_provider_ids(
+    db: &SqlitePool,
+) -> Result<std::collections::HashSet<String>, AppError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT provider_id FROM provider_oauth_state WHERE access_token IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect())
+}
+
 pub async fn get_oauth_state(
     db: &SqlitePool,
     provider_id: &str,

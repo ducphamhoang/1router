@@ -13,6 +13,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 use crate::core::runtime::ProviderStatus;
 use crate::core::state::{reload_snapshot, AppState};
 use crate::providers::adapter::adapter_for;
+use crate::providers::adapter::commandcode;
 use crate::providers::queries;
 use crate::proxy::flow::credentials_for;
 
@@ -135,7 +136,11 @@ async fn test_stub(
     let provider = queries::get_provider(&s.db, &id).await?;
     let url = match &provider.base_url {
         Some(u) => u.clone(),
-        None => return Ok(Json(json!({ "ok": false, "reason": "no base_url (oauth provider)" }))),
+        None => {
+            return Ok(Json(
+                json!({ "ok": false, "reason": "no base_url (oauth provider)" }),
+            ))
+        }
     };
     let res = s.http.get(&url).send().await;
     match res {
@@ -191,7 +196,9 @@ async fn validate_model(
             } else {
                 let text = resp.text().await.unwrap_or_default();
                 let snippet: String = text.chars().take(300).collect();
-                Ok(Json(json!({ "ok": false, "status": status.as_u16(), "message": snippet })))
+                Ok(Json(
+                    json!({ "ok": false, "status": status.as_u16(), "message": snippet }),
+                ))
             }
         }
         Err(e) => Ok(Json(json!({ "ok": false, "message": e.to_string() }))),
@@ -227,7 +234,10 @@ fn derive_models_url(base_url: &str) -> String {
 /// Pure network+parse - no ProviderKind/base_url checks (those produce
 /// user-facing messages specific to the admin endpoint below) and no
 /// caching (callers decide whether/where to cache).
-async fn fetch_live_models(http: &reqwest::Client, provider: &Provider) -> Result<Vec<String>, String> {
+async fn fetch_live_models(
+    http: &reqwest::Client,
+    provider: &Provider,
+) -> Result<Vec<String>, String> {
     let base_url = provider
         .base_url
         .as_ref()
@@ -254,6 +264,11 @@ async fn fetch_live_models(http: &reqwest::Client, provider: &Provider) -> Resul
         .json()
         .await
         .map_err(|e| format!("could not parse response as JSON: {e}"))?;
+    let models = parse_models_body(&body)?;
+    Ok(models)
+}
+
+fn parse_models_body(body: &Value) -> Result<Vec<String>, String> {
     let models: Vec<String> = body
         .get("data")
         .and_then(|d| d.as_array())
@@ -264,27 +279,51 @@ async fn fetch_live_models(http: &reqwest::Client, provider: &Provider) -> Resul
         })
         .unwrap_or_default();
     if models.is_empty() {
-        return Err("response had no recognizable model list (expected {\"data\":[{\"id\":...}]})".into());
+        return Err(
+            "response had no recognizable model list (expected {\"data\":[{\"id\":...}]})".into(),
+        );
     }
     Ok(models)
+}
+
+pub(crate) async fn fetch_commandcode_models(
+    http: &reqwest::Client,
+) -> Result<Vec<String>, String> {
+    let url = std::env::var("ROUTER_COMMANDCODE_MODELS_URL")
+        .unwrap_or_else(|_| commandcode::DEFAULT_MODELS_URL.to_string());
+    let resp = http.get(url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("HTTP {}: {snippet}", status.as_u16()));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse response as JSON: {e}"))?;
+    parse_models_body(&body)
 }
 
 /// Fetches and caches a provider's live model list in `state.discovered_models`
 /// so `GET /v1/models` can list `<provider_id>/<model>` entries without a
 /// network call of its own. Called both from the explicit `list-models`
 /// endpoint below and, best-effort, right after a provider is created.
-/// Best-effort only: Codex OAuth has no discoverable models endpoint
-/// (that's why onboarding.rs probes a candidate list instead), and some
-/// passthrough mirrors won't implement `/models` either - both are reported
-/// as an `Err` reason rather than panicking or retrying.
+/// Best-effort only: Codex OAuth has no discoverable models endpoint, while
+/// Command Code uses its fixed unauthenticated provider endpoint; passthrough
+/// mirrors may also omit `/models`. These cases are reported as an `Err`
+/// reason rather than panicking or retrying.
 pub(crate) async fn discover_and_cache_models(
     state: &AppState,
     provider: &Provider,
 ) -> Result<Vec<String>, String> {
-    if provider.kind != ProviderKind::Passthrough {
-        return Err("this provider kind has no discoverable /models endpoint".into());
-    }
-    let models = fetch_live_models(&state.http, provider).await?;
+    let models = match provider.kind {
+        ProviderKind::Passthrough => fetch_live_models(&state.http, provider).await?,
+        ProviderKind::OauthCommandCode => fetch_commandcode_models(&state.http).await?,
+        ProviderKind::OauthCodex => {
+            return Err("this provider kind has no discoverable /models endpoint".into())
+        }
+    };
     state
         .discovered_models
         .insert(provider.id.clone(), models.clone());
@@ -299,7 +338,7 @@ pub(crate) async fn discover_and_cache_models(
 const BACKGROUND_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn spawn_bounded_discovery(state: AppState, provider: Provider) {
-    if provider.kind != ProviderKind::Passthrough {
+    if provider.kind == ProviderKind::OauthCodex {
         return;
     }
     tokio::spawn(async move {
@@ -311,8 +350,8 @@ fn spawn_bounded_discovery(state: AppState, provider: Provider) {
     });
 }
 
-/// Warms the discovered-models cache for every existing passthrough
-/// provider at boot, so `GET /v1/models` reflects providers that were
+/// Warms the discovered-models cache for every existing discoverable provider
+/// at boot, so `GET /v1/models` reflects providers that were
 /// created before this feature existed (or before the process last
 /// restarted, since the cache is in-memory only) without requiring each one
 /// to be manually re-fetched or recreated. Fire-and-forget per provider,
@@ -343,9 +382,10 @@ async fn state_stub(
     let entry = s.runtime.get(&id);
     let (level, status, until_secs) = match entry {
         Some(st) => {
-            let secs = st
-                .unavailable_until
-                .map(|u| u.saturating_duration_since(std::time::Instant::now()).as_secs());
+            let secs = st.unavailable_until.map(|u| {
+                u.saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+            });
             let status = match st.status {
                 ProviderStatus::Healthy => "healthy",
                 ProviderStatus::Cooling => "cooling",
@@ -365,7 +405,8 @@ async fn state_stub(
 
 #[cfg(test)]
 mod tests {
-    use super::derive_models_url;
+    use super::{derive_models_url, parse_models_body};
+    use serde_json::json;
 
     #[test]
     fn derive_models_url_swaps_the_known_endpoint_suffixes() {
@@ -392,8 +433,20 @@ mod tests {
         // Regression: a naive `rfind('/')` matches the slash inside the
         // scheme's `//` separator here and produces the nonsense host
         // `http://models` instead of appending a path.
-        assert_eq!(derive_models_url("http://127.0.0.1:1"), "http://127.0.0.1:1/models");
-        assert_eq!(derive_models_url("https://api.example.com"), "https://api.example.com/models");
+        assert_eq!(
+            derive_models_url("http://127.0.0.1:1"),
+            "http://127.0.0.1:1/models"
+        );
+        assert_eq!(
+            derive_models_url("https://api.example.com"),
+            "https://api.example.com/models"
+        );
+    }
+
+    #[test]
+    fn parse_models_payload_ignores_extra_fields() {
+        let body =
+            json!({"object":"list","data":[{"id":"cc-1","name":"CC One","context_length":200000}]});
+        assert_eq!(parse_models_body(&body).unwrap(), vec!["cc-1"]);
     }
 }
-

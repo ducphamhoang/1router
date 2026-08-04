@@ -1,4 +1,5 @@
 pub mod codex;
+pub mod commandcode;
 pub mod passthrough;
 
 use axum::http::{HeaderMap, StatusCode};
@@ -52,8 +53,15 @@ pub fn adapter_for_wire(
         ProviderKind::Passthrough => {
             Box::new(passthrough::PassthroughAdapter::new(provider.clone(), http))
         }
-        ProviderKind::OauthCodex => {
-            Box::new(codex::CodexAdapter::new(provider.clone(), http, client_wire))
-        }
+        ProviderKind::OauthCodex => Box::new(codex::CodexAdapter::new(
+            provider.clone(),
+            http,
+            client_wire,
+        )),
+        ProviderKind::OauthCommandCode => Box::new(commandcode::CommandCodeAdapter::new(
+            provider.clone(),
+            http,
+            client_wire,
+        )),
     }
 }

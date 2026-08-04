@@ -11,11 +11,11 @@ API gateway that unifies many providers behind one endpoint. Reasons for the rew
 
 Scope is deliberately narrower than 9router: no per-client virtual keys/billing, no combo/fusion
 multi-model panels, no built-in web UI. A "provider" is, by default, a pure config row (base URL
-+ credential + upstream model name), not compiled/dynamic plugin code — **with exactly one
-deliberate, scoped exception**: a Codex (ChatGPT-account) adapter, since Claude Code and other
++ credential + upstream model name), not compiled/dynamic plugin code — **with two
+deliberate, scoped exceptions**: Codex (ChatGPT-account) and Command Code adapters. Since Claude Code and other
 coding-agent tool use is the primary motivating use case and Codex is a popular free/subscription
-backend for it. See "Codex Adapter" below — this is the only provider in v1 with OAuth, token
-refresh, or request/response transformation; every other provider stays pure passthrough config.
+backend for it. See "Provider Adapters" below — these are the only providers in v1 with OAuth/key-login
+or request/response transformation; every other provider stays pure passthrough config.
 
 ## Wire formats supported
 
@@ -68,9 +68,9 @@ providers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   wire_format TEXT NOT NULL,      -- client-facing format this provider satisfies: 'openai' | 'anthropic'
-  kind TEXT NOT NULL DEFAULT 'passthrough',  -- 'passthrough' | 'oauth_codex'
-  base_url TEXT,                  -- NULL for oauth_codex (fixed upstream, set by the adapter)
-  api_key TEXT,                   -- NULL for oauth_codex (uses provider_oauth_state instead)
+  kind TEXT NOT NULL DEFAULT 'passthrough',  -- 'passthrough' | 'oauth_codex' | 'oauth_command_code'
+  base_url TEXT,                  -- NULL for OAuth adapters (fixed upstream, set by the adapter)
+  api_key TEXT,                   -- NULL for OAuth adapters (uses provider_oauth_state instead)
   upstream_model TEXT NOT NULL,
   created_at, updated_at
 )
@@ -180,7 +180,7 @@ body; since this is pure passthrough (no body inspection), that surfaces to the 
 truncated response rather than a clean error. This is inherent to the no-translation design —
 log it distinctly so it's diagnosable, don't try to fix it by parsing SSE bodies.
 
-## Codex Adapter
+## Provider Adapters (Codex and Command Code)
 
 The one deliberate exception to "provider = config only." Codex (OpenAI's ChatGPT-account-based
 coding backend) requires OAuth login, proactive token refresh, and real request/response
@@ -260,6 +260,13 @@ the user to redo the OAuth flow.
 **Pool composition:** a Codex provider's `wire_format` is `openai`, so it can sit in the same pool
 as ordinary OpenAI-passthrough providers and fail over between them transparently — the adapter's
 whole job is making Codex *look like* a normal OpenAI-shaped provider from the client's side.
+
+Command Code is the second bespoke adapter. It stores its non-expiring API key in the generic
+`provider_oauth_state` table, wraps OpenAI-shaped requests in Command Code's `/alpha/generate`
+envelope, and converts its NDJSON events into framed OpenAI Chat Completions SSE (or Anthropic
+Messages SSE through the same Claude bridge). Its model list is fetched unauthenticated from the
+fixed provider models endpoint; the CLI wizard obtains the key through a one-shot browser callback
+with a paste fallback, while the admin UI exposes paste only.
 
 ## Admin API
 

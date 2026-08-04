@@ -1,11 +1,29 @@
 # 1router
 
 A lean Rust rewrite of an LLM API gateway (config-only OpenAI/Anthropic-compatible
-passthrough providers, plus a Codex OAuth adapter). See:
+passthrough providers, plus Codex OAuth and Command Code adapters).
 
-- Design spec: `docs/superpowers/specs/2026-07-25-1router-design.md`
-- Implementation plan (39 tasks, Phase 0-4): `docs/superpowers/plans/2026-07-25-1router-implementation.md`
-- Progress ledger: `.superpowers/sdd/progress.md` (git-ignored scratch — check this first to see what's done)
+**Status: all four planned workstreams are complete** (core gateway, admin UI,
+onboarding wizard, release/publishing) — every task in every plan below has a
+corresponding commit on `master`. There is no active implementation branch;
+new work should branch directly off `master`. See:
+
+- Core gateway — design: `docs/superpowers/specs/2026-07-25-1router-design.md`,
+  plan (39 tasks, Phase 0-4, done): `docs/superpowers/plans/2026-07-25-1router-implementation.md`
+- Admin UI — design: `docs/superpowers/specs/2026-07-26-admin-ui-design.md`,
+  plan (28 tasks, done): `docs/superpowers/plans/2026-07-26-admin-ui-implementation.md`
+- Onboarding wizard — design: `docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`,
+  plan (9 tasks, done): `docs/superpowers/plans/2026-07-26-onboarding-wizard-implementation.md`,
+  smoke checklist: `docs/superpowers/plans/2026-07-26-onboarding-wizard-smoke.md`
+- Command Code provider — design: `docs/superpowers/specs/2026-08-04-commandcode-provider-design.md`,
+  plan: `docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md`
+- Release/publishing — design: `docs/superpowers/specs/2026-07-26-release-publishing-design.md`,
+  plan (done): `docs/superpowers/plans/2026-07-26-release-publishing.md`,
+  GHCR checklist: `docs/superpowers/plans/2026-07-26-release-publishing-ghcr-checklist.md`
+  (one manual step — confirming the GHCR package is public/linked — is
+  unverified from the repo alone; check via browser or a `packages:read`-scoped token)
+- Progress ledger (historical, git-ignored scratch, may not exist in a fresh
+  checkout): `.superpowers/sdd/progress.md`
 
 ## Build & test
 
@@ -36,19 +54,23 @@ unexpectedly.
   `docs/superpowers/plans/2026-07-26-onboarding-wizard-smoke.md`, not by
   `cargo test`. Design spec:
   `docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`.
+- The wizard also supports Command Code browser login with a paste-key
+  fallback; the admin UI deliberately exposes paste-key only.
 - `dialoguer` is a dependency as of Phase 5 — run `cargo fetch` with real
   network before any `--offline` work if your registry predates it.
 
 ## Working tree
 
-Implementation happens on branch `impl/v1`, off `master` (which holds only
-the design docs). Tasks are executed one-per-git-worktree under
-`../1router-worktrees/<task-id>/` so parallel tasks can't conflict on disk;
-each worktree branches from `impl/v1`'s current tip, gets its own
-`impl/v1-<task-id>` branch. After a task's work is verified, it's merged
-back into `impl/v1` and the worktree/branch are removed.
+`impl/v1` was the implementation branch used while the four plans above were
+in progress; it has since been fully merged into `master` (it's an ancestor
+of `master`'s current tip), and subsequent work (admin UI, onboarding,
+releases) landed directly on `master`. Treat `master` as the active branch —
+there's no standing implementation branch to branch off of anymore. For new
+work, branch off `master` directly; the worktree-per-task pattern below is
+historical context for how the four plans got built, not a standing
+convention to keep following by default.
 
-## Orchestration pattern (if resuming this work)
+## Orchestration pattern (historical — how the four plans above got built)
 
 Tasks are dispatched to the `codex:codex-rescue` subagent (Agent tool,
 `subagent_type: "codex:codex-rescue"`), which forwards to OpenAI's Codex CLI
@@ -73,6 +95,8 @@ cargo, don't run git commands, report DONE/DONE_WITH_CONCERNS/BLOCKED).
   binds a real socket for true end-to-end HTTP testing) will report BLOCKED
   or FAILED in Codex's sandbox even when the code is correct. Re-run those
   specific tests yourself outside the sandbox to verify.
+- `providers::adapter::commandcode::browser_login` tests also bind a local
+  listener and need the same outside-sandbox verification.
 - Under concurrent load, `codex-companion.mjs task` sometimes queues as a
   background job instead of blocking — poll `node .../codex-companion.mjs
   status --cwd <worktree> --json` until `running` is empty, then `result`

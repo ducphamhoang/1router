@@ -1,7 +1,7 @@
 # 1router
 
 A lean Rust rewrite of an LLM API gateway: config-only OpenAI/Anthropic-compatible
-passthrough providers, plus a Codex OAuth adapter (ChatGPT-subscription auth),
+passthrough providers, plus bespoke Codex OAuth and Command Code adapters,
 fronted by a single admin-secret-protected HTTP API.
 
 ## Getting started
@@ -33,8 +33,9 @@ real terminal attached; the second, normal-boot `run` doesn't need it.)
 
 Walks you through: creating an admin secret (stored in `.router_secret` next to
 the SQLite file, mode 0600), adding one provider — either a passthrough
-OpenAI/Anthropic-compatible endpoint, or a Codex/ChatGPT account via OAuth (the
-wizard probes which `upstream_model` your account accepts) — and putting it in
+OpenAI/Anthropic-compatible endpoint, a Codex/ChatGPT account via OAuth (the
+wizard probes which `upstream_model` your account accepts), or a Command Code
+account via browser login with a paste-key fallback — and putting it in
 a pool. It then offers to add that same provider to further pools under a
 different `model_override` (e.g. one Codex OAuth login backing separate
 `codex-sol`/`codex-terra`/`codex-luna` pools) without repeating the OAuth
@@ -96,7 +97,8 @@ tradeoff versus a real pool: no round-robin/failover, since you named one
 specific provider - that's the whole point of using it over a pool.
 
 `GET /v1/models` lists these `<provider_id>/<model>` combinations too,
-alongside pool ids, for every passthrough provider whose own `/models` has
+alongside pool ids, for every passthrough or Command Code provider whose own
+models endpoint has
 been fetched. That fetch happens automatically and in the background -
 right after a provider is created, and once for every existing provider at
 boot (so upgrading to this feature doesn't require manually re-adding
@@ -114,7 +116,7 @@ speak whichever one format their `wire_format` says - a pool must stay
 homogeneous, so a passthrough provider can only join a pool matching its
 own format.
 
-The Codex/ChatGPT-OAuth adapter is the exception: it translates per-request
+The Codex/ChatGPT-OAuth and Command Code adapters are the exceptions: they translate per-request
 based on the route actually hit, not a stored field, so one Codex provider
 row (one OAuth credential set) can be a member of an `openai`-format pool
 and an `anthropic`-format pool at the same time - e.g. serving OpenCode over
@@ -152,11 +154,12 @@ client → /v1/chat/completions or /v1/messages
        ├─ passthrough:  forwards the request as-is (OpenAI or Anthropic wire
        │                format) to `base_url`, `Authorization`/`x-api-key` set
        │                from the stored `api_key`.
-       └─ oauth_codex:  rewrites Chat-Completions `messages` into the
-                        Responses API's `input`, forces `store`/`stream`,
-                        strips fields Codex's backend rejects, and targets
-                        chatgpt.com/backend-api/codex/responses using a
-                        refreshable OAuth access token instead of a static key.
+       ├─ oauth_codex:  rewrites Chat-Completions `messages` into the
+       │                Responses API's `input`, and targets Codex using
+       │                a refreshable OAuth access token.
+       └─ oauth_command_code: wraps requests for Command Code's proprietary
+                              envelope and converts NDJSON into OpenAI or
+                              Anthropic streaming responses using its stored key.
            │
            ▼
    upstream provider → response streamed/aggregated back to the client
@@ -173,6 +176,8 @@ what's explicitly out of scope for v1 — see:
 
 - [`docs/superpowers/specs/2026-07-25-1router-design.md`](docs/superpowers/specs/2026-07-25-1router-design.md) — core system design
 - [`docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md`](docs/superpowers/specs/2026-07-26-onboarding-wizard-design.md) — the `setup` wizard's design
+- [`docs/superpowers/specs/2026-08-04-commandcode-provider-design.md`](docs/superpowers/specs/2026-08-04-commandcode-provider-design.md) — Command Code adapter design
+- [`docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md`](docs/superpowers/plans/2026-08-04-commandcode-provider-implementation.md) — Command Code implementation plan
 - [`docs/superpowers/plans/`](docs/superpowers/plans/) — task-by-task implementation plans, useful for "why is this code shaped this way" archaeology
 
 ## Admin web UI

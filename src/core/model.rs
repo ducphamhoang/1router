@@ -15,6 +15,7 @@ pub enum WireFormat {
 pub enum ProviderKind {
     Passthrough,
     OauthCodex,
+    OauthCommandCode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -33,7 +34,7 @@ pub struct Provider {
 impl Provider {
     pub fn supports_wire(&self, w: WireFormat) -> bool {
         match self.kind {
-            ProviderKind::OauthCodex => true,
+            ProviderKind::OauthCodex | ProviderKind::OauthCommandCode => true,
             ProviderKind::Passthrough => self.wire_format == w,
         }
     }
@@ -93,16 +94,34 @@ mod tests {
 
     #[test]
     fn wire_format_serializes_as_lowercase_text() {
-        assert_eq!(serde_json::to_string(&WireFormat::OpenAi).unwrap(), "\"openai\"");
-        assert_eq!(serde_json::to_string(&WireFormat::Anthropic).unwrap(), "\"anthropic\"");
+        assert_eq!(
+            serde_json::to_string(&WireFormat::OpenAi).unwrap(),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WireFormat::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
         let w: WireFormat = serde_json::from_str("\"anthropic\"").unwrap();
         assert!(matches!(w, WireFormat::Anthropic));
     }
 
     #[test]
     fn provider_kind_serializes_with_snake_case() {
-        assert_eq!(serde_json::to_string(&ProviderKind::OauthCodex).unwrap(), "\"oauth_codex\"");
-        assert_eq!(serde_json::to_string(&ProviderKind::Passthrough).unwrap(), "\"passthrough\"");
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OauthCodex).unwrap(),
+            "\"oauth_codex\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OauthCommandCode).unwrap(),
+            "\"oauth_command_code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Passthrough).unwrap(),
+            "\"passthrough\""
+        );
+        let command_code: ProviderKind = serde_json::from_str("\"oauth_command_code\"").unwrap();
+        assert_eq!(command_code, ProviderKind::OauthCommandCode);
     }
 
     #[test]
@@ -120,6 +139,13 @@ mod tests {
         };
         assert!(codex.supports_wire(WireFormat::OpenAi));
         assert!(codex.supports_wire(WireFormat::Anthropic));
+
+        let command_code = Provider {
+            kind: ProviderKind::OauthCommandCode,
+            ..codex.clone()
+        };
+        assert!(command_code.supports_wire(WireFormat::OpenAi));
+        assert!(command_code.supports_wire(WireFormat::Anthropic));
 
         let passthrough = Provider {
             kind: ProviderKind::Passthrough,

@@ -18,9 +18,11 @@ pub struct ProviderPatch {
 }
 
 pub async fn list_providers(db: &SqlitePool) -> Result<Vec<Provider>, AppError> {
-    Ok(sqlx::query_as::<_, Provider>("SELECT * FROM providers ORDER BY name")
-        .fetch_all(db)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, Provider>("SELECT * FROM providers ORDER BY name")
+            .fetch_all(db)
+            .await?,
+    )
 }
 
 pub async fn get_provider(db: &SqlitePool, id: &str) -> Result<Provider, AppError> {
@@ -50,9 +52,9 @@ pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppErr
 
     match res {
         Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            Err(AppError::Conflict(format!("provider name '{}' already exists", p.name)))
-        }
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(AppError::Conflict(
+            format!("provider name '{}' already exists", p.name),
+        )),
         Err(e) => Err(AppError::Db(e)),
     }
 }
@@ -76,10 +78,17 @@ pub async fn update_provider(
         p.upstream_model = m.clone();
     }
     if let Some(w) = patch.wire_format {
-        if w != p.wire_format && p.kind != ProviderKind::OauthCodex {
+        if w != p.wire_format
+            && !matches!(
+                p.kind,
+                ProviderKind::OauthCodex | ProviderKind::OauthCommandCode
+            )
+        {
             // Pools must stay homogeneous in wire_format (enforced when a
             // member is added) - reject a flip that would silently strand
-            // this provider in a pool speaking the other format.
+            // this provider in a pool speaking the other format. OAuth
+            // credentials live in provider_oauth_state keyed by provider id,
+            // not wire_format, so flipping either OAuth kind strands nothing.
             let mismatched: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM pool_members pm
                  JOIN pools ON pools.id = pm.pool_id
@@ -291,11 +300,13 @@ mod tests {
     async fn wire_format_flip_is_rejected_while_in_a_mismatched_pool() {
         let db = init_pool(":memory:").await.unwrap();
         insert_provider(&db, &sample()).await.unwrap();
-        sqlx::query("INSERT INTO pools (id, wire_format, created_at) VALUES ('pool1', 'openai', ?)")
-            .bind(Utc::now())
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO pools (id, wire_format, created_at) VALUES ('pool1', 'openai', ?)",
+        )
+        .bind(Utc::now())
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO pool_members (pool_id, provider_id, priority) VALUES ('pool1', 'p1', 0)",
         )
@@ -312,7 +323,10 @@ mod tests {
             Err(crate::core::error::AppError::BadRequest(_))
         ));
         // rejected - the provider's wire_format is unchanged
-        assert_eq!(get_provider(&db, "p1").await.unwrap().wire_format, WireFormat::OpenAi);
+        assert_eq!(
+            get_provider(&db, "p1").await.unwrap().wire_format,
+            WireFormat::OpenAi
+        );
     }
 
     #[tokio::test]
@@ -323,11 +337,13 @@ mod tests {
         codex.name = "Codex".into();
         codex.kind = ProviderKind::OauthCodex;
         insert_provider(&db, &codex).await.unwrap();
-        sqlx::query("INSERT INTO pools (id, wire_format, created_at) VALUES ('pool1', 'openai', ?)")
-            .bind(Utc::now())
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO pools (id, wire_format, created_at) VALUES ('pool1', 'openai', ?)",
+        )
+        .bind(Utc::now())
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO pool_members (pool_id, provider_id, priority) VALUES ('pool1', 'cx', 0)",
         )
@@ -340,6 +356,36 @@ mod tests {
             ..Default::default()
         };
         let updated = update_provider(&db, "cx", &patch).await.unwrap();
+        assert_eq!(updated.wire_format, WireFormat::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn commandcode_wire_format_flip_is_allowed_while_in_a_mismatched_pool() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut command_code = sample();
+        command_code.id = "cc".into();
+        command_code.name = "Command Code".into();
+        command_code.kind = ProviderKind::OauthCommandCode;
+        insert_provider(&db, &command_code).await.unwrap();
+        sqlx::query(
+            "INSERT INTO pools (id, wire_format, created_at) VALUES ('pool1', 'openai', ?)",
+        )
+        .bind(Utc::now())
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO pool_members (pool_id, provider_id, priority) VALUES ('pool1', 'cc', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let patch = ProviderPatch {
+            wire_format: Some(WireFormat::Anthropic),
+            ..Default::default()
+        };
+        let updated = update_provider(&db, "cc", &patch).await.unwrap();
         assert_eq!(updated.wire_format, WireFormat::Anthropic);
     }
 }

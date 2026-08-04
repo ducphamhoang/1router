@@ -78,6 +78,12 @@ describe("Providers", () => {
     );
   });
 
+  it("offers_commandcode_kind_in_the_dropdown", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    expect(screen.getByRole("option", { name: "oauth_command_code" })).toBeInTheDocument();
+  });
+
   it("choosing_a_preset_prefills_wire_format_base_url_and_model_but_stays_editable", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

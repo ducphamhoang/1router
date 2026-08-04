@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::core::error::AppError;
 use crate::core::model::ProviderKind;
 use crate::core::state::{reload_snapshot, AppState};
+use crate::onboarding::store_commandcode_key;
 use crate::providers::adapter::codex::oauth;
 use crate::providers::queries;
 
@@ -15,12 +16,13 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/providers/:id/oauth/start", post(start))
         .route("/admin/providers/:id/oauth/complete", post(complete))
+        .route(
+            "/admin/providers/:id/commandcode/key",
+            post(set_commandcode_key),
+        )
 }
 
-async fn start(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
+async fn start(State(s): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, AppError> {
     let provider = queries::get_provider(&s.db, &id).await?;
     if !matches!(provider.kind, ProviderKind::OauthCodex) {
         return Err(AppError::BadRequest("provider is not oauth_codex".into()));
@@ -55,7 +57,9 @@ pub async fn complete_oauth_exchange(
 ) -> Result<(), AppError> {
     let os = queries::get_oauth_state(db, provider_id)
         .await?
-        .ok_or_else(|| AppError::BadRequest("no oauth flow in progress; call start first".into()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("no oauth flow in progress; call start first".into())
+        })?;
     let verifier = os
         .pkce_verifier
         .ok_or_else(|| AppError::BadRequest("missing pkce verifier".into()))?;
@@ -106,4 +110,29 @@ async fn complete(
     complete_oauth_exchange(&s.db, &s.http, &id, &b.code, &b.state).await?;
     reload_snapshot(&s).await?;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+#[derive(Deserialize)]
+struct CommandCodeKeyBody {
+    api_key: String,
+}
+
+async fn set_commandcode_key(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CommandCodeKeyBody>,
+) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    if provider.kind != ProviderKind::OauthCommandCode {
+        return Err(AppError::BadRequest(
+            "provider is not oauth_command_code".into(),
+        ));
+    }
+    let key = body.api_key.trim();
+    if key.is_empty() {
+        return Err(AppError::BadRequest("api_key must not be empty".into()));
+    }
+    store_commandcode_key(&s.db, &id, key).await?;
+    reload_snapshot(&s).await?;
+    Ok(Json(json!({ "ok": true })))
 }

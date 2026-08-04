@@ -104,3 +104,93 @@ async fn get_patch_delete_existing_provider_by_id_succeeds() {
         .unwrap();
     assert_eq!(get_after.status(), 404);
 }
+
+#[tokio::test]
+async fn commandcode_key_endpoint_stores_the_key() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"cc-1"})).send().await.unwrap();
+    let response = client
+        .post(format!(
+            "{}/admin/providers/cc/commandcode/key",
+            app.base_url
+        ))
+        .header(&k, &v)
+        .json(&json!({"api_key":"cc-secret"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        true
+    );
+    let state = router::providers::queries::get_oauth_state(&app.db, "cc")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.access_token.as_deref(), Some("cc-secret"));
+    assert_eq!(state.refresh_token.as_deref(), Some("cc-secret"));
+    let provider = client
+        .get(format!("{}/admin/providers/cc", app.base_url))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(provider["api_key"].is_null());
+}
+
+#[tokio::test]
+async fn commandcode_key_endpoint_rejects_a_non_commandcode_provider() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"p","name":"p","wire_format":"openai","kind":"passthrough","base_url":"http://127.0.0.1:1","api_key":"k","upstream_model":"m"})).send().await.unwrap();
+    let response = client
+        .post(format!(
+            "{}/admin/providers/p/commandcode/key",
+            app.base_url
+        ))
+        .header(k, v)
+        .json(&json!({"api_key":"k"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn commandcode_key_endpoint_rejects_an_empty_key() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})).send().await.unwrap();
+    let response = client
+        .post(format!(
+            "{}/admin/providers/cc/commandcode/key",
+            app.base_url
+        ))
+        .header(k, v)
+        .json(&json!({"api_key":"  "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn create_provider_accepts_the_new_kind() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    let response = client.post(format!("{}/admin/providers", app.base_url)).header(k, v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})).send().await.unwrap();
+    assert_eq!(response.status(), 201);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["kind"],
+        "oauth_command_code"
+    );
+}

@@ -50,7 +50,7 @@ export function Settings() {
   const anthropicPools = pools.filter((p) => p.wire_format === "anthropic");
   const openaiPools = pools.filter((p) => p.wire_format === "openai");
   const poolIds = new Set(pools.map((p) => p.id));
-  const discoverableProviders = providers.filter((p) => p.kind === "passthrough");
+  const discoverableProviders = providers.filter((p) => p.kind === "passthrough" || p.kind === "oauth_command_code");
 
   async function discoverModels() {
     setDiscovering(true);
@@ -264,7 +264,7 @@ export function Settings() {
           {discovering ? "Checking providers…" : "Check providers for available models"}
         </button>
         {discoverableProviders.length === 0 ? (
-          <p>No passthrough providers to check (Codex OAuth providers have no discoverable model list).</p>
+          <p>No providers with a discoverable model list to check (Codex OAuth providers have no discoverable model list).</p>
         ) : (
           <ul>
             {discoverableProviders.map((provider) => {

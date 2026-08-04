@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Settings } from "./Settings";
 
@@ -36,6 +36,7 @@ describe("Settings", () => {
           return new Response(
             JSON.stringify([
               { id: "deepseek_api", name: "Deepseek", kind: "passthrough", wire_format: "openai" },
+              { id: "command_code", name: "Command Code", kind: "oauth_command_code", wire_format: "openai" },
               { id: "codex-vbg", name: "codex-vbg", kind: "oauth_codex", wire_format: "openai" }
             ]),
             { status: 200 }
@@ -121,6 +122,12 @@ describe("Settings", () => {
     );
     // the oauth_codex provider is never queried - it has no models endpoint
     expect(fetch).not.toHaveBeenCalledWith("/admin/providers/codex-vbg/list-models", expect.anything());
+  });
+
+  it("includes_commandcode_providers_in_discovery", async () => {
+    render(<Settings />);
+    await userEvent.click(screen.getByRole("button", { name: "Check providers for available models" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/admin/providers/command_code/list-models", expect.anything()));
   });
 
   it("renders_shared_secret_409_message_verbatim", async () => {

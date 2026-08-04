@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { apiJson } from "../lib/apiClient";
 import { CodexOAuthPanel } from "../components/CodexOAuthPanel";
+import { CommandCodeKeyPanel } from "../components/CommandCodeKeyPanel";
 
 type Provider = {
   id: string;
@@ -284,6 +285,7 @@ export function Providers() {
             <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
               <option value="passthrough">passthrough</option>
               <option value="oauth_codex">oauth_codex</option>
+              <option value="oauth_command_code">oauth_command_code</option>
             </select>
           </label>
           <label>
@@ -310,6 +312,7 @@ export function Providers() {
             </label>
           ) : null}
           {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
+          {editing && form.kind === "oauth_command_code" ? <CommandCodeKeyPanel providerId={editing.id} /> : null}
           {error ? <p role="alert">{error}</p> : null}
           <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
             Save provider

@@ -139,7 +139,7 @@ provider actually offers right now.
 
 ![Settings page](docs/screenshots/settings.png)
 
-*(Screenshots not included yet — see
+*(The Pools/Settings screenshots aren't included yet — see
 [`docs/screenshots/README.md`](docs/screenshots/README.md) if you'd like
 to add them.)*
 

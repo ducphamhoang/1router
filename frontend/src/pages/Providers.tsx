@@ -98,6 +98,22 @@ const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     upstream_model: "deepseek-flash"
   },
   {
+    label: "OpenCode (OpenAI-compatible)",
+    kind: "passthrough",
+    wire_format: "openai",
+    suggestedId: "opencode-openai",
+    base_url: "https://opencode.ai/zen/go/v1/chat/completions",
+    upstream_model: "kimi-k2.7-code"
+  },
+  {
+    label: "OpenCode (Anthropic-compatible)",
+    kind: "passthrough",
+    wire_format: "anthropic",
+    suggestedId: "opencode-anthropic",
+    base_url: "https://opencode.ai/zen/go/v1/messages",
+    upstream_model: "qwen3.7-max"
+  },
+  {
     label: "Codex (ChatGPT account)",
     kind: "oauth_codex",
     wire_format: "anthropic",

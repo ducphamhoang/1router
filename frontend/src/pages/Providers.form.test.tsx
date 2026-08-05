@@ -123,6 +123,30 @@ describe("Providers", () => {
     expect(screen.getByLabelText("Provider ID")).toHaveValue("my-deepseek");
   });
 
+  it("choosing_the_opencode_openai_template_prefills_its_fields", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "OpenCode (OpenAI-compatible)");
+
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
+    expect(screen.getByLabelText("API format")).toHaveValue("openai");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://opencode.ai/zen/go/v1/chat/completions");
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("kimi-k2.7-code");
+  });
+
+  it("choosing_the_opencode_anthropic_template_prefills_its_fields", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "OpenCode (Anthropic-compatible)");
+
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
+    expect(screen.getByLabelText("API format")).toHaveValue("anthropic");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://opencode.ai/zen/go/v1/messages");
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("qwen3.7-max");
+  });
+
   it("choosing_the_command_code_template_selects_its_kind_and_hides_passthrough_only_fields", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

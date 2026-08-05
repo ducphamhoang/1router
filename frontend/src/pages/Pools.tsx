@@ -42,6 +42,30 @@ function describeCount(count: number) {
 // names belong in both lists rather than a third one keyed off nothing.
 const DEEPSEEK_MODEL_SUGGESTIONS = ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"];
 
+// Unlike DEEPSEEK_MODEL_SUGGESTIONS, these are NOT shared across both
+// lists - each OpenCode Go model id only answers on the one wire format
+// opencode.ai routes it to (see the OpenCode preset design spec).
+// deepseek-v4-pro/deepseek-v4-flash are also OpenCode Go models but are
+// omitted here - they're already in DEEPSEEK_MODEL_SUGGESTIONS below, and
+// a duplicate <option> value trips React's key-uniqueness warning.
+const OPENCODE_OPENAI_MODEL_SUGGESTIONS = [
+  "glm-5.2",
+  "glm-5.1",
+  "kimi-k2.7-code",
+  "kimi-k2.6",
+  "mimo-v2.5",
+  "mimo-v2.5-pro"
+];
+
+const OPENCODE_ANTHROPIC_MODEL_SUGGESTIONS = [
+  "minimax-m3",
+  "minimax-m2.7",
+  "minimax-m2.5",
+  "qwen3.7-max",
+  "qwen3.7-plus",
+  "qwen3.6-plus"
+];
+
 const OPENAI_MODEL_SUGGESTIONS = [
   "codex-luna",
   "codex-sol",
@@ -54,7 +78,8 @@ const OPENAI_MODEL_SUGGESTIONS = [
   "gpt-5.4-mini",
   "gpt-5.4-nano",
   "gpt-5-codex",
-  ...DEEPSEEK_MODEL_SUGGESTIONS
+  ...DEEPSEEK_MODEL_SUGGESTIONS,
+  ...OPENCODE_OPENAI_MODEL_SUGGESTIONS
 ];
 
 const ANTHROPIC_MODEL_SUGGESTIONS = [
@@ -62,7 +87,8 @@ const ANTHROPIC_MODEL_SUGGESTIONS = [
   "claude-opus-5",
   "claude-sonnet-5",
   "claude-haiku-4-5",
-  ...DEEPSEEK_MODEL_SUGGESTIONS
+  ...DEEPSEEK_MODEL_SUGGESTIONS,
+  ...OPENCODE_ANTHROPIC_MODEL_SUGGESTIONS
 ];
 
 type ValidationState = { state: "checking" | "ok" | "error"; message?: string };

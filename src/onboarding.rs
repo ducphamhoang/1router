@@ -167,7 +167,7 @@ struct ProviderTemplate {
     upstream_model: &'static str,
 }
 
-const PROVIDER_TEMPLATES: [ProviderTemplate; 4] = [
+const PROVIDER_TEMPLATES: [ProviderTemplate; 6] = [
     ProviderTemplate {
         label: "OpenAI",
         wire_format: WireFormat::OpenAi,
@@ -191,6 +191,18 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 4] = [
         wire_format: WireFormat::Anthropic,
         base_url: "https://api.deepseek.com/anthropic/v1/messages",
         upstream_model: "deepseek-flash",
+    },
+    ProviderTemplate {
+        label: "OpenCode (OpenAI-compatible)",
+        wire_format: WireFormat::OpenAi,
+        base_url: "https://opencode.ai/zen/go/v1/chat/completions",
+        upstream_model: "kimi-k2.7-code",
+    },
+    ProviderTemplate {
+        label: "OpenCode (Anthropic-compatible)",
+        wire_format: WireFormat::Anthropic,
+        base_url: "https://opencode.ai/zen/go/v1/messages",
+        upstream_model: "qwen3.7-max",
     },
 ];
 
@@ -948,6 +960,35 @@ mod tests {
     fn next_priority_is_max_plus_one_not_len_plus_one() {
         // len+1 would return 3 here and silently outrank the priority-10 member.
         assert_eq!(next_priority(&[member(1), member(10)]), 11);
+    }
+
+    #[test]
+    fn provider_templates_include_both_opencode_entries() {
+        let labels: Vec<&str> = PROVIDER_TEMPLATES.iter().map(|p| p.label).collect();
+        assert!(labels.contains(&"OpenCode (OpenAI-compatible)"));
+        assert!(labels.contains(&"OpenCode (Anthropic-compatible)"));
+
+        let openai_tmpl = PROVIDER_TEMPLATES
+            .iter()
+            .find(|p| p.label == "OpenCode (OpenAI-compatible)")
+            .unwrap();
+        assert_eq!(openai_tmpl.wire_format, WireFormat::OpenAi);
+        assert_eq!(
+            openai_tmpl.base_url,
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
+        assert_eq!(openai_tmpl.upstream_model, "kimi-k2.7-code");
+
+        let anthropic_tmpl = PROVIDER_TEMPLATES
+            .iter()
+            .find(|p| p.label == "OpenCode (Anthropic-compatible)")
+            .unwrap();
+        assert_eq!(anthropic_tmpl.wire_format, WireFormat::Anthropic);
+        assert_eq!(
+            anthropic_tmpl.base_url,
+            "https://opencode.ai/zen/go/v1/messages"
+        );
+        assert_eq!(anthropic_tmpl.upstream_model, "qwen3.7-max");
     }
 
     #[test]

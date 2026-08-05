@@ -6,26 +6,50 @@ fronted by a single admin-secret-protected HTTP API.
 
 ## Getting started
 
-### Option A — build from source
+### Option A — download a prebuilt binary
+
+Every tagged release publishes binaries for Linux (x86_64/arm64) and macOS
+(Intel/Apple Silicon) on the
+[Releases page](https://github.com/ducphamhoang/1router/releases/latest), as
+`.tar.gz` archives plus a `SHA256SUMS` file to verify them against.
+
+```
+curl -LO https://github.com/ducphamhoang/1router/releases/latest/download/1router-<version>-<target>.tar.gz
+tar -xzf 1router-<version>-<target>.tar.gz
+./1router setup      # interactive first-time setup
+./1router             # start the server
+```
+
+`<target>` is one of `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin` — pick the one matching your OS
+and CPU architecture.
+
+### Option B — Docker
+
+A multi-arch image (`linux/amd64`, `linux/arm64`) is published alongside each
+release to GHCR:
+
+```
+mkdir -p data
+docker run -it --rm -p 8080:8080 -v "$PWD/data:/data" \
+  -e ROUTER_SQLITE_PATH=/data/1router.db ghcr.io/ducphamhoang/1router:latest setup
+docker run -d --name 1router -p 8080:8080 -v "$PWD/data:/data" \
+  -e ROUTER_SQLITE_PATH=/data/1router.db ghcr.io/ducphamhoang/1router:latest
+```
+(`-it` on the first `run` is required — `setup` is interactive and needs a
+real terminal attached; the second, normal-boot `run` doesn't need it. Pin to
+a specific release instead of `:latest` with `ghcr.io/ducphamhoang/1router:vX.Y.Z`.)
+
+To build the image yourself instead of pulling it, replace the image
+reference with `1router` after running `docker build -t 1router .`.
+
+### Option C — build from source
 
 ```
 cargo build --release
 ./target/release/1router setup      # interactive first-time setup
 ./target/release/1router            # start the server
 ```
-
-### Option B — Docker
-
-```
-docker build -t 1router .
-mkdir -p data
-docker run -it --rm -p 8080:8080 -v "$PWD/data:/data" \
-  -e ROUTER_SQLITE_PATH=/data/1router.db 1router setup
-docker run -d --name 1router -p 8080:8080 -v "$PWD/data:/data" \
-  -e ROUTER_SQLITE_PATH=/data/1router.db 1router
-```
-(`-it` on the first `run` is required — `setup` is interactive and needs a
-real terminal attached; the second, normal-boot `run` doesn't need it.)
 
 ### Interactive setup wizard
 

@@ -55,6 +55,45 @@ It walks you through:
 3. **Making it callable** — the wizard names it and makes it immediately
    usable as a model.
 
+Here's a real run, picking OpenCode's free tier (no API key needed —
+just press Enter to accept the pre-filled one):
+
+```
+$ ./1router setup
+
+=== 1router setup ===
+
+✔ No admin secret yet. Generate a random one, or enter your own? · Generate a random secret (recommended)
+Admin secret written to ".router_secret" (mode 0600).
+  Your admin secret is:
+
+    <a freshly generated 64-character secret>
+
+  Use it as `Authorization: Bearer <secret>` on /v1/* and /admin/*. It is stored in ".router_secret"; it will not be printed again.
+✔ Add a provider now? · yes
+✔ Provider kind · passthrough (OpenAI/Anthropic-compatible API key)
+✔ Provider name (also used as its id) · opencode-free
+✔ Template (pre-fills the fields below; all stay editable) · OpenCode Free
+✔ Wire format · openai
+  note: base_url is POSTed as-is - include the full upstream path, e.g. https://api.openai.com/v1/chat/completions
+✔ Upstream base_url (full path) · https://opencode.ai/zen/v1/chat/completions
+  note: this template uses a public, non-secret key ('public') - press Enter to accept it, or type your own
+✔ API key (input hidden) · ********
+✔ Upstream model (the real model name this provider expects) · deepseek-v4-flash-free
+  created provider 'opencode-free'
+✔ Pool id (this is the `model` name clients will request) · opencode-free
+  added 'opencode-free' to pool 'opencode-free' at priority 1
+✔ Add 'opencode-free' to another pool with a different model? · no
+✔ Add another provider? · no
+
+Setup complete. Example request:
+
+  curl http://<host>:<port>/v1/chat/completions \
+    -H 'Authorization: Bearer <your-admin-secret>' \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"<pool-id>","messages":[{"role":"user","content":"hi"}]}'
+```
+
 Then start the server:
 
 ```

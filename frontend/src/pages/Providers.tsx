@@ -175,6 +175,14 @@ export function Providers() {
   const [validation, setValidation] = useState<
     { state: "checking" | "ok" | "error"; message?: string } | null
   >(null);
+  // Passthrough create form only: lets an operator discover the upstream's
+  // real model ids from the base_url/api_key they just typed, before the
+  // provider is saved - same /models lookup `list-models` already does for
+  // an existing provider, just without an id to call it against yet.
+  const [previewModels, setPreviewModels] = useState<string[]>([]);
+  const [modelFetch, setModelFetch] = useState<
+    { state: "checking" | "error"; message?: string } | null
+  >(null);
 
   async function loadProviders() {
     setProviders(await apiJson<Provider[]>("/admin/providers"));
@@ -224,6 +232,8 @@ export function Providers() {
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(false);
     setValidation(null);
+    setPreviewModels([]);
+    setModelFetch(null);
     setModalOpen(true);
   }
 
@@ -271,23 +281,40 @@ export function Providers() {
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(Boolean(provider.credential_configured));
     setValidation(null);
+    setPreviewModels([]);
+    setModelFetch(null);
     setModalOpen(true);
   }
 
   async function validateProvider() {
-    if (!editing) {
-      return;
-    }
     setValidation({ state: "checking" });
     try {
-      const result = await apiJson<{ ok: boolean; status?: number; message?: string }>(
-        `/admin/providers/${encodeURIComponent(editing.id)}/validate-model`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: form.upstream_model.trim() || undefined })
-        }
-      );
+      // Editing an existing provider tests the already-saved key/base_url
+      // (the operator may have typed a new one above, but it isn't
+      // persisted yet); creating a new one has nothing saved yet, so it
+      // sends the in-progress form values straight through instead.
+      const result = editing
+        ? await apiJson<{ ok: boolean; status?: number; message?: string }>(
+            `/admin/providers/${encodeURIComponent(editing.id)}/validate-model`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ model: form.upstream_model.trim() || undefined })
+            }
+          )
+        : await apiJson<{ ok: boolean; status?: number; message?: string }>(
+            "/admin/providers/validate-model-preview",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                wire_format: form.wire_format,
+                base_url: form.base_url?.trim() || "",
+                api_key: form.api_key?.trim() || undefined,
+                model: form.upstream_model.trim()
+              })
+            }
+          );
       setValidation(
         result.ok
           ? { state: "ok" }
@@ -295,6 +322,37 @@ export function Providers() {
       );
     } catch (err) {
       setValidation({ state: "error", message: err instanceof Error ? err.message : "Validation request failed." });
+    }
+  }
+
+  async function fetchPreviewModels() {
+    setModelFetch({ state: "checking" });
+    try {
+      const result = await apiJson<{ ok: boolean; models?: string[]; reason?: string }>(
+        "/admin/providers/list-models-preview",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            wire_format: form.wire_format,
+            base_url: form.base_url?.trim() || "",
+            api_key: form.api_key?.trim() || undefined
+          })
+        }
+      );
+      if (result.ok && result.models?.length) {
+        setPreviewModels(result.models);
+        setModelFetch(null);
+        setForm((current) =>
+          current.upstream_model.trim() ? current : { ...current, upstream_model: result.models![0] }
+        );
+      } else {
+        setPreviewModels([]);
+        setModelFetch({ state: "error", message: result.reason || "No models returned." });
+      }
+    } catch (err) {
+      setPreviewModels([]);
+      setModelFetch({ state: "error", message: err instanceof Error ? err.message : "Fetch failed." });
     }
   }
 
@@ -478,43 +536,82 @@ export function Providers() {
                 </label>
                 <label>
                   API key
-                  <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
-                </label>
-                {editing ? (
-                  <>
-                    <p className="hint">
-                      Tests the already-saved API key and base URL - click Save first if you just changed either.
-                    </p>
-                    <div className="model-override-row">
+                  <div className="model-override-row">
+                    <input
+                      value={form.api_key}
+                      onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+                    />
+                    {!editing ? (
                       <button
                         type="button"
                         className="btn-ghost"
-                        onClick={() => void validateProvider()}
-                        disabled={validation?.state === "checking"}
+                        onClick={() => void fetchPreviewModels()}
+                        disabled={modelFetch?.state === "checking" || !form.base_url?.trim()}
+                        title="Fetch the model list from this base URL and API key"
                       >
-                        Validate
+                        Fetch models
                       </button>
-                    </div>
-                    {validation ? (
-                      <span
-                        className={
-                          validation.state === "ok"
-                            ? "validation-result validation-ok"
-                            : validation.state === "error"
-                              ? "validation-result validation-error"
-                              : "validation-result"
-                        }
-                        role={validation.state === "error" ? "alert" : "status"}
-                      >
-                        {validation.state === "checking"
-                          ? "Sending a test request…"
-                          : validation.state === "ok"
-                            ? "✓ Model responded successfully."
-                            : `✗ ${validation.message}`}
-                      </span>
                     ) : null}
-                  </>
-                ) : null}
+                  </div>
+                  {!editing && modelFetch ? (
+                    <span
+                      className={
+                        modelFetch.state === "error" ? "validation-result validation-error" : "validation-result"
+                      }
+                      role={modelFetch.state === "error" ? "alert" : "status"}
+                    >
+                      {modelFetch.state === "checking" ? "Fetching models…" : `✗ ${modelFetch.message}`}
+                    </span>
+                  ) : null}
+                </label>
+                {(() => {
+                  // Creating: nothing is saved yet, so Validate needs the
+                  // in-progress base_url/api_key/model right here to have
+                  // anything to send - unlike editing, where a blank field
+                  // just means "keep what's already on file" and the model
+                  // alone is enough (validateProvider falls back to the
+                  // saved values for those).
+                  const canValidate = editing
+                    ? true
+                    : Boolean(form.base_url?.trim() && form.upstream_model.trim());
+                  return (
+                    <>
+                      <p className="hint">
+                        {editing
+                          ? "Tests the already-saved API key and base URL - click Save first if you just changed either."
+                          : "Sends a real test request with the API key, base URL, and model above - nothing is saved yet."}
+                      </p>
+                      <div className="model-override-row">
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          onClick={() => void validateProvider()}
+                          disabled={validation?.state === "checking" || !canValidate}
+                        >
+                          Validate
+                        </button>
+                      </div>
+                      {validation ? (
+                        <span
+                          className={
+                            validation.state === "ok"
+                              ? "validation-result validation-ok"
+                              : validation.state === "error"
+                                ? "validation-result validation-error"
+                                : "validation-result"
+                          }
+                          role={validation.state === "error" ? "alert" : "status"}
+                        >
+                          {validation.state === "checking"
+                            ? "Sending a test request…"
+                            : validation.state === "ok"
+                              ? "✓ Model responded successfully."
+                              : `✗ ${validation.message}`}
+                        </span>
+                      ) : null}
+                    </>
+                  );
+                })()}
               </>
             ) : (
               <p className="hint">
@@ -545,6 +642,17 @@ export function Providers() {
                   onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
                 >
                   {commandCodeModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              ) : !editing && form.kind === "passthrough" && previewModels.length > 0 ? (
+                <select
+                  value={form.upstream_model}
+                  onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
+                >
+                  {previewModels.map((model) => (
                     <option key={model} value={model}>
                       {model}
                     </option>

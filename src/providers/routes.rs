@@ -12,7 +12,7 @@ use crate::core::model::{Provider, ProviderKind, WireFormat};
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 use crate::core::runtime::ProviderStatus;
 use crate::core::state::{reload_snapshot, AppState};
-use crate::providers::adapter::adapter_for;
+use crate::providers::adapter::{adapter_for, Credentials};
 use crate::providers::adapter::commandcode;
 use crate::providers::queries;
 use crate::proxy::flow::credentials_for;
@@ -27,6 +27,14 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/providers/:id/test", post(test_stub))
         .route("/admin/providers/:id/state", get(state_stub))
         .route("/admin/providers/:id/validate-model", post(validate_model))
+        .route(
+            "/admin/providers/validate-model-preview",
+            post(validate_model_preview),
+        )
+        .route(
+            "/admin/providers/list-models-preview",
+            post(list_models_preview),
+        )
         .route("/admin/providers/:id/list-models", get(list_models))
 }
 
@@ -240,6 +248,67 @@ async fn validate_model(
     }
 }
 
+#[derive(Deserialize)]
+struct ValidateModelPreviewBody {
+    wire_format: WireFormat,
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+}
+
+/// Same probe as `validate_model`, but for a provider that hasn't been saved
+/// yet - the "Validate" button on the create form. Takes the connection
+/// details straight from the form instead of loading a row from the DB, so
+/// it's passthrough-only (OAuth kinds have no key/token to hand over before
+/// the provider exists and its own auth dance has run).
+async fn validate_model_preview(
+    State(s): State<AppState>,
+    Json(body): Json<ValidateModelPreviewBody>,
+) -> Result<Json<Value>, AppError> {
+    let now = Utc::now();
+    let probe = Provider {
+        id: String::new(),
+        name: String::new(),
+        wire_format: body.wire_format,
+        kind: ProviderKind::Passthrough,
+        base_url: Some(body.base_url),
+        api_key: body.api_key,
+        upstream_model: body.model,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let test_body = json!({
+        "model": probe.upstream_model,
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 8
+    });
+    let body_bytes = Bytes::from(serde_json::to_vec(&test_body).unwrap());
+
+    let creds = Credentials {
+        api_key: probe.api_key.clone(),
+        ..Default::default()
+    };
+    let adapter = adapter_for(&probe, s.http.clone());
+    let req = adapter.build_request(&body_bytes, &creds).await?;
+
+    match s.http.execute(req).await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                Ok(Json(json!({ "ok": true, "status": status.as_u16() })))
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                let snippet: String = text.chars().take(300).collect();
+                Ok(Json(
+                    json!({ "ok": false, "status": status.as_u16(), "message": snippet }),
+                ))
+            }
+        }
+        Err(e) => Ok(Json(json!({ "ok": false, "message": e.to_string() }))),
+    }
+}
+
 /// A provider's `base_url` is the full chat/messages endpoint, not a base
 /// path - swap its last path segment for `models` rather than requiring a
 /// second URL field just for this. Falls back to proper URL parsing (rather
@@ -404,6 +473,38 @@ async fn list_models(
 ) -> Result<Json<Value>, AppError> {
     let provider = queries::get_provider(&s.db, &id).await?;
     match discover_and_cache_models(&s, &provider).await {
+        Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
+        Err(reason) => Ok(Json(json!({ "ok": false, "reason": reason }))),
+    }
+}
+
+#[derive(Deserialize)]
+struct ListModelsPreviewBody {
+    wire_format: WireFormat,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+/// "Fetch models" for the create form, before a provider row (and thus an
+/// id to cache discovered models under) exists yet. Passthrough-only, same
+/// reasoning as `validate_model_preview`.
+async fn list_models_preview(
+    State(s): State<AppState>,
+    Json(body): Json<ListModelsPreviewBody>,
+) -> Result<Json<Value>, AppError> {
+    let now = Utc::now();
+    let probe = Provider {
+        id: String::new(),
+        name: String::new(),
+        wire_format: body.wire_format,
+        kind: ProviderKind::Passthrough,
+        base_url: Some(body.base_url),
+        api_key: body.api_key,
+        upstream_model: String::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    match fetch_live_models(&s.http, &probe).await {
         Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
         Err(reason) => Ok(Json(json!({ "ok": false, "reason": reason }))),
     }

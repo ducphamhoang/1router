@@ -168,6 +168,13 @@ export function Providers() {
   // model id blind.
   const [commandCodeModels, setCommandCodeModels] = useState<string[]>([]);
   const [commandCodeCredentialConfirmed, setCommandCodeCredentialConfirmed] = useState(false);
+  // Passthrough-only: lets an operator confirm the saved api_key/base_url/
+  // model actually work before relying on them, the same real-request probe
+  // Pools.tsx already offers for a pool member's model_override - this is
+  // the equivalent for the provider's own default upstream_model.
+  const [validation, setValidation] = useState<
+    { state: "checking" | "ok" | "error"; message?: string } | null
+  >(null);
 
   async function loadProviders() {
     setProviders(await apiJson<Provider[]>("/admin/providers"));
@@ -216,6 +223,7 @@ export function Providers() {
     setNameTouched(false);
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(false);
+    setValidation(null);
     setModalOpen(true);
   }
 
@@ -262,7 +270,32 @@ export function Providers() {
     });
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(Boolean(provider.credential_configured));
+    setValidation(null);
     setModalOpen(true);
+  }
+
+  async function validateProvider() {
+    if (!editing) {
+      return;
+    }
+    setValidation({ state: "checking" });
+    try {
+      const result = await apiJson<{ ok: boolean; status?: number; message?: string }>(
+        `/admin/providers/${encodeURIComponent(editing.id)}/validate-model`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: form.upstream_model.trim() || undefined })
+        }
+      );
+      setValidation(
+        result.ok
+          ? { state: "ok" }
+          : { state: "error", message: result.message || `Upstream returned HTTP ${result.status}.` }
+      );
+    } catch (err) {
+      setValidation({ state: "error", message: err instanceof Error ? err.message : "Validation request failed." });
+    }
   }
 
   async function saveProvider(event: FormEvent) {
@@ -447,6 +480,41 @@ export function Providers() {
                   API key
                   <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
                 </label>
+                {editing ? (
+                  <>
+                    <p className="hint">
+                      Tests the already-saved API key and base URL - click Save first if you just changed either.
+                    </p>
+                    <div className="model-override-row">
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        onClick={() => void validateProvider()}
+                        disabled={validation?.state === "checking"}
+                      >
+                        Validate
+                      </button>
+                    </div>
+                    {validation ? (
+                      <span
+                        className={
+                          validation.state === "ok"
+                            ? "validation-result validation-ok"
+                            : validation.state === "error"
+                              ? "validation-result validation-error"
+                              : "validation-result"
+                        }
+                        role={validation.state === "error" ? "alert" : "status"}
+                      >
+                        {validation.state === "checking"
+                          ? "Sending a test request…"
+                          : validation.state === "ok"
+                            ? "✓ Model responded successfully."
+                            : `✗ ${validation.message}`}
+                      </span>
+                    ) : null}
+                  </>
+                ) : null}
               </>
             ) : (
               <p className="hint">

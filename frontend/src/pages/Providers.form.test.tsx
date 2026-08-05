@@ -43,6 +43,12 @@ describe("Providers", () => {
         if (url === "/admin/providers/prov_1" && init?.method === "DELETE") {
           return new Response("{}", { status: 200 });
         }
+        if (url === "/admin/providers/prov_1/validate-model" && init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          return body.model === "not-a-real-model"
+            ? new Response(JSON.stringify({ ok: false, status: 404, message: "model not found" }), { status: 200 })
+            : new Response(JSON.stringify({ ok: true, status: 200 }), { status: 200 });
+        }
         if (url === "/admin/providers/command-code/commandcode/key" && init?.method === "POST") {
           return new Response(JSON.stringify({ ok: true }), { status: 200 });
         }
@@ -297,5 +303,31 @@ describe("Providers", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Delete openai" }));
     expect(fetch).toHaveBeenCalledWith("/admin/providers/prov_1", expect.objectContaining({ method: "DELETE" }));
+  });
+
+  it("validates_an_existing_passthrough_providers_saved_credentials", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Validate" }));
+
+    expect(await screen.findByText("✓ Model responded successfully.")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/providers/prov_1/validate-model",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ model: "gpt-4.1" }) })
+    );
+
+    await userEvent.clear(screen.getByLabelText("Upstream model"));
+    await userEvent.type(screen.getByLabelText("Upstream model"), "not-a-real-model");
+    await userEvent.click(screen.getByRole("button", { name: "Validate" }));
+
+    expect(await screen.findByText("✗ model not found")).toBeInTheDocument();
+  });
+
+  it("does_not_offer_validate_for_a_brand_new_unsaved_provider", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    expect(screen.queryByRole("button", { name: "Validate" })).not.toBeInTheDocument();
   });
 });

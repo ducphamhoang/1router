@@ -234,9 +234,9 @@ callable" checkbox, checked by default, which — on save — also creates a
 pool with the same id and adds the provider as its only member, so the
 provider's id becomes usable as `model` immediately with no separate trip to
 the Pools page. Uncheck it if you're adding the provider to fold into an
-existing pool yourself instead. A preset dropdown (OpenAI/Anthropic/DeepSeek)
-pre-fills wire format, base URL, and model — every field stays editable
-after picking one.
+existing pool yourself instead. A preset dropdown
+(OpenAI/Anthropic/DeepSeek/OpenCode) pre-fills wire format, base URL, and
+model — every field stays editable after picking one.
 
 **Pools page**: pools are listed by name; tapping one opens a dialog to
 manage its providers — reorder (drag or ↑/↓), remove, or add a provider with

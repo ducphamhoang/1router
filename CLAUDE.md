@@ -20,6 +20,18 @@ new work should branch directly off `master`. See:
 - Universal passthrough wire-format translation (v0.3.2) — design:
   `docs/superpowers/specs/2026-08-04-universal-passthrough-translation-design.md`,
   plan (done): `docs/superpowers/plans/2026-08-04-universal-passthrough-translation-implementation.md`
+- Gemini provider — a "Gemini (OpenAI-compatible)" `PROVIDER_TEMPLATES`
+  preset (`src/onboarding.rs` + mirrored in
+  `frontend/src/pages/Providers.tsx`) was added instead, pointing at
+  Google's own OpenAI-compatible endpoint
+  (`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`)
+  as an ordinary `passthrough` provider — no new `ProviderKind`, no
+  translation code needed. The bespoke native-adapter plan below (Gemini's
+  own `generateContent`/`streamGenerateContent` wire format) was scoped but
+  not pursued; design: `docs/superpowers/specs/2026-08-05-gemini-provider-design.md`,
+  plan: `docs/superpowers/plans/2026-08-05-gemini-provider-implementation.md`
+  (kept for reference if native-format features like `thinkingConfig` or
+  exact `functionCall` shapes are ever needed)
 - Release/publishing — design: `docs/superpowers/specs/2026-07-26-release-publishing-design.md`,
   plan (done): `docs/superpowers/plans/2026-07-26-release-publishing.md`,
   GHCR checklist: `docs/superpowers/plans/2026-07-26-release-publishing-ghcr-checklist.md`

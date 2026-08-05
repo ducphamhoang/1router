@@ -183,6 +183,20 @@ describe("Providers", () => {
     expect(screen.getByLabelText("API key")).toHaveValue("public");
   });
 
+  it("choosing_the_gemini_template_prefills_its_fields", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Gemini (OpenAI-compatible)");
+
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
+    expect(screen.getByLabelText("API format")).toHaveValue("openai");
+    expect(screen.getByLabelText("Base URL")).toHaveValue(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    );
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("gemini-2.5-flash");
+  });
+
   it("choosing_the_command_code_template_selects_its_kind_and_hides_passthrough_only_fields", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

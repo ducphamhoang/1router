@@ -3,8 +3,8 @@
 Your own LLM API gateway. Point Claude Code, Cursor, OpenCode, or any
 OpenAI/Anthropic-compatible tool at one URL, and 1router routes each
 request to whichever provider you've configured — OpenAI, Anthropic,
-DeepSeek, OpenCode, a ChatGPT account, or a Command Code account. One
-binary, one local database file, no external services to run.
+DeepSeek, OpenCode, Gemini, a ChatGPT account, or a Command Code account.
+One binary, one local database file, no external services to run.
 
 ## Install
 
@@ -18,7 +18,7 @@ tar -xzf 1router-<version>-<target>.tar.gz
 
 `<target>` is one of `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
 `x86_64-apple-darwin`, `aarch64-apple-darwin` — match your OS/CPU. `<version>`
-is the version shown on the Releases page (e.g. `v0.3.3`).
+is the version shown on the Releases page (e.g. `v0.3.4`).
 
 **Docker**:
 
@@ -48,8 +48,10 @@ It walks you through:
 
 1. **An admin secret** — used to call the API and log in to the dashboard.
 2. **Adding a provider** — pick one:
-   - **OpenAI**, **Anthropic**, **DeepSeek**, or **OpenCode** — paste an
-     API key (OpenCode has a free tier that needs no key at all).
+   - **OpenAI**, **Anthropic**, **DeepSeek**, **OpenCode**, or **Gemini**
+     — paste an API key (OpenCode has a free tier that needs no key at
+     all). Gemini uses Google's own OpenAI-compatible endpoint, so no
+     wire-format translation is needed.
    - **ChatGPT account (Codex)** or **Command Code** — logs in through
      your browser, no API key needed.
 3. **Making it callable** — the wizard names it and makes it immediately

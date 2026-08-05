@@ -130,6 +130,14 @@ const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     api_key: "public"
   },
   {
+    label: "Gemini (OpenAI-compatible)",
+    kind: "passthrough",
+    wire_format: "openai",
+    suggestedId: "gemini",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    upstream_model: "gemini-2.5-flash"
+  },
+  {
     label: "Codex (ChatGPT account)",
     kind: "oauth_codex",
     wire_format: "anthropic",

@@ -172,7 +172,7 @@ struct ProviderTemplate {
     api_key: Option<&'static str>,
 }
 
-const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
+const PROVIDER_TEMPLATES: [ProviderTemplate; 8] = [
     ProviderTemplate {
         label: "OpenAI",
         wire_format: WireFormat::OpenAi,
@@ -224,6 +224,13 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
         // header) gets a real 200 from this endpoint - see the design
         // spec's "OpenCode Free" section for the curl transcript.
         api_key: Some("public"),
+    },
+    ProviderTemplate {
+        label: "Gemini (OpenAI-compatible)",
+        wire_format: WireFormat::OpenAi,
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        upstream_model: "gemini-2.5-flash",
+        api_key: None,
     },
 ];
 
@@ -1039,6 +1046,21 @@ mod tests {
         assert_eq!(tmpl.base_url, "https://opencode.ai/zen/v1/chat/completions");
         assert_eq!(tmpl.upstream_model, "deepseek-v4-flash-free");
         assert_eq!(tmpl.api_key, Some("public"));
+    }
+
+    #[test]
+    fn gemini_template_uses_the_openai_compat_shim() {
+        let tmpl = PROVIDER_TEMPLATES
+            .iter()
+            .find(|p| p.label == "Gemini (OpenAI-compatible)")
+            .unwrap();
+        assert_eq!(tmpl.wire_format, WireFormat::OpenAi);
+        assert_eq!(
+            tmpl.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+        assert_eq!(tmpl.upstream_model, "gemini-2.5-flash");
+        assert_eq!(tmpl.api_key, None);
     }
 
     #[test]

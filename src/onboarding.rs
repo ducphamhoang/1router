@@ -165,44 +165,65 @@ struct ProviderTemplate {
     wire_format: WireFormat,
     base_url: &'static str,
     upstream_model: &'static str,
+    // Only set for templates whose credential is a public, non-secret
+    // constant (currently just OpenCode Free's "public" token) - every
+    // other template needs a real secret the operator must type, so this
+    // stays None for them and the API key prompt has no default.
+    api_key: Option<&'static str>,
 }
 
-const PROVIDER_TEMPLATES: [ProviderTemplate; 6] = [
+const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
     ProviderTemplate {
         label: "OpenAI",
         wire_format: WireFormat::OpenAi,
         base_url: "https://api.openai.com/v1/chat/completions",
         upstream_model: "gpt-5.4",
+        api_key: None,
     },
     ProviderTemplate {
         label: "Anthropic",
         wire_format: WireFormat::Anthropic,
         base_url: "https://api.anthropic.com/v1/messages",
         upstream_model: "claude-sonnet-5",
+        api_key: None,
     },
     ProviderTemplate {
         label: "DeepSeek (OpenAI-compatible)",
         wire_format: WireFormat::OpenAi,
         base_url: "https://api.deepseek.com/v1/chat/completions",
         upstream_model: "deepseek-flash",
+        api_key: None,
     },
     ProviderTemplate {
         label: "DeepSeek (Anthropic-compatible)",
         wire_format: WireFormat::Anthropic,
         base_url: "https://api.deepseek.com/anthropic/v1/messages",
         upstream_model: "deepseek-flash",
+        api_key: None,
     },
     ProviderTemplate {
         label: "OpenCode (OpenAI-compatible)",
         wire_format: WireFormat::OpenAi,
         base_url: "https://opencode.ai/zen/go/v1/chat/completions",
         upstream_model: "kimi-k2.7-code",
+        api_key: None,
     },
     ProviderTemplate {
         label: "OpenCode (Anthropic-compatible)",
         wire_format: WireFormat::Anthropic,
         base_url: "https://opencode.ai/zen/go/v1/messages",
         upstream_model: "qwen3.7-max",
+        api_key: None,
+    },
+    ProviderTemplate {
+        label: "OpenCode Free",
+        wire_format: WireFormat::OpenAi,
+        base_url: "https://opencode.ai/zen/v1/chat/completions",
+        upstream_model: "deepseek-v4-flash-free",
+        // Verified live: `Authorization: Bearer public` alone (no extra
+        // header) gets a real 200 from this endpoint - see the design
+        // spec's "OpenCode Free" section for the curl transcript.
+        api_key: Some("public"),
     },
 ];
 
@@ -283,9 +304,20 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     }
     let base_url: String = base_url_prompt.interact_text()?;
 
-    let api_key: String = Password::with_theme(&theme())
+    if let Some(default_key) = preset.and_then(|p| p.api_key) {
+        println!("  note: this template uses a public, non-secret key ('{default_key}') - press Enter to accept it, or type your own");
+    }
+    let typed_api_key: String = Password::with_theme(&theme())
         .with_prompt("API key (input hidden)")
         .interact()?;
+    let api_key = if typed_api_key.trim().is_empty() {
+        preset
+            .and_then(|p| p.api_key)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        typed_api_key
+    };
 
     let model_theme = theme();
     let mut model_prompt = Input::<String>::with_theme(&model_theme)
@@ -989,6 +1021,20 @@ mod tests {
             "https://opencode.ai/zen/go/v1/messages"
         );
         assert_eq!(anthropic_tmpl.upstream_model, "qwen3.7-max");
+        assert_eq!(openai_tmpl.api_key, None);
+        assert_eq!(anthropic_tmpl.api_key, None);
+    }
+
+    #[test]
+    fn opencode_free_template_defaults_to_the_public_key() {
+        let tmpl = PROVIDER_TEMPLATES
+            .iter()
+            .find(|p| p.label == "OpenCode Free")
+            .unwrap();
+        assert_eq!(tmpl.wire_format, WireFormat::OpenAi);
+        assert_eq!(tmpl.base_url, "https://opencode.ai/zen/v1/chat/completions");
+        assert_eq!(tmpl.upstream_model, "deepseek-v4-flash-free");
+        assert_eq!(tmpl.api_key, Some("public"));
     }
 
     #[test]

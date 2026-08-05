@@ -147,6 +147,19 @@ describe("Providers", () => {
     expect(screen.getByLabelText("Upstream model")).toHaveValue("qwen3.7-max");
   });
 
+  it("choosing_the_opencode_free_template_prefills_the_public_api_key", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "OpenCode Free");
+
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
+    expect(screen.getByLabelText("API format")).toHaveValue("openai");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://opencode.ai/zen/v1/chat/completions");
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("deepseek-v4-flash-free");
+    expect(screen.getByLabelText("API key")).toHaveValue("public");
+  });
+
   it("choosing_the_command_code_template_selects_its_kind_and_hides_passthrough_only_fields", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

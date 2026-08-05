@@ -62,6 +62,11 @@ type ProviderTemplate = {
   suggestedId: string;
   base_url?: string;
   upstream_model?: string;
+  // Only set for templates whose credential is a public, non-secret
+  // constant (currently just OpenCode Free's "public" token) - every
+  // other template needs a real secret the operator must type, so the API
+  // key field is never prefilled for them.
+  api_key?: string;
 };
 
 const PROVIDER_TEMPLATES: ProviderTemplate[] = [
@@ -112,6 +117,17 @@ const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     suggestedId: "opencode-anthropic",
     base_url: "https://opencode.ai/zen/go/v1/messages",
     upstream_model: "qwen3.7-max"
+  },
+  {
+    label: "OpenCode Free",
+    kind: "passthrough",
+    wire_format: "openai",
+    suggestedId: "opencode-free",
+    base_url: "https://opencode.ai/zen/v1/chat/completions",
+    upstream_model: "deepseek-v4-flash-free",
+    // Verified live: `Authorization: Bearer public` alone gets a real 200
+    // from this endpoint - see the design spec's "OpenCode Free" section.
+    api_key: "public"
   },
   {
     label: "Codex (ChatGPT account)",
@@ -219,7 +235,7 @@ export function Providers() {
       id: idTouched ? current.id : chosen.suggestedId,
       name: nameTouched ? current.name : chosen.label,
       base_url: chosen.base_url ?? "",
-      api_key: chosen.kind === "passthrough" ? current.api_key : "",
+      api_key: chosen.kind === "passthrough" ? (chosen.api_key ?? current.api_key) : "",
       upstream_model: chosen.upstream_model ?? current.upstream_model
     }));
   }

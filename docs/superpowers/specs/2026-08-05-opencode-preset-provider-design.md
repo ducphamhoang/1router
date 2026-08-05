@@ -90,33 +90,81 @@ single `OPENCODE_MODEL_SUGGESTIONS`-shaped split: the eight
 `/messages` models go into `ANTHROPIC_MODEL_SUGGESTIONS`, and neither
 model id appears in both.
 
-## Out of scope (v1): OpenCode Free
+## OpenCode Free — verified in, not out
 
-The no-auth "OpenCode Free" tier (`opencode.js` in the reference) needs two
-things the config-only preset model can't express:
+v1 of this plan (implemented and shipped as v0.3.3) originally left the
+no-auth "OpenCode Free" tier (`opencode.js` in the reference) out of scope,
+because the reference implementation always sends a static extra header,
+`x-opencode-client: desktop`, that `Provider`/`HttpAdapter` has no field
+for (`Provider` carries `wire_format`/`base_url`/`api_key`/`upstream_model`
+only — no free-form header map, unlike the reference's per-provider
+`transport.headers`), and it wasn't clear whether OpenCode's free tier
+*enforces* that header or merely uses it for its own analytics.
 
-1. A **fixed** `Authorization: Bearer public` credential the operator never
-   types — mechanically achievable by literally storing the string
-   `"public"` as the provider's `api_key`, since `HttpAdapter` already
-   sends `Authorization: Bearer {api_key}` for OpenAI wire whenever one is
-   present.
-2. A **static extra header**, `x-opencode-client: desktop`, that
-   `Provider`/`HttpAdapter` has no field for today (`Provider` carries
-   `wire_format`/`base_url`/`api_key`/`upstream_model` only — no
-   free-form header map, unlike the reference's per-provider
-   `transport.headers`).
+That's now settled empirically, with real requests against the live
+endpoint (no reference-repo guessing):
 
-(1) is free; (2) is a real gap, and it's not clear from the reference
-alone whether OpenCode's free tier actually *enforces* that header or
-merely uses it for its own analytics — guessing wrong either breaks the
-free tier silently or ships an unnecessary adapter change. Given the paid
-"OpenCode Go" templates above already cover the primary use case (a
-5/mo account with real model variety) with **zero** adapter risk, OpenCode
-Free is left as a follow-up: either confirm the header is unnecessary (and
-ship it as a third preset with `api_key: "public"`), or add a generic
-`extra_headers: Option<serde_json::Value>` column to `Provider` and thread
-it through `HttpAdapter::build_request` — the latter is a real schema
-change and shouldn't ride on this otherwise code-free plan.
+```
+$ curl https://opencode.ai/zen/v1/chat/completions \
+    -H "Authorization: Bearer public" -H "Content-Type: application/json" \
+    -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"reply with exactly: hi"}],"max_tokens":10,"stream":false}'
+HTTP 200 — real completion back, no x-opencode-client header sent.
+```
+
+Streaming (`stream:true`) returns standard `chat.completion.chunk` SSE,
+and `GET https://opencode.ai/zen/v1/models` (also without the header)
+lists 61 model ids, both confirming the same `derive_models_url`-based
+discovery that already works for OpenCode Go works here unmodified. The
+header is therefore not load-bearing — it's a client-identification nicety
+the reference implementation's own executor happens to send, not a gate
+this endpoint enforces. That means the only piece OpenCode Free actually
+needs — a fixed `Authorization: Bearer public` credential the operator
+never types — is achievable with **zero** `HttpAdapter`/`Provider` schema
+changes: `HttpAdapter` already sends `Authorization: Bearer {api_key}` for
+OpenAI wire whenever one is present, so storing the literal string
+`"public"` as the provider's `api_key` reproduces the reference's behavior
+exactly.
+
+The one real gap is UX, not capability: today's `ProviderTemplate` only
+prefills `wire_format`/`base_url`/`upstream_model` — a passthrough
+provider's `api_key` is always a blank prompt (CLI `Password` prompt,
+frontend password input), because every other template needs a *real*
+secret the operator must supply. OpenCode Free is the first template
+whose credential is a public, non-secret constant, so it's the first one
+worth prefilling:
+
+- **`ProviderTemplate`** (both `src/onboarding.rs` and
+  `frontend/src/pages/Providers.tsx`) gains an optional
+  `api_key: Option<&'static str>` / `api_key?: string` field, `None`/
+  absent for every existing template.
+- **CLI wizard**: the `Password` prompt for API key stays exactly as
+  written (dialoguer's `Password` widget can't show a visible default —
+  that would defeat the point of masking input), but after collecting it,
+  an empty/whitespace-only answer falls back to the chosen template's
+  `api_key` if one was set. Pressing Enter on an empty prompt is how the
+  operator accepts "use the free public key."
+- **Admin UI**: choosing the template prefills the (visible, editable)
+  API key field with `"public"` directly, the same way base_url and
+  upstream_model are already prefilled — no extra interaction beyond
+  picking the template and clicking Save.
+
+Preset values for the new template:
+
+| Label | wire_format | base_url | default upstream_model | default api_key |
+|---|---|---|---|---|
+| OpenCode Free | openai | `https://opencode.ai/zen/v1/chat/completions` | `deepseek-v4-flash-free` | `public` |
+
+`deepseek-v4-flash-free` (one of the eight explicitly `-free`-suffixed
+model ids in the catalog) is picked as the default specifically because
+it was the one used in the verification request above — the other ~53
+model ids in the free catalog (`gpt-5.4`, `claude-sonnet-5`, etc.) are
+almost certainly metered/quota'd behind OpenCode's own account system
+despite answering to the same `Bearer public` credential in these tests,
+and this plan makes no claim about their rate limits or terms of use.
+Operators wanting one of those can still type any model id into the
+free-text upstream-model field, exactly as with every other passthrough
+provider — the template only seeds a starting default known to work
+without further configuration.
 
 ## Non-goals
 

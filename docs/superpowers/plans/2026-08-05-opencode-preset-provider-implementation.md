@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Package is `router`, binary is `1router`. Build/test with `cargo build --offline` / `cargo test --offline`. Frontend tests: `npm --prefix frontend test` (or the repo's existing frontend test command — check `package.json` scripts if unsure).
-- **No migration, no new `ProviderKind`, no adapter change.** If a task starts reaching for `src/providers/adapter/http.rs` or `src/core/model.rs`, stop — that means the "OpenCode Free" no-auth tier is being pulled in scope, which the design spec (`docs/superpowers/specs/2026-08-05-opencode-preset-provider-design.md`, "Out of scope") explicitly defers.
+- **No migration, no new `ProviderKind`, no adapter change — including for OpenCode Free (Task 4).** Verified live against the real endpoint (see the design spec's "OpenCode Free" section): `Authorization: Bearer public` alone, no extra header, is sufficient. So OpenCode Free needs zero `src/providers/adapter/http.rs`/`src/core/model.rs` changes either — only a `ProviderTemplate.api_key` default and its CLI/UI prefill wiring.
 - Fixed upstream constants, used verbatim:
   - OpenAI-compatible endpoint: `https://opencode.ai/zen/go/v1/chat/completions`
   - Anthropic-compatible endpoint: `https://opencode.ai/zen/go/v1/messages`
@@ -302,6 +302,43 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ---
 
+### Task 4: OpenCode Free — a template with a default `api_key`
+
+Adds "OpenCode Free" as a third OpenCode preset, using
+`https://opencode.ai/zen/v1/chat/completions` with the public,
+non-secret `Bearer public` credential verified live (see the design
+spec's "OpenCode Free" section for the transcript). Unlike Tasks 1-2,
+this template also prefills the API key field, since its credential
+needs no operator secret.
+
+**Files:**
+- Modified: `src/onboarding.rs` (`ProviderTemplate.api_key: Option<&'static str>` field, the new template entry, the `add_passthrough_provider` API-key-prompt fallback, two new unit tests)
+- Modified: `frontend/src/pages/Providers.tsx` (`ProviderTemplate.api_key?: string`, the new template entry, `applyTemplate`'s prefill line)
+- Modified: `frontend/src/pages/Providers.form.test.tsx` (one new test)
+- Modified: `docs/superpowers/specs/2026-08-05-opencode-preset-provider-design.md` ("Out of scope" section rewritten to "OpenCode Free — verified in, not out")
+
+**What actually changed vs. the original "out of scope" call:**
+
+- [x] Verified live against `https://opencode.ai/zen/v1/chat/completions` and `.../zen/v1/models` that `Authorization: Bearer public` alone (no `x-opencode-client` header) returns 200 for both streaming and non-streaming chat completions and for model listing — the header the reference implementation sends is not load-bearing.
+- [x] `ProviderTemplate` gained `api_key: Option<&'static str>` (Rust) / `api_key?: string` (frontend), `None`/absent for every pre-existing template.
+- [x] New template entry, both sides: label `"OpenCode Free"`, wire_format `openai`, base_url `https://opencode.ai/zen/v1/chat/completions`, upstream_model `deepseek-v4-flash-free`, api_key `"public"`.
+- [x] CLI wizard: `add_passthrough_provider`'s `Password` prompt is unchanged (dialoguer can't show a visible default on a masked field), but a trimmed-empty answer now falls back to the chosen template's `api_key` — pressing Enter accepts the free public key; typing anything else overrides it. A one-line `println!` note tells the operator this before they're prompted.
+- [x] Admin UI: `applyTemplate` now prefills `form.api_key` with the chosen template's `api_key` when set, falling back to the previously-typed value otherwise (`chosen.api_key ?? current.api_key`) — still fully editable, matching every other prefilled field.
+- [x] Rust unit tests: `opencode_free_template_defaults_to_the_public_key` (template shape) and an assertion in `provider_templates_include_both_opencode_entries` that the two OpenCode Go templates still have `api_key: None`. `cargo test --offline --lib onboarding` — 24/24 pass.
+- [x] Frontend test: `choosing_the_opencode_free_template_prefills_the_public_api_key`. Full suite — 60/60 pass.
+- [x] End-to-end smoke test against the real endpoint through a locally running `1router` instance (provider created via `POST /admin/providers` with `api_key: "public"`, added to a pool, then `POST /v1/chat/completions` with `model: "deepseek-v4-flash-free"`) returned a real completion (`finish_reason: "stop"`, actual content) — proving the whole path (admin API → pool → `HttpAdapter` → real upstream) works, not just the two template arrays in isolation. Test provider/pool were deleted afterward.
+
+**Commit:**
+
+```bash
+git add src/onboarding.rs frontend/src/pages/Providers.tsx frontend/src/pages/Providers.form.test.tsx docs/superpowers/specs/2026-08-05-opencode-preset-provider-design.md docs/superpowers/plans/2026-08-05-opencode-preset-provider-implementation.md
+git commit -m "feat(providers): OpenCode Free preset (public, non-secret credential)
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage** — every section of
@@ -313,7 +350,7 @@ maps to a task:
 | Two `PROVIDER_TEMPLATES` entries (Rust) | Task 1 |
 | Two `PROVIDER_TEMPLATES` entries (frontend) + model suggestions | Task 2 |
 | Model discovery comes for free (unverified claim) | Task 3 Step 1 |
-| Out of scope: OpenCode Free | Global Constraints (explicit stop condition), not a task |
+| OpenCode Free — verified in, not out (`api_key` default + prefill) | Task 4 |
 
 **2. Placeholder scan** — no `TBD`; every URL, label, and default model id
 is given literally and matches the design spec's table exactly.

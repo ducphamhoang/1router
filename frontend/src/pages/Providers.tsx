@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { apiJson } from "../lib/apiClient";
 import { CodexOAuthPanel } from "../components/CodexOAuthPanel";
 import { CommandCodeKeyPanel } from "../components/CommandCodeKeyPanel";
+import { Modal } from "../components/Modal";
 
 type Provider = {
   id: string;
@@ -15,6 +16,20 @@ type Provider = {
 };
 
 type ProviderForm = Provider;
+
+// User-facing labels for backend enum values - the operator never needs to
+// know these values are "passthrough"/"openai"/"anthropic" internally, only
+// what kind of credential the provider needs and what shape its API speaks.
+const KIND_LABELS: Record<string, string> = {
+  passthrough: "API key",
+  oauth_codex: "OAuth (Codex / ChatGPT account)",
+  oauth_command_code: "OAuth (Command Code)"
+};
+
+const WIRE_FORMAT_LABELS: Record<string, string> = {
+  openai: "OpenAI-compatible",
+  anthropic: "Anthropic-compatible"
+};
 
 const emptyForm: ProviderForm = {
   id: "",
@@ -308,8 +323,8 @@ export function Providers() {
           {providers.map((provider) => (
             <tr key={provider.id}>
               <td>{provider.name}</td>
-              <td>{provider.wire_format}</td>
-              <td>{provider.kind}</td>
+              <td>{WIRE_FORMAT_LABELS[provider.wire_format] ?? provider.wire_format}</td>
+              <td>{KIND_LABELS[provider.kind] ?? provider.kind}</td>
               <td>{provider.upstream_model}</td>
               <td>{states[provider.id] ?? "checking"}</td>
               <td>
@@ -326,133 +341,135 @@ export function Providers() {
       </table>
 
       {modalOpen ? (
-        <form aria-label="Provider form" onSubmit={saveProvider}>
-          {!editing ? (
-            <>
-              <label>
-                Template <span className="optional">optional</span>
-                <select value={preset} onChange={(event) => applyTemplate(event.target.value)}>
-                  <option value="custom">Custom</option>
-                  {PROVIDER_TEMPLATES.map((t) => (
-                    <option key={t.label} value={t.label}>
-                      {t.label}
+        <Modal label={editing ? `Edit ${editing.name}` : "New provider"} onClose={() => setModalOpen(false)}>
+          <form aria-label="Provider form" onSubmit={saveProvider}>
+            {!editing ? (
+              <>
+                <label>
+                  Template <span className="optional">optional</span>
+                  <select value={preset} onChange={(event) => applyTemplate(event.target.value)}>
+                    <option value="custom">Custom</option>
+                    {PROVIDER_TEMPLATES.map((t) => (
+                      <option key={t.label} value={t.label}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Provider ID
+                  <input
+                    value={form.id}
+                    onChange={(event) => {
+                      setIdTouched(true);
+                      setForm({ ...form, id: event.target.value });
+                    }}
+                  />
+                </label>
+              </>
+            ) : null}
+            <label>
+              Name
+              <input
+                value={form.name}
+                onChange={(event) => {
+                  setNameTouched(true);
+                  setForm({ ...form, name: event.target.value });
+                }}
+              />
+            </label>
+            <label>
+              Kind
+              <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
+                <option value="passthrough">{KIND_LABELS.passthrough}</option>
+                <option value="oauth_codex">{KIND_LABELS.oauth_codex}</option>
+                <option value="oauth_command_code">{KIND_LABELS.oauth_command_code}</option>
+              </select>
+            </label>
+            {form.kind === "passthrough" ? (
+              <>
+                <label>
+                  API format
+                  <select
+                    value={form.wire_format}
+                    onChange={(event) => setForm({ ...form, wire_format: event.target.value })}
+                  >
+                    <option value="openai">{WIRE_FORMAT_LABELS.openai}</option>
+                    <option value="anthropic">{WIRE_FORMAT_LABELS.anthropic}</option>
+                  </select>
+                </label>
+                <label>
+                  Base URL
+                  <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+                </label>
+                <label>
+                  API key
+                  <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
+                </label>
+              </>
+            ) : (
+              <p className="hint">
+                This kind connects via {form.kind === "oauth_codex" ? "OAuth" : "an API key"}, not a base URL - save to
+                continue setup below.
+              </p>
+            )}
+            {editing && form.kind === "oauth_command_code" ? (
+              <CommandCodeKeyPanel
+                providerId={editing.id}
+                hasCredential={commandCodeCredentialConfirmed}
+                onCredentialSaved={(models) => {
+                  setCommandCodeCredentialConfirmed(true);
+                  setCommandCodeModels(models);
+                  setForm((current) =>
+                    models.length && (!current.upstream_model || current.upstream_model === "pending")
+                      ? { ...current, upstream_model: models[0] }
+                      : current
+                  );
+                }}
+              />
+            ) : null}
+            <label>
+              Upstream model
+              {form.kind === "oauth_command_code" && commandCodeModels.length > 0 ? (
+                <select
+                  value={form.upstream_model}
+                  onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
+                >
+                  {commandCodeModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
                     </option>
                   ))}
                 </select>
-              </label>
-              <label>
-                Provider ID
+              ) : (
                 <input
-                  value={form.id}
-                  onChange={(event) => {
-                    setIdTouched(true);
-                    setForm({ ...form, id: event.target.value });
-                  }}
+                  value={form.upstream_model}
+                  onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
+                  disabled={form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed}
                 />
-              </label>
-            </>
-          ) : null}
-          <label>
-            Name
-            <input
-              value={form.name}
-              onChange={(event) => {
-                setNameTouched(true);
-                setForm({ ...form, name: event.target.value });
-              }}
-            />
-          </label>
-          <label>
-            Kind
-            <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
-              <option value="passthrough">passthrough</option>
-              <option value="oauth_codex">oauth_codex</option>
-              <option value="oauth_command_code">oauth_command_code</option>
-            </select>
-          </label>
-          {form.kind === "passthrough" ? (
-            <>
-              <label>
-                Wire format
-                <select
-                  value={form.wire_format}
-                  onChange={(event) => setForm({ ...form, wire_format: event.target.value })}
-                >
-                  <option value="openai">openai</option>
-                  <option value="anthropic">anthropic</option>
-                </select>
-              </label>
-              <label>
-                Base URL
-                <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-              </label>
-              <label>
-                API key
-                <input value={form.api_key} onChange={(event) => setForm({ ...form, api_key: event.target.value })} />
-              </label>
-            </>
-          ) : (
-            <p className="hint">
-              This kind connects via {form.kind === "oauth_codex" ? "OAuth" : "an API key"}, not a base URL - save to
-              continue setup below.
-            </p>
-          )}
-          {editing && form.kind === "oauth_command_code" ? (
-            <CommandCodeKeyPanel
-              providerId={editing.id}
-              hasCredential={commandCodeCredentialConfirmed}
-              onCredentialSaved={(models) => {
-                setCommandCodeCredentialConfirmed(true);
-                setCommandCodeModels(models);
-                setForm((current) =>
-                  models.length && (!current.upstream_model || current.upstream_model === "pending")
-                    ? { ...current, upstream_model: models[0] }
-                    : current
-                );
-              }}
-            />
-          ) : null}
-          <label>
-            Upstream model
-            {form.kind === "oauth_command_code" && commandCodeModels.length > 0 ? (
-              <select
-                value={form.upstream_model}
-                onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
-              >
-                {commandCodeModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                value={form.upstream_model}
-                onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
-                disabled={form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed}
-              />
-            )}
-          </label>
-          {form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed ? (
-            <p className="hint">Log in or paste an API key above to fetch the model list.</p>
-          ) : null}
-          {!editing ? (
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={exposeAsPool}
-                onChange={(event) => setExposeAsPool(event.target.checked)}
-              />
-              Make it directly callable (creates a matching pool, e.g. call <code>{form.id || "<id>"}</code> as the
-              model)
+              )}
             </label>
-          ) : null}
-          {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
-          {error ? <p role="alert">{error}</p> : null}
-          <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
-            Save provider
-          </button>
-        </form>
+            {form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed ? (
+              <p className="hint">Log in or paste an API key above to fetch the model list.</p>
+            ) : null}
+            {!editing ? (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={exposeAsPool}
+                  onChange={(event) => setExposeAsPool(event.target.checked)}
+                />
+                Make it directly callable (creates a matching pool, e.g. call <code>{form.id || "<id>"}</code> as the
+                model)
+              </label>
+            ) : null}
+            {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
+            {error ? <p role="alert">{error}</p> : null}
+            <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
+              Save provider
+            </button>
+          </form>
+        </Modal>
       ) : null}
     </section>
   );

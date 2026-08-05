@@ -15,15 +15,24 @@ pub struct Selection<'a> {
 
 /// Resolve a client-requested `model` to what to actually call.
 ///
-/// Tries a real pool first (round-robin/failover across its members). If
-/// none matches, falls back to `<provider_id>/<model>` direct addressing -
-/// this exists so that a provider offering several models (e.g. DeepSeek's
-/// `deepseek-v4-flash`/`deepseek-v4-pro`) doesn't need one throwaway
-/// 1-member pool per model just to make each one callable; it's a single
-/// specific provider, so there's no failover across it, unlike a real pool.
-/// The split is unambiguous: pool ids and provider ids can never contain
-/// `/` (enforced by `validate_path_id` at creation), so this syntax can
-/// never collide with a real pool id.
+/// Resolution is a two-step process:
+///
+/// 1. Look up `model` as a real pool id. If a pool with that id exists,
+///    use it only if `pool.wire_format ==` the requested wire format;
+///    otherwise return `None`. There is **no** fallback to step 2 in that
+///    case.
+///
+/// 2. If no real pool matches by id, fall back to `<provider_id>/<model>`
+///    direct addressing in `select_direct_provider`, which splits on the
+///    first `/` via `str::split_once('/')`.
+///
+/// Direct addressing exists so that a provider offering several models
+/// (e.g. DeepSeek's `deepseek-v4-flash`/`deepseek-v4-pro`) doesn't need one
+/// throwaway 1-member pool per model just to make each one callable; it's a
+/// single specific provider, so there's no failover across it, unlike a real
+/// pool. The split is unambiguous: pool ids and provider ids can never
+/// contain `/` (enforced by `validate_path_id` at creation), so this syntax
+/// can never collide with a real pool id.
 pub fn select<'a>(
     snapshot: &'a ConfigSnapshot,
     pool_id: &str,
@@ -175,7 +184,7 @@ mod tests {
     #[test]
     fn direct_provider_addressing_translates_a_wire_format_mismatch() {
         // "a" is an OpenAi-wire-format passthrough provider; since
-        // `PassthroughAdapter` now translates, direct addressing from the
+        // `HttpAdapter` now translates, direct addressing from the
         // Anthropic route still resolves to it rather than falling through.
         let s = snap();
         let sel = select(&s, "a/some-model", WireFormat::Anthropic).unwrap();

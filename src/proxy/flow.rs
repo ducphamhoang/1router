@@ -15,21 +15,10 @@ use crate::proxy::backoff;
 use crate::proxy::error_response::wire_error;
 
 pub(crate) async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
-    if let Ok(Some(os)) = get_oauth_state(&state.db, &provider.id).await {
-        Credentials {
-            api_key: provider.api_key.clone(),
-            access_token: os.access_token,
-            refresh_token: os.refresh_token,
-            id_token: os.id_token,
-            access_expires_at: os.access_expires_at,
-            provider_data: os.provider_data,
-        }
-    } else {
-        Credentials {
-            api_key: provider.api_key.clone(),
-            ..Default::default()
-        }
-    }
+    Credentials::from_provider_and_oauth(
+        provider,
+        get_oauth_state(&state.db, &provider.id).await.ok().flatten(),
+    )
 }
 
 fn log(
@@ -137,20 +126,34 @@ pub async fn handle_proxy(
                     let mut st = state.runtime.entry(provider.id.clone()).or_default();
                     st.record_success();
                 }
-                log(
-                    &state,
-                    &pool_id,
-                    &provider.id,
-                    Some(status.as_u16() as i64),
-                    latency_ms,
-                    true,
-                );
                 match adapter
                     .transform_response(upstream, client_wanted_stream)
                     .await
                 {
-                    Ok(resp) => return resp,
+                    Ok(resp) => {
+                        log(
+                            &state,
+                            &pool_id,
+                            &provider.id,
+                            Some(status.as_u16() as i64),
+                            latency_ms,
+                            true,
+                        );
+                        return resp;
+                    }
                     Err(e) => {
+                        // The upstream HTTP status was a success, but the
+                        // body embedded an error (e.g. commandcode's
+                        // ndjson error events) — log the real outcome, not
+                        // the misleading raw status.
+                        log(
+                            &state,
+                            &pool_id,
+                            &provider.id,
+                            Some(status.as_u16() as i64),
+                            latency_ms,
+                            false,
+                        );
                         last_error_body = format!("response transform failed: {e}");
                         continue;
                     }
@@ -208,34 +211,139 @@ pub async fn handle_proxy(
                 match refreshed {
                     Ok(new_creds) => {
                         // Retry the same provider once with new credentials.
-                        if let Ok(retry_req) = adapter.build_request(&body, &new_creds).await {
-                            let start2 = Instant::now();
-                            if let Ok(resp2) = state.http.execute(retry_req).await {
+                        let retry_req = match adapter.build_request(&body, &new_creds).await {
+                            Ok(req) => req,
+                            Err(e) => {
+                                log(&state, &pool_id, &provider.id, None, 0, false);
+                                last_error_body = format!("retry request build failed: {e}");
+                                continue;
+                            }
+                        };
+                        let start2 = Instant::now();
+                        let resp2 = match state.http.execute(retry_req).await {
+                            Ok(resp) => resp,
+                            Err(e) => {
                                 let lat2 = start2.elapsed().as_millis() as i64;
-                                if resp2.status().is_success() {
-                                    {
-                                        let mut st =
-                                            state.runtime.entry(provider.id.clone()).or_default();
-                                        st.record_success();
+                                {
+                                    let mut st =
+                                        state.runtime.entry(provider.id.clone()).or_default();
+                                    let cooldown = backoff::cooldown_for(st.backoff_level + 1);
+                                    st.record_retryable(cooldown, Instant::now());
+                                }
+                                log(&state, &pool_id, &provider.id, None, lat2, false);
+                                last_error_body = format!("retry upstream request error: {e}");
+                                continue;
+                            }
+                        };
+                        let lat2 = start2.elapsed().as_millis() as i64;
+                        let retry_status = resp2.status();
+                        let retry_headers = resp2.headers().clone();
+                        let retry_class = adapter
+                            .classify_error(retry_status, &retry_headers)
+                            .await;
+
+                        match retry_class {
+                            ErrorClass::Success => {
+                                {
+                                    let mut st =
+                                        state.runtime.entry(provider.id.clone()).or_default();
+                                    st.record_success();
+                                }
+                                match adapter
+                                    .transform_response(resp2, client_wanted_stream)
+                                    .await
+                                {
+                                    Ok(response) => {
+                                        log(
+                                            &state,
+                                            &pool_id,
+                                            &provider.id,
+                                            Some(retry_status.as_u16() as i64),
+                                            lat2,
+                                            true,
+                                        );
+                                        return response;
                                     }
-                                    log(
-                                        &state,
-                                        &pool_id,
-                                        &provider.id,
-                                        Some(resp2.status().as_u16() as i64),
-                                        lat2,
-                                        true,
-                                    );
-                                    if let Ok(r) = adapter
-                                        .transform_response(resp2, client_wanted_stream)
-                                        .await
-                                    {
-                                        return r;
+                                    Err(e) => {
+                                        log(
+                                            &state,
+                                            &pool_id,
+                                            &provider.id,
+                                            Some(retry_status.as_u16() as i64),
+                                            lat2,
+                                            false,
+                                        );
+                                        last_error_body = format!(
+                                            "retry response transform failed: {e}"
+                                        );
                                     }
                                 }
                             }
+                            ErrorClass::NonRetryable => {
+                                {
+                                    let mut st =
+                                        state.runtime.entry(provider.id.clone()).or_default();
+                                    st.mark_misconfigured();
+                                }
+                                let text = resp2.text().await.unwrap_or_default();
+                                log(
+                                    &state,
+                                    &pool_id,
+                                    &provider.id,
+                                    Some(retry_status.as_u16() as i64),
+                                    lat2,
+                                    false,
+                                );
+                                last_error_body = text;
+                            }
+                            ErrorClass::AuthExpired => {
+                                {
+                                    let mut st =
+                                        state.runtime.entry(provider.id.clone()).or_default();
+                                    st.mark_misconfigured();
+                                }
+                                let text = resp2.text().await.unwrap_or_default();
+                                log(
+                                    &state,
+                                    &pool_id,
+                                    &provider.id,
+                                    Some(retry_status.as_u16() as i64),
+                                    lat2,
+                                    false,
+                                );
+                                last_error_body = text;
+                            }
+                            ErrorClass::Retryable { retry_after } => {
+                                let cooldown = retry_after.unwrap_or_else(|| {
+                                    if retry_status.is_server_error()
+                                        || retry_status == StatusCode::TOO_MANY_REQUESTS
+                                        || retry_status == StatusCode::REQUEST_TIMEOUT
+                                    {
+                                        let st =
+                                            state.runtime.entry(provider.id.clone()).or_default();
+                                        backoff::cooldown_for(st.backoff_level + 1)
+                                    } else {
+                                        Duration::from_secs(30)
+                                    }
+                                });
+                                {
+                                    let mut st =
+                                        state.runtime.entry(provider.id.clone()).or_default();
+                                    st.record_retryable(cooldown, Instant::now());
+                                }
+                                last_error_body = resp2.text().await.unwrap_or_default();
+                                log(
+                                    &state,
+                                    &pool_id,
+                                    &provider.id,
+                                    Some(retry_status.as_u16() as i64),
+                                    lat2,
+                                    false,
+                                );
+                            }
                         }
-                        last_error_body = "refresh succeeded but retry failed".into();
+                        // Each retry_class arm above already set last_error_body to the
+                        // real failure text; don't clobber it with a generic message.
                         continue;
                     }
                     Err(RefreshError::InvalidGrant) => {

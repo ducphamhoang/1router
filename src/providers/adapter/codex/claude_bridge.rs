@@ -741,7 +741,7 @@ pub fn claude_event_to_openai_chunk(
 /// block, still ending in the blank-line separator. Needed before either
 /// `convert_openai_sse_to_claude_sse` or `convert_claude_sse_to_openai_sse`
 /// when the upstream bytes come straight from a real HTTP response
-/// (`PassthroughAdapter`) rather than from the Codex/Command Code adapters'
+/// (`HttpAdapter`) rather than from the Codex/Command Code adapters'
 /// own envelope-translating stream, which already reframes as a side
 /// effect of that translation.
 pub fn reframe_sse_blocks<S, E>(upstream: S) -> impl futures::Stream<Item = Result<Bytes, E>>

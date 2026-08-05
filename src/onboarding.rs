@@ -429,7 +429,7 @@ pub async fn add_commandcode_provider(
 }
 
 use crate::providers::adapter::codex::oauth;
-use crate::providers::adapter::{adapter_for, Credentials};
+use crate::providers::adapter::adapter_for;
 use crate::providers::oauth_routes::complete_oauth_exchange;
 use crate::providers::queries::ProviderPatch;
 
@@ -445,25 +445,6 @@ fn probe_body() -> bytes::Bytes {
         }))
         .unwrap(),
     )
-}
-
-/// Mirrors `proxy::flow::credentials_for` (private there); five field copies
-/// is not worth a cross-module extraction.
-async fn credentials_for(db: &sqlx::SqlitePool, provider: &Provider) -> Credentials {
-    match provider_queries::get_oauth_state(db, &provider.id).await {
-        Ok(Some(os)) => Credentials {
-            api_key: provider.api_key.clone(),
-            access_token: os.access_token,
-            refresh_token: os.refresh_token,
-            id_token: os.id_token,
-            access_expires_at: os.access_expires_at,
-            provider_data: os.provider_data,
-        },
-        _ => Credentials {
-            api_key: provider.api_key.clone(),
-            ..Default::default()
-        },
-    }
 }
 
 pub(crate) async fn persist_probe_result(
@@ -503,7 +484,13 @@ pub async fn probe_and_set_model(
     http: &reqwest::Client,
     provider: &mut Provider,
 ) -> anyhow::Result<ProbeOutcome> {
-    let creds = credentials_for(db, provider).await;
+    let creds = crate::providers::adapter::Credentials::from_provider_and_oauth(
+        provider,
+        provider_queries::get_oauth_state(db, &provider.id)
+            .await
+            .ok()
+            .flatten(),
+    );
     let body = probe_body();
     println!(
         "Probing which model this ChatGPT account accepts \

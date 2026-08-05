@@ -74,7 +74,7 @@ describe("Providers", () => {
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
     await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
     await userEvent.type(screen.getByLabelText("Name"), "anthropic");
-    await userEvent.selectOptions(screen.getByLabelText("Wire format"), "anthropic");
+    await userEvent.selectOptions(screen.getByLabelText("API format"), "anthropic");
     await userEvent.selectOptions(screen.getByLabelText("Kind"), "passthrough");
     await userEvent.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com");
     await userEvent.type(screen.getByLabelText("API key"), "secret");
@@ -95,7 +95,7 @@ describe("Providers", () => {
   it("offers_commandcode_kind_in_the_dropdown", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
-    expect(screen.getByRole("option", { name: "oauth_command_code" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "OAuth (Command Code)" })).toBeInTheDocument();
   });
 
   it("choosing_a_template_prefills_wire_format_base_url_and_model_but_stays_editable", async () => {
@@ -105,7 +105,7 @@ describe("Providers", () => {
     await userEvent.selectOptions(screen.getByLabelText(/Template/), "DeepSeek (Anthropic-compatible)");
 
     expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
-    expect(screen.getByLabelText("Wire format")).toHaveValue("anthropic");
+    expect(screen.getByLabelText("API format")).toHaveValue("anthropic");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.deepseek.com/anthropic/v1/messages");
     expect(screen.getByLabelText("Upstream model")).toHaveValue("deepseek-flash");
     expect(screen.getByLabelText("Provider ID")).toHaveValue("deepseek-anthropic");
@@ -132,7 +132,7 @@ describe("Providers", () => {
     expect(screen.getByLabelText("Kind")).toHaveValue("oauth_command_code");
     expect(screen.getByLabelText("Provider ID")).toHaveValue("command-code");
     expect(screen.getByLabelText("Name")).toHaveValue("Command Code");
-    expect(screen.queryByLabelText("Wire format")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("API format")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
   });
@@ -191,7 +191,7 @@ describe("Providers", () => {
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
     await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
     await userEvent.type(screen.getByLabelText("Name"), "anthropic");
-    await userEvent.selectOptions(screen.getByLabelText("Wire format"), "anthropic");
+    await userEvent.selectOptions(screen.getByLabelText("API format"), "anthropic");
     await userEvent.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com");
     await userEvent.type(screen.getByLabelText("API key"), "secret");
     await userEvent.type(screen.getByLabelText("Upstream model"), "claude-sonnet-4");

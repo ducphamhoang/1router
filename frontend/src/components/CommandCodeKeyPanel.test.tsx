@@ -238,4 +238,46 @@ describe("CommandCodeKeyPanel", () => {
     ).toBeInTheDocument();
     await vi.waitFor(() => expect(onCredentialSaved).toHaveBeenCalledWith(["cc-large"]));
   });
+
+  it("shows_a_masked_placeholder_for_an_existing_key_and_revalidates_it_without_resubmitting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers/prov_1/commandcode/key") {
+          throw new Error("must not re-save the key when the placeholder is left untouched");
+        }
+        if (url === "/admin/providers/prov_1/list-models") {
+          return new Response(JSON.stringify({ ok: true, models: ["cc-large"] }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/validate-model" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true, status: 200 }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<CommandCodeKeyPanel providerId="prov_1" hasCredential={true} onCredentialSaved={vi.fn()} />);
+
+    const input = screen.getByLabelText("API key") as HTMLInputElement;
+    expect(input.value).toBe("••••••••••••");
+    expect(screen.getByRole("button", { name: "Validate key" })).not.toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Validate key" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Command Code key validated (tested against cc-large).");
+  });
+
+  it("clears_the_placeholder_on_focus_so_a_new_key_can_be_typed", async () => {
+    render(<CommandCodeKeyPanel providerId="prov_1" hasCredential={true} onCredentialSaved={vi.fn()} />);
+
+    const input = screen.getByLabelText("API key") as HTMLInputElement;
+    expect(input.value).toBe("••••••••••••");
+
+    await userEvent.click(input);
+    expect(input.value).toBe("");
+
+    await userEvent.type(input, "new-secret");
+    expect(input.value).toBe("new-secret");
+  });
 });

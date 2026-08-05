@@ -89,9 +89,17 @@ impl ProviderAdapter for CommandCodeAdapter {
             );
             if self.client_wire == WireFormat::Anthropic {
                 let claude = claude_bridge::convert_openai_sse_to_claude_sse(openai);
-                return Ok((status, Body::from_stream(claude)).into_response());
+                let mut response = (status, Body::from_stream(claude)).into_response();
+                response
+                    .headers_mut()
+                    .insert("content-type", "text/event-stream".parse().unwrap());
+                return Ok(response);
             }
-            return Ok((status, Body::from_stream(openai)).into_response());
+            let mut response = (status, Body::from_stream(openai)).into_response();
+            response
+                .headers_mut()
+                .insert("content-type", "text/event-stream".parse().unwrap());
+            return Ok(response);
         }
         let body = upstream
             .text()

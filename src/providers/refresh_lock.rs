@@ -32,14 +32,7 @@ pub async fn refresh_and_persist(
     // with invalid_grant - reuse the fresh result instead of refreshing again.
     if let Ok(Some(current)) = get_oauth_state(&state.db, &provider.id).await {
         if current.access_token.is_some() && current.access_token != creds.access_token {
-            return Ok(Credentials {
-                api_key: provider.api_key.clone(),
-                access_token: current.access_token,
-                refresh_token: current.refresh_token,
-                id_token: current.id_token,
-                access_expires_at: current.access_expires_at,
-                provider_data: current.provider_data,
-            });
+            return Ok(Credentials::from_provider_and_oauth(provider, Some(current)));
         }
     }
 

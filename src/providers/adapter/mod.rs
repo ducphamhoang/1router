@@ -1,13 +1,13 @@
 pub mod codex;
 pub mod commandcode;
-pub mod passthrough;
+pub mod http;
 
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
-use crate::core::model::{Provider, ProviderKind, WireFormat};
+use crate::core::model::{OAuthState, Provider, ProviderKind, WireFormat};
 
 #[derive(Clone, Debug, Default)]
 pub struct Credentials {
@@ -17,6 +17,25 @@ pub struct Credentials {
     pub id_token: Option<String>,
     pub access_expires_at: Option<DateTime<Utc>>,
     pub provider_data: serde_json::Value,
+}
+
+impl Credentials {
+    pub fn from_provider_and_oauth(provider: &Provider, oauth: Option<OAuthState>) -> Self {
+        match oauth {
+            Some(oauth) => Self {
+                api_key: provider.api_key.clone(),
+                access_token: oauth.access_token,
+                refresh_token: oauth.refresh_token,
+                id_token: oauth.id_token,
+                access_expires_at: oauth.access_expires_at,
+                provider_data: oauth.provider_data,
+            },
+            None => Self {
+                api_key: provider.api_key.clone(),
+                ..Default::default()
+            },
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -50,7 +69,7 @@ pub fn adapter_for_wire(
     client_wire: WireFormat,
 ) -> Box<dyn ProviderAdapter> {
     match provider.kind {
-        ProviderKind::Passthrough => Box::new(passthrough::PassthroughAdapter::new(
+        ProviderKind::Passthrough => Box::new(http::HttpAdapter::new(
             provider.clone(),
             http,
             client_wire,

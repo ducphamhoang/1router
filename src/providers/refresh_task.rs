@@ -36,14 +36,7 @@ pub async fn refresh_due_providers(state: &AppState) {
             Ok(Some(os)) => os,
             _ => continue,
         };
-        let creds = Credentials {
-            api_key: None,
-            access_token: os.access_token,
-            refresh_token: os.refresh_token,
-            id_token: os.id_token,
-            access_expires_at: os.access_expires_at,
-            provider_data: os.provider_data,
-        };
+        let creds = Credentials::from_provider_and_oauth(provider, Some(os));
         let adapter = adapter_for(provider, state.http.clone());
         if !adapter.needs_refresh(&creds) {
             continue;

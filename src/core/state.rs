@@ -1,9 +1,11 @@
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use sqlx::SqlitePool;
 
-use crate::admin::auth::rate_limit::LoginAttemptMap;
 use crate::core::config::Config;
 use crate::core::error::AppError;
 use crate::core::model::{LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
@@ -17,6 +19,14 @@ pub struct ConfigSnapshot {
 
 pub type RequestLogSender = tokio::sync::mpsc::Sender<LogEntry>;
 pub type RefreshLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+pub type LoginAttemptMap = Arc<DashMap<IpAddr, AttemptState>>;
+
+#[derive(Clone, Debug, Default)]
+pub struct AttemptState {
+    pub failures: u32,
+    pub locked_until: Option<Instant>,
+}
+
 /// In-memory only, by design: a cache of each provider's last successful
 /// `GET .../models` call (populated on provider creation and by the
 /// explicit "fetch models" actions), so `GET /v1/models` can list

@@ -37,6 +37,13 @@ const CHEAP_MODEL_HINTS = ["deepseek", "haiku", "mini", "flash", "lite", "small"
 // calls.
 const MAX_VALIDATION_ATTEMPTS = 3;
 
+// Stand-in shown in the key input when a credential is already saved - the
+// server never sends the real key back, so this is purely a visual "there's
+// something here" cue. Focusing the field clears it so the operator types a
+// fresh key; leaving it untouched and clicking Validate re-checks the key
+// already on file instead of overwriting it with this placeholder text.
+const MASKED_KEY_PLACEHOLDER = "••••••••••••";
+
 function orderModelsCheapFirst(models: string[]): string[] {
   const rank = (model: string) => {
     const lower = model.toLowerCase();
@@ -60,6 +67,7 @@ export function CommandCodeKeyPanel({
   onCredentialSaved: (models: string[]) => void;
 }) {
   const [apiKey, setApiKey] = useState("");
+  const [showingPlaceholder, setShowingPlaceholder] = useState(hasCredential);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
@@ -81,6 +89,19 @@ export function CommandCodeKeyPanel({
     // triggers discovery from loginWithBrowser/validateKey below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Show the masked placeholder whenever a credential is on file and the
+  // operator hasn't started typing a replacement - covers both opening Edit
+  // on a provider that already has a key, and a browser login landing while
+  // this panel is mounted.
+  useEffect(() => {
+    if (hasCredential) {
+      setShowingPlaceholder(true);
+    } else {
+      setShowingPlaceholder(false);
+      setApiKey("");
+    }
+  }, [hasCredential]);
 
   async function discoverModels(): Promise<string[]> {
     try {
@@ -143,27 +164,32 @@ export function CommandCodeKeyPanel({
     }
   }
 
-  // Stores the pasted key, discovers Command Code's model list, then sends
-  // one real minimal chat request through this provider's own adapter
-  // (the same check `/admin/providers/:id/validate-model` does for manually
-  // typed models elsewhere) to actually confirm the key authenticates -
-  // list-models alone can't tell us that, since it's a public, unauthenticated
-  // endpoint that returns the same list regardless of whether the key works.
+  // If the operator left the masked placeholder untouched, this validates
+  // the key already on file; otherwise it stores the newly pasted key first,
+  // then discovers Command Code's model list and sends one real minimal
+  // chat request through this provider's own adapter (the same check
+  // `/admin/providers/:id/validate-model` does for manually typed models
+  // elsewhere) to actually confirm the key authenticates - list-models alone
+  // can't tell us that, since it's a public, unauthenticated endpoint that
+  // returns the same list regardless of whether the key works.
   async function validateKey() {
+    const revalidatingExisting = showingPlaceholder && hasCredential;
     const key = apiKey.trim();
     setError(null);
     setMessage(null);
-    if (!key) {
+    if (!revalidatingExisting && !key) {
       setError("Enter an API key first.");
       return;
     }
     setValidating(true);
     try {
-      await apiJson(`/admin/providers/${encodeURIComponent(providerId)}/commandcode/key`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: key })
-      });
+      if (!revalidatingExisting) {
+        await apiJson(`/admin/providers/${encodeURIComponent(providerId)}/commandcode/key`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: key })
+        });
+      }
 
       const models = await discoverModels();
       if (models.length === 0) {
@@ -193,6 +219,7 @@ export function CommandCodeKeyPanel({
       }
 
       setApiKey("");
+      setShowingPlaceholder(true);
       setMessage(`Command Code key validated (tested against ${validatedModel}).`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Command Code key validation failed.");
@@ -216,9 +243,28 @@ export function CommandCodeKeyPanel({
       <p>Or paste an existing API key:</p>
       <label>
         API key
-        <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+        <input
+          type="password"
+          value={showingPlaceholder ? MASKED_KEY_PLACEHOLDER : apiKey}
+          onFocus={() => {
+            if (showingPlaceholder) {
+              setShowingPlaceholder(false);
+              setApiKey("");
+            }
+          }}
+          onBlur={() => {
+            if (!apiKey.trim() && hasCredential) {
+              setShowingPlaceholder(true);
+            }
+          }}
+          onChange={(event) => setApiKey(event.target.value)}
+        />
       </label>
-      <button type="button" onClick={validateKey} disabled={validating || !apiKey.trim()}>
+      <button
+        type="button"
+        onClick={validateKey}
+        disabled={validating || (!showingPlaceholder && !apiKey.trim())}
+      >
         {validating ? "Validating..." : "Validate key"}
       </button>
       {message ? <p role="status">{message}</p> : null}

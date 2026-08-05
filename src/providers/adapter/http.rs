@@ -11,13 +11,18 @@ use crate::proxy::backoff;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-pub struct PassthroughAdapter {
+/// Adapter for `ProviderKind::Passthrough` (config-only OpenAI/Anthropic
+/// providers, as opposed to the OAuth-based Codex/Command Code kinds).
+/// Despite the kind's name, this only passes bytes through untouched when
+/// `client_wire == provider.wire_format` (see `translates()`); otherwise it
+/// runs full bidirectional wire-format translation via `claude_bridge`.
+pub struct HttpAdapter {
     provider: Provider,
     http: reqwest::Client,
     client_wire: WireFormat,
 }
 
-impl PassthroughAdapter {
+impl HttpAdapter {
     pub fn new(provider: Provider, http: reqwest::Client, client_wire: WireFormat) -> Self {
         Self {
             provider,
@@ -32,7 +37,7 @@ impl PassthroughAdapter {
 }
 
 #[async_trait::async_trait]
-impl ProviderAdapter for PassthroughAdapter {
+impl ProviderAdapter for HttpAdapter {
     async fn build_request(
         &self,
         client_body: &Bytes,
@@ -183,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_rewrites_model_and_sets_auth() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
+        let a = HttpAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "gpt-4o", "messages": []
@@ -209,7 +214,7 @@ mod tests {
     async fn build_request_uses_anthropic_headers_for_anthropic_wire_format() {
         let mut p = prov();
         p.wire_format = WireFormat::Anthropic;
-        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::Anthropic);
+        let a = HttpAdapter::new(p, reqwest::Client::new(), WireFormat::Anthropic);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({ "model": "claude", "messages": [] })).unwrap(),
         );
@@ -232,13 +237,13 @@ mod tests {
 
     #[test]
     fn needs_refresh_is_false() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
+        let a = HttpAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
         assert!(!a.needs_refresh(&creds()));
     }
 
     #[tokio::test]
     async fn build_request_translates_anthropic_client_to_openai_provider() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
+        let a = HttpAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "claude-x", "system": "be nice", "messages": [{"role": "user", "content": "hi"}]
@@ -258,7 +263,7 @@ mod tests {
     async fn build_request_translates_openai_client_to_anthropic_provider() {
         let mut p = prov();
         p.wire_format = WireFormat::Anthropic;
-        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let a = HttpAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]
@@ -284,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn transform_response_translates_openai_json_to_claude_when_client_is_anthropic() {
-        let a = PassthroughAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
+        let a = HttpAdapter::new(prov(), reqwest::Client::new(), WireFormat::Anthropic);
         let openai_json = serde_json::json!({
             "id": "resp_1", "model": "real-model",
             "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]
@@ -306,7 +311,7 @@ mod tests {
     async fn transform_response_translates_claude_json_to_openai_when_client_is_openai() {
         let mut p = prov();
         p.wire_format = WireFormat::Anthropic;
-        let a = PassthroughAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let a = HttpAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
         let claude_json = serde_json::json!({
             "id": "msg_1", "model": "real-model", "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "hello"}]

@@ -65,7 +65,7 @@ impl ProviderAdapter for CodexAdapter {
         let mut transformed = transform::transform_request(&client_json, &session_id);
         // The client's `model` is the pool id, not a real Codex model name -
         // rewrite to the provider's actual upstream model, matching
-        // PassthroughAdapter's behavior (confirmed via a real-account 400:
+        // HttpAdapter's behavior (confirmed via a real-account 400:
         // "'<pool-id>' model is not supported when using Codex with a ChatGPT
         // account").
         if let Some(obj) = transformed.as_object_mut() {
@@ -117,9 +117,17 @@ impl ProviderAdapter for CodexAdapter {
                 transform::convert_sse_stream(stream, self.provider.upstream_model.clone());
             if is_anthropic {
                 let claude_sse = claude_bridge::convert_openai_sse_to_claude_sse(openai_chunks);
-                return Ok((status, Body::from_stream(claude_sse)).into_response());
+                let mut response = (status, Body::from_stream(claude_sse)).into_response();
+                response
+                    .headers_mut()
+                    .insert("content-type", "text/event-stream".parse().unwrap());
+                return Ok(response);
             }
-            return Ok((status, Body::from_stream(openai_chunks)).into_response());
+            let mut response = (status, Body::from_stream(openai_chunks)).into_response();
+            response
+                .headers_mut()
+                .insert("content-type", "text/event-stream".parse().unwrap());
+            return Ok(response);
         }
         // aggregate: client did not ask to stream, but Codex is forced to stream upstream
         let text = upstream

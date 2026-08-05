@@ -1,18 +1,11 @@
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub type LoginAttemptMap = Arc<DashMap<IpAddr, AttemptState>>;
+pub use crate::core::state::{AttemptState, LoginAttemptMap};
 
 pub const FAILURE_THRESHOLD: u32 = 5;
 pub const MAX_LOCKOUT: Duration = Duration::from_secs(5 * 60);
-
-#[derive(Clone, Debug, Default)]
-pub struct AttemptState {
-    pub failures: u32,
-    pub locked_until: Option<Instant>,
-}
 
 /// Mirrors proxy::backoff::cooldown_for: 2s * 2^(n-1), capped.
 pub fn cooldown_for(failures_over_threshold: u32) -> Duration {

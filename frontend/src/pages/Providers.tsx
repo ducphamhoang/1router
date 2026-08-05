@@ -222,6 +222,15 @@ export function Providers() {
   function applyTemplate(label: string) {
     setPreset(label);
     if (label === "custom") {
+      // Switching back to "Custom" must clear whatever the previously
+      // chosen template prefilled - otherwise the form silently keeps
+      // showing that template's kind/wire_format/base_url/model/api_key
+      // while the dropdown itself claims "Custom".
+      setForm((current) => ({
+        ...emptyForm,
+        id: idTouched ? current.id : emptyForm.id,
+        name: nameTouched ? current.name : emptyForm.name
+      }));
       return;
     }
     const chosen = PROVIDER_TEMPLATES.find((template) => template.label === label);

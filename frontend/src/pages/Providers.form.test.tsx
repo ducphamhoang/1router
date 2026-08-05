@@ -123,6 +123,23 @@ describe("Providers", () => {
     expect(screen.getByLabelText("Provider ID")).toHaveValue("my-deepseek");
   });
 
+  it("switching_back_to_custom_clears_the_previous_templates_fields", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "OpenCode Free");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://opencode.ai/zen/v1/chat/completions");
+    expect(screen.getByLabelText("API key")).toHaveValue("public");
+
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Custom");
+
+    expect(screen.getByLabelText("Base URL")).toHaveValue("");
+    expect(screen.getByLabelText("Upstream model")).toHaveValue("");
+    expect(screen.getByLabelText("API key")).toHaveValue("");
+    expect(screen.getByLabelText("Kind")).toHaveValue("passthrough");
+    expect(screen.getByLabelText("API format")).toHaveValue("openai");
+  });
+
   it("choosing_the_opencode_openai_template_prefills_its_fields", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

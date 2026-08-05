@@ -309,6 +309,10 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     }
     let typed_api_key: String = Password::with_theme(&theme())
         .with_prompt("API key (input hidden)")
+        // dialoguer rejects an empty submission and reprompts unless told
+        // otherwise - needed here so pressing Enter (accepting a template's
+        // default api_key, e.g. OpenCode Free's "public") actually works.
+        .allow_empty_password(true)
         .interact()?;
     let api_key = if typed_api_key.trim().is_empty() {
         preset

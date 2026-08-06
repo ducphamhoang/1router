@@ -78,10 +78,28 @@ fn collect_files(dir: &str, out: &mut Vec<std::path::PathBuf>) {
 }
 
 fn which(bin: &str) -> Option<std::path::PathBuf> {
+    // On Windows, `node`/`npm` on PATH are actually `node.exe`/`npm.cmd` (npm
+    // ships as a shell shim, not a .exe) - an exact-name check always misses
+    // them even when they're right there, so also try PATHEXT's extensions
+    // (falling back to the common ones if PATHEXT is unset, e.g. non-cmd
+    // shells).
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string())
+            .split(';')
+            .map(|s| s.to_lowercase())
+            .chain(std::iter::once(String::new()))
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
-            let candidate = dir.join(bin);
-            candidate.is_file().then_some(candidate)
+            extensions.iter().find_map(|ext| {
+                let candidate = dir.join(format!("{bin}{ext}"));
+                candidate.is_file().then_some(candidate)
+            })
         })
     })
 }

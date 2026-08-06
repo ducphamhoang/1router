@@ -129,6 +129,36 @@ describe("Providers", () => {
     expect(screen.getByLabelText("Provider ID")).toHaveValue("my-deepseek");
   });
 
+  it("suggests_a_numbered_id_when_the_templates_default_id_is_already_taken", async () => {
+    // The fixture's only provider has id "prov_1" (not "openai") so this
+    // exercises the collision path with a second provider whose id really
+    // does match the OpenAI template's suggestedId.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([...providers, { ...providers[0], id: "openai", name: "openai" }]), {
+            status: 200
+          });
+        }
+        if (url === "/admin/providers/openai/state") {
+          return new Response(JSON.stringify({ provider_id: "openai", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/state") {
+          return new Response(JSON.stringify({ provider_id: "prov_1", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "OpenAI");
+
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("openai-2");
+  });
+
   it("switching_back_to_custom_clears_the_previous_templates_fields", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

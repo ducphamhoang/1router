@@ -230,9 +230,30 @@ export function Providers() {
     };
   }, [providers]);
 
+  // Lets picking the same template twice (e.g. two OpenAI keys) suggest
+  // "openai-2", "openai-3", ... instead of a ready-made id that just bounces
+  // off a 409 Conflict on save.
+  function uniqueSuggestedId(base: string): string {
+    const ids = new Set(providers.map((p) => p.id));
+    if (!ids.has(base)) {
+      return base;
+    }
+    let n = 2;
+    while (ids.has(`${base}-${n}`)) {
+      n += 1;
+    }
+    return `${base}-${n}`;
+  }
+
   function openNew() {
     setEditing(null);
     setForm(emptyForm);
+    // "Custom" (no template applied) stays the default here - the operator
+    // still has to open this dropdown either way, so unlike the CLI wizard
+    // (where pressing Enter accepts whatever is highlighted) there's no
+    // "fast path" argument for pre-picking a template; it would only mean
+    // pre-filled id/name text sitting in the fields to clear first. "Custom"
+    // is still last in the dropdown list, though - see PROVIDER_TEMPLATES.
     setPreset("custom");
     setExposeAsPool(true);
     setIdTouched(false);
@@ -267,7 +288,7 @@ export function Providers() {
       ...current,
       kind: chosen.kind,
       wire_format: chosen.wire_format,
-      id: idTouched ? current.id : chosen.suggestedId,
+      id: idTouched ? current.id : uniqueSuggestedId(chosen.suggestedId),
       name: nameTouched ? current.name : chosen.label,
       base_url: chosen.base_url ?? "",
       api_key: chosen.kind === "passthrough" ? (chosen.api_key ?? current.api_key) : "",
@@ -488,12 +509,12 @@ export function Providers() {
                 <label>
                   Template <span className="optional">optional</span>
                   <select value={preset} onChange={(event) => applyTemplate(event.target.value)}>
-                    <option value="custom">Custom</option>
                     {PROVIDER_TEMPLATES.map((t) => (
                       <option key={t.label} value={t.label}>
                         {t.label}
                       </option>
                     ))}
+                    <option value="custom">Custom</option>
                   </select>
                 </label>
                 <label>
@@ -582,6 +603,11 @@ export function Providers() {
                   const canValidate = editing
                     ? true
                     : Boolean(form.base_url?.trim() && form.upstream_model.trim());
+                  if (!canValidate) {
+                    // Nothing to send yet - don't just disable the button,
+                    // don't offer it at all until there's a base_url + model.
+                    return null;
+                  }
                   return (
                     <>
                       <p className="hint">
@@ -594,7 +620,7 @@ export function Providers() {
                           type="button"
                           className="btn-ghost"
                           onClick={() => void validateProvider()}
-                          disabled={validation?.state === "checking" || !canValidate}
+                          disabled={validation?.state === "checking"}
                         >
                           Validate
                         </button>

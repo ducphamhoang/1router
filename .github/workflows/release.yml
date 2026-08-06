@@ -24,6 +24,8 @@ jobs:
             target: x86_64-apple-darwin
           - runner: macos-14
             target: aarch64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +47,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
+      - name: Strip binary (Linux/macOS legs only)
+        if: ${{ !startsWith(matrix.runner, 'windows') }}
         run: |
           BIN="target/${{ matrix.target }}/release/1router"
           case "${{ matrix.target }}" in
@@ -53,16 +56,24 @@ jobs:
             *)              strip "$BIN" ;;
           esac
 
-      - name: Package tarball
+      - name: Package tarball (Linux/macOS legs only)
+        if: ${{ !startsWith(matrix.runner, 'windows') }}
         run: |
           tar -czf "1router-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" 1router
+
+      - name: Package zip (Windows leg only)
+        if: ${{ startsWith(matrix.runner, 'windows') }}
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/1router.exe" `
+            -DestinationPath "1router-${{ github.ref_name }}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: 1router-${{ github.ref_name }}-${{ matrix.target }}
-          path: 1router-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          path: 1router-${{ github.ref_name }}-${{ matrix.target }}.*
           retention-days: 7
 
   release:
@@ -81,7 +92,7 @@ jobs:
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create or update GitHub Release
@@ -91,6 +102,7 @@ jobs:
           name: ${{ github.ref_name }}
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS
 
   # Depends on `release` (not parallel with it) so ghcr.io/.../1router:latest

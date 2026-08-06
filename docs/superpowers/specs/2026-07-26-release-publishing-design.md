@@ -33,7 +33,7 @@ advertise a version with no corresponding, complete GitHub Release.
 
 ### `binaries`
 
-Matrix of 4 native (runner, target) pairs — no cross-compilation:
+Matrix of 5 native (runner, target) pairs — no cross-compilation:
 
 | Runner | Target |
 |---|---|
@@ -41,12 +41,14 @@ Matrix of 4 native (runner, target) pairs — no cross-compilation:
 | `ubuntu-24.04-arm` | `aarch64-unknown-linux-musl` |
 | `macos-15-intel` | `x86_64-apple-darwin` |
 | `macos-14` | `aarch64-apple-darwin` |
+| `windows-2022` | `x86_64-pc-windows-msvc` |
 
 (`ubuntu-24.04` is pinned explicitly rather than `ubuntu-latest`, so the
 release build environment doesn't silently drift when GitHub rolls the
 `-latest` alias forward. `macos-15-intel` replaces the earlier
 `macos-13` — GitHub's Intel macOS runner label — since `macos-13` is not
-a currently supported hosted-runner image.)
+a currently supported hosted-runner image. `windows-2022` is likewise
+pinned rather than `windows-latest`.)
 
 Permissions: `contents: read` (checkout only; no packages/releases
 access needed at this stage).
@@ -54,10 +56,19 @@ access needed at this stage).
 Each leg:
 1. Checkout, install the Rust target via `rustup target add`.
 2. On the two Linux legs, `apt-get install musl-tools` (static musl libc
-   needed for the `-musl` targets; not required on macOS).
+   needed for the `-musl` targets; not required on macOS/Windows).
 3. `cargo build --release --target <target>` — network-enabled, unlike
    the Codex sandbox's `--offline` builds elsewhere in this project.
-4. Strip the binary, package as `1router-<tag>-<target>.tar.gz`.
+   No cross-compilation toolchain is needed for the Windows leg either:
+   `reqwest`'s `rustls-tls` feature (no OpenSSL) and `sqlx`'s bundled
+   vendored SQLite both build cleanly under MSVC, and the two Unix-only
+   code paths (`src/core/config.rs`'s 0600 secret-file permissions,
+   `src/main.rs`'s SIGTERM handler) already have `#[cfg(not(unix))]`
+   fallbacks.
+4. Strip the binary (Linux/macOS) — skipped on Windows, MSVC doesn't
+   need it — then package: `1router-<tag>-<target>.tar.gz` on
+   Linux/macOS, `1router-<tag>-<target>.zip` (via `Compress-Archive`)
+   on Windows.
 5. Upload as a workflow artifact, `retention-days: 7` (short-lived — the
    GitHub Release, not the workflow artifact, is the durable
    distribution channel).
@@ -68,10 +79,10 @@ and a release is all-platforms-or-nothing rather than partial.
 ### `release`
 
 Needs `binaries`. Permissions: `contents: write` (to create the Release
-and upload assets). Downloads all 4 artifacts, runs
-`sha256sum * > SHA256SUMS`, then creates/updates the GitHub Release for
-the tag via `softprops/action-gh-release`, attaching the 4 tarballs plus
-`SHA256SUMS`.
+and upload assets). Downloads all 5 artifacts, runs
+`sha256sum *.tar.gz *.zip > SHA256SUMS`, then creates/updates the GitHub
+Release for the tag via `softprops/action-gh-release`, attaching the 4
+tarballs, the 1 Windows zip, plus `SHA256SUMS`.
 
 ### `docker`
 
@@ -147,7 +158,6 @@ tag push (e.g. `v0.1.0`):
 
 ## Out of scope (v1)
 
-- Windows binaries.
 - Automatic Cargo.toml version bumping / changelog generation.
 - Automatic retry of a failed `docker` job on tag push.
 - Failing (rather than overwriting) on re-tagging an existing version.

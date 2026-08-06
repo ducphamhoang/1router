@@ -28,11 +28,27 @@ fn main() {
 }
 
 fn run(cmd: &str, args: &[&str]) {
-    let status = std::process::Command::new(cmd)
-        .args(args)
-        .current_dir("frontend")
-        .status()
-        .unwrap_or_else(|e| panic!("failed to spawn `{cmd} {}`: {e}", args.join(" ")));
+    // On Windows, npm (and any other npm-ecosystem CLI) is installed as a
+    // `.cmd` shim - a batch script, not a PE executable. CreateProcess (what
+    // std::process::Command calls under the hood) can only launch batch
+    // files through cmd.exe, not directly, so `Command::new("npm")` fails
+    // with "program not found" even though `npm.cmd` is right there on PATH.
+    // Route through `cmd /C` on Windows; other platforms run the binary
+    // directly as before.
+    let status = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(cmd)
+            .args(args)
+            .current_dir("frontend")
+            .status()
+    } else {
+        std::process::Command::new(cmd)
+            .args(args)
+            .current_dir("frontend")
+            .status()
+    }
+    .unwrap_or_else(|e| panic!("failed to spawn `{cmd} {}`: {e}", args.join(" ")));
 
     assert!(status.success(), "`{cmd} {}` failed", args.join(" "));
 }

@@ -130,6 +130,17 @@ Everything the web UI does is also available as a plain HTTP API
 `Authorization: Bearer <admin-secret>` header — useful for scripting or CI.
 The setup wizard only adds; use the UI or this API for edits/deletes.
 
+If you script the session-cookie flow instead (calling `POST
+/admin/auth/login` yourself rather than passing `Authorization: Bearer
+<admin-secret>` on every request), every non-GET `/admin/*` request —
+including the login call itself — must also carry `X-Requested-With:
+1router-ui`, or it's rejected with `403 {"error": {"message": "missing
+X-Requested-With header"}}`. This is the admin UI's CSRF guard; it only
+applies to cookie-authenticated requests, so it's a non-issue for the
+Bearer-header scripting path above. See the README's
+[Admin dashboard](../README.md#admin-dashboard) section for a worked
+example.
+
 ## Building and testing
 
 ```

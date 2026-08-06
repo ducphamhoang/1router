@@ -172,6 +172,26 @@ While either the default admin password or the default shared secret is
 still in place, every page shows a banner reminding you to change it (see
 [Set up](#set-up) for how).
 
+Scripting that same login instead of using the UI? `POST /admin/auth/login`
+also needs an `X-Requested-With: 1router-ui` header on top of the JSON
+body — it's the same CSRF guard that protects every other non-GET
+`/admin/*` request made with the session cookie, and login is the one place
+you can't yet be holding that cookie:
+
+```
+curl -i -X POST http://localhost:8080/admin/auth/login \
+  -H 'Content-Type: application/json' \
+  -H 'X-Requested-With: 1router-ui' \
+  -d '{"username":"admin","password":"password"}' \
+  -c cookies.txt
+```
+
+That header requirement only applies to this cookie-based login flow. If
+you're scripting the rest of the admin API instead (as in
+[Learn more](#learn-more)), skip the login dance entirely and send
+`Authorization: Bearer <shared-secret>` on each request — that path is
+exempt from the CSRF check.
+
 **Providers** — add, edit, or remove providers. Picking a template
 pre-fills a suggested id/name (deduped against providers you already have,
 so a second same-template provider suggests `-2`, `-3`, ...) plus the wire

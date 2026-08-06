@@ -194,6 +194,22 @@ p[role="alert"] {
   margin: 0;
 }
 
+p.security-warning {
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  padding: 0.7rem 0.9rem;
+}
+
+p.security-critical {
+  background: var(--danger);
+  color: var(--danger-fg);
+  border: 2px solid var(--danger);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  font-weight: 600;
+}
+
 p[role="status"] {
   color: #16a34a;
   font-size: 0.9rem;

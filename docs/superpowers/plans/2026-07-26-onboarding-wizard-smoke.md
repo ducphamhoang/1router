@@ -55,6 +55,23 @@ BIN="$PWD/target/debug/1router"
       1 then 2, and the pool row's `created_at` is unchanged.
 - [ ] Answer **no** to "Add another"; exit code 0.
 
+## B2. Manual setup menu and access-mode settings
+
+- [ ] Run `ROUTER_SQLITE_PATH=./t.db "$BIN" setup` on the configured install.
+- [ ] Confirm the header shows the listen address, database path, provider/pool
+      counts, and `/v1 access: open (no API key)` or `required (API key)`.
+- [ ] Confirm the top-level menu contains Providers, Pools, Settings,
+      Connection details, and Quit, in that order; Esc/Ctrl-C returns cleanly.
+- [ ] Open Settings and confirm `/v1 access mode` shows the current mode,
+      API key (shared secret) offers show/rotate, Admin UI password offers a
+      reset, and Back returns to the top-level menu.
+- [ ] On a loopback listen address, switching to Open access shows the `y/N`
+      confirmation. On a non-loopback address, it requires typing `OPEN`
+      exactly; any other text leaves the mode unchanged.
+- [ ] Open Connection details in both modes and confirm the curl example
+      includes the Bearer header only in API-key-required mode, and says
+      `# no API key needed — open access is on` in open mode.
+
 ## C. `ROUTER_SHARED_SECRET` wins over the sidecar
 
 - [ ] Still in the same dir: `ROUTER_SQLITE_PATH=./t.db ROUTER_SHARED_SECRET=env-wins "$BIN" setup`

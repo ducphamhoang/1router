@@ -44,18 +44,44 @@ Run the interactive wizard once:
 ./1router setup
 ```
 
-It walks you through:
+**The admin secret and admin UI password are not prompted for.** A
+brand-new install uses fixed, published defaults so you land on provider
+setup immediately:
 
-1. **An admin secret** — used to call the API and log in to the dashboard.
-2. **Adding a provider** — pick one:
-   - **OpenAI**, **Anthropic**, **DeepSeek**, **OpenCode**, or **Gemini**
-     — paste an API key (OpenCode has a free tier that needs no key at
-     all). Gemini uses Google's own OpenAI-compatible endpoint, so no
-     wire-format translation is needed.
-   - **ChatGPT account (Codex)** or **Command Code** — logs in through
-     your browser, no API key needed.
-3. **Making it callable** — the wizard names it and makes it immediately
+- Admin UI password: **`password`** (username: `admin`)
+- Shared secret (for `Authorization: Bearer <secret>` on `/v1/*` and
+  `/admin/*`): **`1router-api-key`**
+
+These are meant to get you to "make a real request" in under a minute on a
+local/dev box — they are **not** meant to be exposed beyond localhost as-is.
+Every time 1router starts with either default still in place, it logs a
+warning; the admin UI also shows a banner on every page until you change
+them. Change either anytime via:
+
+- `./1router setup --reset-admin-password` (admin UI password), or the
+  Settings page in the admin UI.
+- `PATCH /admin/settings/shared-secret` (see
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)), or the Settings page.
+- Setting `ROUTER_SHARED_SECRET` yourself before first boot, if you'd
+  rather never touch the default at all.
+
+After that, the wizard walks you through:
+
+1. **Adding a provider** — pick a template first (it pre-fills a
+   suggested id/name plus the fields below - press Enter to accept
+   everything, or edit any field): **OpenAI**, **Anthropic**, **DeepSeek**,
+   **OpenCode**, or **Gemini** — paste an API key (OpenCode has a free tier
+   that needs no key at all; Gemini uses Google's own OpenAI-compatible
+   endpoint, so no wire-format translation is needed). **ChatGPT account
+   (Codex)** or **Command Code** log in through your browser instead, no
+   API key needed. **Custom** (an unlisted provider) is last in the list —
+   pick it if none of the templates fit.
+2. **Making it callable** — the wizard names it and makes it immediately
    usable as a model.
+
+Adding a second provider of the same template (e.g. a second OpenAI key)
+suggests a name that doesn't collide with the first one (`openai-2`,
+`openai-3`, ...) instead of asking you to invent one.
 
 Here's a real run, picking OpenCode's free tier (no API key needed —
 just press Enter to accept the pre-filled one):
@@ -65,17 +91,12 @@ $ ./1router setup
 
 === 1router setup ===
 
-✔ No admin secret yet. Generate a random one, or enter your own? · Generate a random secret (recommended)
-Admin secret written to ".router_secret" (mode 0600).
-  Your admin secret is:
-
-    <a freshly generated 64-character secret>
-
-  Use it as `Authorization: Bearer <secret>` on /v1/* and /admin/*. It is stored in ".router_secret"; it will not be printed again.
+Admin secret: no secret file yet - using the default '1router-api-key' (documented in README.md) so you can get straight to provider setup. Written to ".router_secret" (mode 0600).
+  Use it as `Authorization: Bearer 1router-api-key` on /v1/* and /admin/*. Change it anytime via `PATCH /admin/settings/shared-secret`, the admin UI Settings page, or by setting ROUTER_SHARED_SECRET before first boot.
 ✔ Add a provider now? · yes
 ✔ Provider kind · passthrough (OpenAI/Anthropic-compatible API key)
-✔ Provider name (also used as its id) · opencode-free
 ✔ Template (pre-fills the fields below; all stay editable) · OpenCode Free
+✔ Provider name (also used as its id) · opencode-free
 ✔ Wire format · openai
   note: base_url is POSTed as-is - include the full upstream path, e.g. https://api.openai.com/v1/chat/completions
 ✔ Upstream base_url (full path) · https://opencode.ai/zen/v1/chat/completions
@@ -105,6 +126,29 @@ Then start the server:
 The same wizard also runs automatically the first time you start 1router
 with an empty database.
 
+### Client API access mode
+
+The `/v1/*` client API can require the shared secret or run in **open access**
+mode. Set the positive-polarity environment variable
+`ROUTER_REQUIRE_SHARED_SECRET` to `true`, `false`, `1`, `0`, `yes`, or `no`
+(case-insensitive); an invalid value stops startup. The environment variable
+overrides the database setting and prevents changing it from the admin UI.
+
+On a fresh install that has never resolved a shared secret, the mode defaults
+to open and is saved in the existing `server_secrets` table. An installation
+that already had a shared secret in `ROUTER_SHARED_SECRET` or `.router_secret`
+defaults to requiring the key, preserving its pre-upgrade behavior. Change
+the mode from `1router setup` or the Settings page. Open access affects
+`/v1/*` only: `/admin/*` still requires its session/password or a valid shared
+secret Bearer token.
+
+Because `ROUTER_LISTEN_ADDR` defaults to `0.0.0.0:8080`, open access on the
+default bind is reachable from other machines. 1router logs a warning on every
+boot in that case; bind to `127.0.0.1:8080` or set
+`ROUTER_REQUIRE_SHARED_SECRET=true` to remove the exposure. Open access does
+not add rate limiting or any other protection against request volume; it only
+removes the client API-key requirement.
+
 ## Try it
 
 ```
@@ -121,11 +165,18 @@ client you point at `http://localhost:8080`.
 ## Admin dashboard
 
 Open `http://localhost:8080/ui/` and log in as `admin` with the password
-from setup.
+from setup (`password`, unless you've changed it — see
+[Set up](#set-up)).
+
+While either the default admin password or the default shared secret is
+still in place, every page shows a banner reminding you to change it (see
+[Set up](#set-up) for how).
 
 **Providers** — add, edit, or remove providers. Picking a template
-pre-fills the wire format, base URL, and a starting model, so you don't
-need to look up API details yourself.
+pre-fills a suggested id/name (deduped against providers you already have,
+so a second same-template provider suggests `-2`, `-3`, ...) plus the wire
+format, base URL, and a starting model, so you don't need to look up API
+details yourself. "Custom" is last in the template list.
 
 ![Providers page](docs/screenshots/providers.png)
 ![New provider dialog](docs/screenshots/new-provider.png)
@@ -150,6 +201,10 @@ to add them.)*
 ```
 ./1router setup --reset-admin-password
 ```
+
+(This is also how you change it away from the default `password` — there's
+no "old password" prompt, since anyone who can run this CLI already has
+filesystem access to the database.)
 
 For headless deployments (Docker, systemd), set `ROUTER_SHARED_SECRET`
 yourself instead of relying on the interactive wizard — see

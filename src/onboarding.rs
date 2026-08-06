@@ -97,7 +97,7 @@ use crate::pools::queries as pool_queries;
 ///
 /// Deliberately takes `pool_id` (and `model_override`) rather than prompting
 /// for them, so the whole DB-touching part of the pool step is unit
-/// testable; the prompts live in `run_wizard`. `model_override` lets the
+/// testable; the prompts live in the onboarding flows. `model_override` lets the
 /// same already-authenticated provider be reused across several pools that
 /// each call a different upstream model (e.g. one Codex OAuth login serving
 /// `codex-sol`/`codex-terra`/`codex-luna` pools).
@@ -234,6 +234,46 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 8] = [
     },
 ];
 
+/// Turn a template label into a plain lowercase-hyphen id, e.g.
+/// "DeepSeek (OpenAI-compatible)" -> "deepseek-openai-compatible".
+fn slugify(label: &str) -> String {
+    let mut out = String::new();
+    let mut prev_hyphen = false;
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen && !out.is_empty() {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// A default provider name/id that doesn't collide with one already saved -
+/// so picking the same template twice (e.g. two OpenAI keys) doesn't force
+/// the operator to type a name, it just suggests "openai-2", "openai-3", ...
+async fn unique_default_name(db: &sqlx::SqlitePool, base: &str) -> anyhow::Result<String> {
+    if provider_queries::get_provider(db, base).await.is_err() {
+        return Ok(base.to_string());
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if provider_queries::get_provider(db, &candidate)
+            .await
+            .is_err()
+        {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
 pub(crate) fn build_passthrough_row(
     name: &str,
     wire_format: WireFormat,
@@ -264,7 +304,22 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     // wrapping in spawn_blocking: the wizard runs either before the axum
     // listener exists (first boot) or in a process that never starts one
     // (`1router setup`), so there is no concurrent work for it to starve.
-    let name: String = Input::with_theme(&theme())
+    // Template before name: picking a template first lets the name prompt
+    // below suggest a sensible default ("openai", "openai-2", ...) instead
+    // of asking the operator to invent one. "Custom" is last, not the
+    // default choice - most first-time setups pick a real template.
+    let mut preset_items: Vec<&str> = PROVIDER_TEMPLATES.iter().map(|p| p.label).collect();
+    preset_items.push("Custom");
+    let preset_choice = Select::with_theme(&theme())
+        .with_prompt("Template (pre-fills the fields below; all stay editable)")
+        .items(&preset_items)
+        .default(0)
+        .interact()?;
+    let preset =
+        (preset_choice < PROVIDER_TEMPLATES.len()).then(|| &PROVIDER_TEMPLATES[preset_choice]);
+
+    let name_theme = theme();
+    let mut name_prompt = Input::<String>::with_theme(&name_theme)
         .with_prompt("Provider name (also used as its id)")
         .validate_with(|s: &String| -> Result<(), &str> {
             if s.trim().is_empty() {
@@ -272,18 +327,14 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
             } else {
                 Ok(())
             }
-        })
-        .interact_text()?;
+        });
+    // No sensible default for "Custom" - the operator is naming a provider
+    // that isn't one of the presets above, so nothing to suggest.
+    if let Some(p) = preset {
+        name_prompt = name_prompt.default(unique_default_name(db, &slugify(p.label)).await?);
+    }
+    let name: String = name_prompt.interact_text()?;
     let name = name.trim().to_string();
-
-    let mut preset_items: Vec<&str> = vec!["Custom"];
-    preset_items.extend(PROVIDER_TEMPLATES.iter().map(|p| p.label));
-    let preset_choice = Select::with_theme(&theme())
-        .with_prompt("Template (pre-fills the fields below; all stay editable)")
-        .items(&preset_items)
-        .default(0)
-        .interact()?;
-    let preset = (preset_choice > 0).then(|| &PROVIDER_TEMPLATES[preset_choice - 1]);
 
     let wire_format_default = match preset.map(|p| p.wire_format) {
         Some(WireFormat::Anthropic) => 1,
@@ -384,8 +435,10 @@ pub async fn add_commandcode_provider(
     db: &sqlx::SqlitePool,
     http: &reqwest::Client,
 ) -> anyhow::Result<Provider> {
-    let name: String = Input::with_theme(&theme())
+    let name_theme = theme();
+    let name: String = Input::<String>::with_theme(&name_theme)
         .with_prompt("Provider name (also used as its id)")
+        .default(unique_default_name(db, "command-code").await?)
         .validate_with(|s: &String| -> Result<(), &str> {
             if s.trim().is_empty() {
                 Err("name cannot be empty")
@@ -483,8 +536,8 @@ pub async fn add_commandcode_provider(
     Ok(provider)
 }
 
-use crate::providers::adapter::codex::oauth;
 use crate::providers::adapter::adapter_for;
+use crate::providers::adapter::codex::oauth;
 use crate::providers::oauth_routes::complete_oauth_exchange;
 use crate::providers::queries::ProviderPatch;
 
@@ -605,8 +658,10 @@ pub async fn add_codex_provider(
     db: &sqlx::SqlitePool,
     http: &reqwest::Client,
 ) -> anyhow::Result<Provider> {
-    let name: String = Input::with_theme(&theme())
+    let name_theme = theme();
+    let name: String = Input::<String>::with_theme(&name_theme)
         .with_prompt("Provider name (also used as its id)")
+        .default(unique_default_name(db, "codex").await?)
         .validate_with(|s: &String| -> Result<(), &str> {
             if s.trim().is_empty() {
                 Err("name cannot be empty")
@@ -693,6 +748,7 @@ pub async fn add_codex_provider(
 
 use crate::core::config;
 use std::io::IsTerminal;
+use std::net::SocketAddr;
 
 pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
@@ -716,25 +772,18 @@ pub async fn resolve_or_prompt_admin_password(db: &sqlx::SqlitePool) -> anyhow::
         return Ok(());
     }
 
-    let plain = if stdin_is_tty() {
-        let s: String = Password::with_theme(&theme())
-            .with_prompt("Set an admin UI password (username: admin)")
-            .with_confirmation("Confirm", "passwords did not match")
-            .interact()?;
-        if s.trim().is_empty() {
-            anyhow::bail!("admin password cannot be empty");
-        }
-        s
-    } else {
-        let s = config::generate_secret();
-        tracing::info!(
-            password = %s,
-            "generated a new admin UI password (username: admin) - SAVE THIS NOW, it will not be logged again. Change it later via PATCH /admin/auth/password."
-        );
-        s
-    };
+    // No prompt: use the published default (see README.md) so a brand-new
+    // install gets straight to provider setup, TTY or not. It's public
+    // information, so main.rs's startup warning is what pushes an operator
+    // to rotate it before exposing the admin UI beyond localhost.
+    let plain = config::DEFAULT_ADMIN_PASSWORD;
+    println!(
+        "Admin UI password: using the default 'password' (username: admin, documented in \
+         README.md). Change it anytime via `1router setup --reset-admin-password` or the \
+         admin UI Settings page."
+    );
 
-    let hash = crate::admin::auth::password::hash_password(&plain)?;
+    let hash = crate::admin::auth::password::hash_password(plain)?;
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO admin_users (id, username, password_hash, updated_at)
@@ -746,6 +795,20 @@ pub async fn resolve_or_prompt_admin_password(db: &sqlx::SqlitePool) -> anyhow::
     .await?;
 
     Ok(())
+}
+
+/// Used by main.rs's boot-time warning. Argon2-verifies the stored hash
+/// against the published default rather than comparing plaintext anywhere,
+/// so this stays correct even though the hash itself was produced with a
+/// random salt (see `resolve_or_prompt_admin_password`/`reset_admin_password`).
+pub async fn admin_password_is_default(db: &sqlx::SqlitePool) -> anyhow::Result<bool> {
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")
+            .fetch_optional(db)
+            .await?;
+    Ok(hash.is_some_and(|h| {
+        crate::admin::auth::password::verify_password(&h, config::DEFAULT_ADMIN_PASSWORD)
+    }))
 }
 
 /// Overwrites the admin UI password (setting one if none exists yet) and
@@ -806,48 +869,160 @@ pub fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
             Ok(s)
         }
         config::SecretSource::BootstrapNeeded => {
-            let choice = Select::with_theme(&theme())
-                .with_prompt("No admin secret yet. Generate a random one, or enter your own?")
-                .items(["Generate a random secret (recommended)", "Enter my own"])
-                .default(0)
-                .interact()?;
-            let secret = if choice == 0 {
-                config::generate_secret()
-            } else {
-                let s: String = Password::with_theme(&theme())
-                    .with_prompt("Admin secret (input hidden)")
-                    .with_confirmation("Confirm", "secrets did not match")
-                    .interact()?;
-                let s = s.trim().to_string();
-                if s.is_empty() {
-                    anyhow::bail!("admin secret cannot be empty");
-                }
-                s
-            };
-            // Written before anything else in the wizard proceeds.
+            // No prompt: use the published default so a brand-new install
+            // gets straight to provider setup. It's public information (see
+            // README), so main.rs's startup warning - not secrecy - is what
+            // pushes an operator to rotate it before going beyond localhost.
+            let secret = config::DEFAULT_SHARED_SECRET.to_string();
             config::persist_secret(sqlite_path, &secret)?;
             let path = config::secret_file_path(sqlite_path);
-            println!("Admin secret written to {path:?} (mode 0600).");
-            if choice == 0 {
-                println!("  Your admin secret is:\n\n    {secret}\n");
-                println!(
-                    "  Use it as `Authorization: Bearer <secret>` on /v1/* and /admin/*. \
-                     It is stored in {path:?}; it will not be printed again."
-                );
-            }
+            println!(
+                "Admin secret: no secret file yet - using the default '{secret}' \
+                 (documented in README.md) so you can get straight to provider setup. \
+                 Written to {path:?} (mode 0600)."
+            );
+            println!(
+                "  Use it as `Authorization: Bearer {secret}` on /v1/* and /admin/*. \
+                 Change it anytime via `PATCH /admin/settings/shared-secret`, the admin \
+                 UI Settings page, or by setting ROUTER_SHARED_SECRET before first boot."
+            );
             Ok(secret)
         }
     }
 }
 
-/// The wizard. Shared by the first-boot trigger and `1router setup`.
-pub async fn run_wizard(
+pub(crate) fn format_menu_header(
+    listen_addr: &SocketAddr,
+    sqlite_path: &str,
+    provider_count: usize,
+    pool_count: usize,
+    require_shared_secret: bool,
+) -> String {
+    let access = if require_shared_secret {
+        "required (API key)"
+    } else {
+        "open (no API key)"
+    };
+    format!(
+        "  listening on {listen_addr}   db: {sqlite_path}\n  {provider_count} providers · {pool_count} pools · /v1 access: {access}"
+    )
+}
+
+fn auth_mode_parts(source: config::AuthModeSource) -> (bool, crate::core::state::AuthModeOrigin) {
+    match source {
+        config::AuthModeSource::Env(value) => (value, crate::core::state::AuthModeOrigin::Env),
+        config::AuthModeSource::Db(value) => (value, crate::core::state::AuthModeOrigin::Db),
+        config::AuthModeSource::Default(value) => {
+            (value, crate::core::state::AuthModeOrigin::Default)
+        }
+    }
+}
+
+async fn resolved_auth_mode(
+    db: &sqlx::SqlitePool,
+    sqlite_path: &str,
+) -> anyhow::Result<(bool, crate::core::state::AuthModeOrigin)> {
+    let source = config::resolve_shared_secret(sqlite_path)?;
+    let mode = config::resolve_auth_mode(
+        &source,
+        crate::core::settings::get_bool(db, "require_shared_secret").await?,
+    )?;
+    Ok(auth_mode_parts(mode))
+}
+
+fn confirm_open_access(listen_addr: &SocketAddr) -> anyhow::Result<bool> {
+    if config::listen_addr_is_loopback(listen_addr) {
+        // interact_opt, not interact: Esc/Ctrl-C must fall through to "not
+        // confirmed" (same as an explicit No) rather than propagating an
+        // error up through the Settings menu.
+        return Ok(Confirm::with_theme(&theme())
+            .with_prompt("Enable open access? /v1/* will accept requests without an API key")
+            .default(false)
+            .interact_opt()?
+            .unwrap_or(false));
+    }
+
+    let typed: String = Input::with_theme(&theme())
+        .with_prompt(format!(
+            "This gateway listens on {listen_addr}. Type OPEN to enable open access"
+        ))
+        .interact_text()?;
+    Ok(typed == "OPEN")
+}
+
+async fn prompt_access_mode(db: &sqlx::SqlitePool, sqlite_path: &str) -> anyhow::Result<()> {
+    let (current, origin) = resolved_auth_mode(db, sqlite_path).await?;
+    if matches!(origin, crate::core::state::AuthModeOrigin::Env) {
+        println!(
+            "Access mode is controlled by ROUTER_REQUIRE_SHARED_SECRET; change or unset it to edit this setting."
+        );
+        return Ok(());
+    }
+    let secret = resolve_or_prompt_secret(sqlite_path)?;
+    let cfg = config::Config::from_env_with_secret(secret)?;
+    // interact_opt, not interact: Esc/Ctrl-C returns to the Settings menu
+    // with nothing changed, instead of erroring `1router setup` out.
+    let Some(choice) = Select::with_theme(&theme())
+        .with_prompt("/v1 access mode")
+        .items([
+            "API key required — clients send Authorization: Bearer <key>",
+            "Open access — /v1/* accepts requests with no API key",
+        ])
+        .default(if current { 0 } else { 1 })
+        .interact_opt()?
+    else {
+        return Ok(());
+    };
+    let require = choice == 0;
+    if require == current {
+        return Ok(());
+    }
+    if !require && !confirm_open_access(&cfg.listen_addr)? {
+        println!("Open access was not enabled.");
+        return Ok(());
+    }
+    crate::core::settings::set_bool(db, "require_shared_secret", require).await?;
+    Ok(())
+}
+
+fn mask_secret_for_cli(secret: &str) -> String {
+    let tail: String = secret
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        "***".to_string()
+    } else {
+        format!("***{tail}")
+    }
+}
+
+fn print_connection_details(require_shared_secret: bool) {
+    println!("\nConnection details:\n");
+    if require_shared_secret {
+        println!(
+            "  curl http://<host>:<port>/v1/chat/completions \\\n    -H 'Authorization: Bearer <your-admin-secret>' \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
+        );
+    } else {
+        println!(
+            "  curl http://<host>:<port>/v1/chat/completions \\\n    # no API key needed — open access is on \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
+        );
+    }
+}
+
+/// The first-boot wizard remains linear; manual `1router setup` uses a menu.
+pub async fn run_first_boot_wizard(
     db: &sqlx::SqlitePool,
     http: &reqwest::Client,
     sqlite_path: &str,
 ) -> anyhow::Result<String> {
     println!("\n=== 1router setup ===\n");
     let secret = resolve_or_prompt_secret(sqlite_path)?;
+    prompt_access_mode(db, sqlite_path).await?;
 
     // On first boot this is always true; via `1router setup` it may not be,
     // in which case we go straight to asking whether to add another one.
@@ -971,13 +1146,218 @@ pub async fn run_wizard(
     }
 
     println!("\nSetup complete. Example request:\n");
-    println!(
-        "  curl http://<host>:<port>/v1/chat/completions \\\n    \
-         -H 'Authorization: Bearer <your-admin-secret>' \\\n    \
-         -H 'Content-Type: application/json' \\\n    \
-         -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
-    );
+    let (require, _) = resolved_auth_mode(db, sqlite_path).await?;
+    print_connection_details(require);
     Ok(secret)
+}
+
+async fn run_provider_menu(db: &sqlx::SqlitePool, http: &reqwest::Client) -> anyhow::Result<()> {
+    let mut add = Confirm::with_theme(&theme())
+        .with_prompt("Add a provider now?")
+        .default(true)
+        .interact_opt()?
+        .unwrap_or(false);
+    while add {
+        let kind = Select::with_theme(&theme())
+            .with_prompt("Provider kind")
+            .items([
+                "passthrough (OpenAI/Anthropic-compatible API key)",
+                "Codex OAuth (ChatGPT account)",
+                "Command Code (commandcode.ai browser login)",
+            ])
+            .default(0)
+            .interact_opt()?;
+        let Some(kind) = kind else {
+            return Ok(());
+        };
+        let provider = match kind {
+            0 => add_passthrough_provider(db).await?,
+            1 => add_codex_provider(db, http).await?,
+            _ => add_commandcode_provider(db, http).await?,
+        };
+        let pool_id: String = Input::with_theme(&theme())
+            .with_prompt("Pool id (this is the `model` name clients will request)")
+            .default(provider.id.clone())
+            .interact_text()?;
+        let priority = assign_to_pool(db, pool_id.trim(), &provider, None).await?;
+        println!(
+            "  added '{}' to pool '{}' at priority {priority}",
+            provider.id,
+            pool_id.trim()
+        );
+        let mut add_more_pools = Confirm::with_theme(&theme())
+            .with_prompt(format!(
+                "Add '{}' to another pool with a different model?",
+                provider.id
+            ))
+            .default(false)
+            .interact()?;
+        while add_more_pools {
+            let extra_pool_id: String = Input::with_theme(&theme())
+                .with_prompt("Pool id (this is the `model` name clients will request)")
+                .interact_text()?;
+            let model_override: String = Input::with_theme(&theme())
+                .with_prompt(format!(
+                    "Model override for this pool (blank = use '{}')",
+                    provider.upstream_model
+                ))
+                .allow_empty(true)
+                .interact_text()?;
+            let model_override = if model_override.trim().is_empty() {
+                None
+            } else {
+                Some(model_override.trim().to_string())
+            };
+            let priority =
+                assign_to_pool(db, extra_pool_id.trim(), &provider, model_override.clone()).await?;
+            println!(
+                "  added '{}' to pool '{}' at priority {priority}{}",
+                provider.id,
+                extra_pool_id.trim(),
+                model_override
+                    .map(|model| format!(" (model override: '{model}')"))
+                    .unwrap_or_default()
+            );
+            add_more_pools = Confirm::with_theme(&theme())
+                .with_prompt(format!(
+                    "Add '{}' to yet another pool with a different model?",
+                    provider.id
+                ))
+                .default(false)
+                .interact()?;
+        }
+        add = Confirm::with_theme(&theme())
+            .with_prompt("Add another provider?")
+            .default(false)
+            .interact_opt()?
+            .unwrap_or(false);
+    }
+    Ok(())
+}
+
+async fn run_pool_menu(db: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let providers = provider_queries::list_providers(db).await?;
+    if providers.is_empty() {
+        println!("No providers yet. Add one from Providers first.");
+        return Ok(());
+    }
+    let provider_idx = Select::with_theme(&theme())
+        .with_prompt("Provider to add to a pool")
+        .items(providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>())
+        .interact_opt()?;
+    let Some(provider_idx) = provider_idx else {
+        return Ok(());
+    };
+    let pool_id: String = Input::with_theme(&theme())
+        .with_prompt("Pool id (the model name clients request)")
+        .interact_text()?;
+    let priority = assign_to_pool(db, pool_id.trim(), &providers[provider_idx], None).await?;
+    println!(
+        "  added '{}' to pool '{}' at priority {priority}",
+        providers[provider_idx].id,
+        pool_id.trim()
+    );
+    Ok(())
+}
+
+async fn run_settings_menu(db: &sqlx::SqlitePool, sqlite_path: &str) -> anyhow::Result<()> {
+    loop {
+        let (require, _) = resolved_auth_mode(db, sqlite_path).await?;
+        let current = if require {
+            "currently: API key required"
+        } else {
+            "currently: open (no API key required)"
+        };
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Settings (Esc to go back)")
+            .items([
+                format!("/v1 access mode          — {current}"),
+                "API key (shared secret)  — show or change".to_string(),
+                "Admin UI password        — change".to_string(),
+                "Back".to_string(),
+            ])
+            .interact_opt()?;
+        let Some(choice) = choice else {
+            return Ok(());
+        };
+        match choice {
+            0 => prompt_access_mode(db, sqlite_path).await?,
+            1 => {
+                if matches!(
+                    config::resolve_shared_secret(sqlite_path)?,
+                    config::SecretSource::Env(_)
+                ) {
+                    println!(
+                        "API key is controlled by ROUTER_SHARED_SECRET; change or unset the environment variable instead."
+                    );
+                    continue;
+                }
+                let secret = resolve_or_prompt_secret(sqlite_path)?;
+                println!("Current API key: {}", mask_secret_for_cli(&secret));
+                if Confirm::with_theme(&theme())
+                    .with_prompt("Rotate the API key?")
+                    .default(false)
+                    .interact()?
+                {
+                    let new_secret = Password::with_theme(&theme())
+                        .with_prompt("New API key")
+                        .with_confirmation("Confirm", "keys did not match")
+                        .interact()?;
+                    if new_secret.trim().is_empty() {
+                        anyhow::bail!("API key cannot be empty");
+                    }
+                    config::persist_secret(sqlite_path, new_secret.trim())?;
+                    println!("API key rotated.");
+                }
+            }
+            2 => reset_admin_password(db).await?,
+            _ => return Ok(()),
+        }
+    }
+}
+
+pub async fn run_menu(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+    sqlite_path: &str,
+) -> anyhow::Result<()> {
+    let secret = resolve_or_prompt_secret(sqlite_path)?;
+    let cfg = config::Config::from_env_with_secret(secret)?;
+    loop {
+        let providers = provider_queries::list_providers(db).await?;
+        let pools = pool_queries::list_pools(db).await?;
+        let (require, _) = resolved_auth_mode(db, sqlite_path).await?;
+        println!(
+            "\n=== 1router setup ===\n{}\n",
+            format_menu_header(
+                &cfg.listen_addr,
+                sqlite_path,
+                providers.len(),
+                pools.len(),
+                require
+            )
+        );
+        let choice = Select::with_theme(&theme())
+            .with_prompt("What do you want to do?")
+            .items([
+                "Providers   — add or review upstream providers",
+                "Pools       — map the `model` names clients request to providers",
+                "Settings    — API key, access mode, admin password",
+                "Connection details — base URL, model names, example request",
+                "Quit",
+            ])
+            .interact_opt()?;
+        let Some(choice) = choice else {
+            return Ok(());
+        };
+        match choice {
+            0 => run_provider_menu(db, http).await?,
+            1 => run_pool_menu(db).await?,
+            2 => run_settings_menu(db, sqlite_path).await?,
+            3 => print_connection_details(require),
+            _ => return Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -992,6 +1372,59 @@ mod tests {
             priority,
             model_override: None,
         }
+    }
+
+    #[test]
+    fn menu_header_shows_listener_counts_and_access_mode() {
+        assert_eq!(
+            format_menu_header(
+                &"0.0.0.0:8080".parse().unwrap(),
+                "1router.db",
+                2,
+                3,
+                false,
+            ),
+            "  listening on 0.0.0.0:8080   db: 1router.db\n  2 providers · 3 pools · /v1 access: open (no API key)",
+        );
+    }
+
+    #[test]
+    fn slugify_lowercases_and_hyphenates_punctuation() {
+        assert_eq!(slugify("OpenAI"), "openai");
+        assert_eq!(
+            slugify("DeepSeek (OpenAI-compatible)"),
+            "deepseek-openai-compatible"
+        );
+        assert_eq!(
+            slugify("Gemini (OpenAI-compatible)"),
+            "gemini-openai-compatible"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_default_name_reuses_the_base_when_free() {
+        let db = init_pool(":memory:").await.unwrap();
+        assert_eq!(unique_default_name(&db, "openai").await.unwrap(), "openai");
+    }
+
+    #[tokio::test]
+    async fn unique_default_name_appends_a_counter_on_collision() {
+        let db = init_pool(":memory:").await.unwrap();
+        insert_provider(&db, &provider("openai", WireFormat::OpenAi))
+            .await
+            .unwrap();
+        assert_eq!(
+            unique_default_name(&db, "openai").await.unwrap(),
+            "openai-2"
+        );
+
+        insert_provider(&db, &provider("openai-2", WireFormat::OpenAi))
+            .await
+            .unwrap();
+        assert_eq!(
+            unique_default_name(&db, "openai").await.unwrap(),
+            "openai-3"
+        );
     }
 
     #[test]
@@ -1431,6 +1864,24 @@ mod admin_bootstrap_tests {
                 .unwrap();
         assert!(!password_hash.trim().is_empty());
         assert_ne!(password_hash, "admin");
+        assert!(admin_password_is_default(&db).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn admin_password_is_default_is_false_once_rotated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_bootstrap_rotated.db");
+        let db = init_pool(path.to_str().unwrap()).await.unwrap();
+        resolve_or_prompt_admin_password(&db).await.unwrap();
+        assert!(admin_password_is_default(&db).await.unwrap());
+
+        let hash = crate::admin::auth::password::hash_password("a-real-password").unwrap();
+        sqlx::query("UPDATE admin_users SET password_hash = ? WHERE id = 1")
+            .bind(&hash)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!admin_password_is_default(&db).await.unwrap());
     }
 
     #[tokio::test]

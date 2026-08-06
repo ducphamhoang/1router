@@ -196,6 +196,8 @@ mod tests {
             refresh_locks: Arc::new(DashMap::new()),
             shared_secret: Arc::new(ArcSwap::from_pointee("test-secret".to_string())),
             secret_origin: SecretOrigin::SidecarFile,
+            require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auth_mode_origin: crate::core::state::AuthModeOrigin::Default,
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
         }

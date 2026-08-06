@@ -93,6 +93,8 @@ mod tests {
             shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
             config: Arc::new(cfg),
             secret_origin: SecretOrigin::SidecarFile,
+            require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auth_mode_origin: crate::core::state::AuthModeOrigin::Default,
             snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(ConfigSnapshot {
                 providers: vec![],
                 pools: vec![],

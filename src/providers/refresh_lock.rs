@@ -32,7 +32,10 @@ pub async fn refresh_and_persist(
     // with invalid_grant - reuse the fresh result instead of refreshing again.
     if let Ok(Some(current)) = get_oauth_state(&state.db, &provider.id).await {
         if current.access_token.is_some() && current.access_token != creds.access_token {
-            return Ok(Credentials::from_provider_and_oauth(provider, Some(current)));
+            return Ok(Credentials::from_provider_and_oauth(
+                provider,
+                Some(current),
+            ));
         }
     }
 
@@ -151,6 +154,8 @@ mod tests {
             shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
             config: Arc::new(cfg),
             secret_origin: crate::core::state::SecretOrigin::SidecarFile,
+            require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auth_mode_origin: crate::core::state::AuthModeOrigin::Default,
             snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::core::state::ConfigSnapshot {
                     providers: vec![],

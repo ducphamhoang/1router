@@ -25,12 +25,71 @@ fn env_secs(key: &str, default: u64) -> Duration {
 
 pub const SECRET_FILE_NAME: &str = ".router_secret";
 
+/// Fast-path defaults for a brand-new local install, documented in
+/// README.md. Applied automatically on first boot (no prompt) so the
+/// operator lands on provider setup immediately; `main.rs` warns on every
+/// boot while either is still in place, and both are changeable anytime via
+/// `1router setup --reset-admin-password` / `PATCH
+/// /admin/settings/shared-secret` / the admin UI Settings page.
+pub const DEFAULT_ADMIN_PASSWORD: &str = "password";
+pub const DEFAULT_SHARED_SECRET: &str = "1router-api-key";
+
 /// Where a resolved admin secret came from, or that none exists yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretSource {
     Env(String),
     SidecarFile(String),
     BootstrapNeeded,
+}
+
+/// Where the client API authentication mode came from, including its value
+/// so boot-time resolution can be carried into the application state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthModeSource {
+    Env(bool),
+    Db(bool),
+    Default(bool),
+}
+
+/// Parse the positive-polarity client API authentication setting.
+pub fn parse_require_shared_secret_env() -> anyhow::Result<Option<bool>> {
+    let Some(raw) = std::env::var_os("ROUTER_REQUIRE_SHARED_SECRET") else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("ROUTER_REQUIRE_SHARED_SECRET is not valid UTF-8"))?;
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(Some(true)),
+        "false" | "0" | "no" => Ok(Some(false)),
+        _ => anyhow::bail!(
+            "invalid ROUTER_REQUIRE_SHARED_SECRET value {raw:?}; expected true, false, 1, 0, yes, or no"
+        ),
+    }
+}
+
+/// Resolve whether `/v1/*` requests require the shared secret. The default
+/// deliberately distinguishes a truly fresh bootstrap from an installation
+/// that already had a secret before this setting existed.
+pub fn resolve_auth_mode(
+    secret_source: &SecretSource,
+    db_value: Option<bool>,
+) -> anyhow::Result<AuthModeSource> {
+    if let Some(value) = parse_require_shared_secret_env()? {
+        return Ok(AuthModeSource::Env(value));
+    }
+    if let Some(value) = db_value {
+        return Ok(AuthModeSource::Db(value));
+    }
+    let value = matches!(
+        secret_source,
+        SecretSource::Env(_) | SecretSource::SidecarFile(_)
+    );
+    Ok(AuthModeSource::Default(value))
+}
+
+pub fn listen_addr_is_loopback(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
 }
 
 impl SecretSource {
@@ -258,14 +317,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("sub").join("r.db");
         let db = db.to_str().unwrap();
-        assert_eq!(secret_file_path(db), std::path::Path::new(db).parent().unwrap().join(".router_secret"));
+        assert_eq!(
+            secret_file_path(db),
+            std::path::Path::new(db)
+                .parent()
+                .unwrap()
+                .join(".router_secret")
+        );
 
         persist_secret(db, "abc").unwrap();
-        assert_eq!(std::fs::read_to_string(secret_file_path(db)).unwrap(), "abc");
+        assert_eq!(
+            std::fs::read_to_string(secret_file_path(db)).unwrap(),
+            "abc"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(secret_file_path(db)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(secret_file_path(db))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "sidecar must be owner-read/write only");
         }
     }
@@ -286,5 +357,71 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn parse_require_shared_secret_env_accepts_documented_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ROUTER_REQUIRE_SHARED_SECRET");
+        assert_eq!(parse_require_shared_secret_env().unwrap(), None);
+
+        for value in ["true", "TRUE", "1", "yes", "YeS"] {
+            std::env::set_var("ROUTER_REQUIRE_SHARED_SECRET", value);
+            assert_eq!(
+                parse_require_shared_secret_env().unwrap(),
+                Some(true),
+                "{value}"
+            );
+        }
+        for value in ["false", "FALSE", "0", "no", "nO"] {
+            std::env::set_var("ROUTER_REQUIRE_SHARED_SECRET", value);
+            assert_eq!(
+                parse_require_shared_secret_env().unwrap(),
+                Some(false),
+                "{value}"
+            );
+        }
+        std::env::set_var("ROUTER_REQUIRE_SHARED_SECRET", "maybe");
+        assert!(parse_require_shared_secret_env().is_err());
+        std::env::remove_var("ROUTER_REQUIRE_SHARED_SECRET");
+    }
+
+    #[test]
+    fn loopback_detection_handles_ipv4_and_ipv6() {
+        assert!(listen_addr_is_loopback(&"127.0.0.1:8080".parse().unwrap()));
+        assert!(listen_addr_is_loopback(&"127.42.1.9:8080".parse().unwrap()));
+        assert!(listen_addr_is_loopback(&"[::1]:8080".parse().unwrap()));
+        assert!(!listen_addr_is_loopback(&"0.0.0.0:8080".parse().unwrap()));
+        assert!(!listen_addr_is_loopback(
+            &"192.168.1.20:8080".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn resolve_auth_mode_honors_precedence_and_asymmetric_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ROUTER_REQUIRE_SHARED_SECRET", "no");
+        assert_eq!(
+            resolve_auth_mode(&SecretSource::Env("secret".into()), Some(true)).unwrap(),
+            AuthModeSource::Env(false)
+        );
+
+        std::env::remove_var("ROUTER_REQUIRE_SHARED_SECRET");
+        assert_eq!(
+            resolve_auth_mode(&SecretSource::Env("secret".into()), Some(false)).unwrap(),
+            AuthModeSource::Db(false)
+        );
+        assert_eq!(
+            resolve_auth_mode(&SecretSource::BootstrapNeeded, None).unwrap(),
+            AuthModeSource::Default(false)
+        );
+        assert_eq!(
+            resolve_auth_mode(&SecretSource::Env("secret".into()), None).unwrap(),
+            AuthModeSource::Default(true)
+        );
+        assert_eq!(
+            resolve_auth_mode(&SecretSource::SidecarFile("secret".into()), None).unwrap(),
+            AuthModeSource::Default(true)
+        );
     }
 }

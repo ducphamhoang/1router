@@ -8,7 +8,7 @@ use router::app::build_router;
 use router::core::config::{secret_file_path, Config};
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
-use router::core::state::{AppState, ConfigSnapshot, SecretOrigin};
+use router::core::state::{AppState, AuthModeOrigin, ConfigSnapshot, SecretOrigin};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -34,6 +34,8 @@ async fn test_state(secret_origin: SecretOrigin) -> (AppState, tempfile::TempDir
         config: Arc::new(cfg.clone()),
         shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
         secret_origin,
+        require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        auth_mode_origin: AuthModeOrigin::Default,
         snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
             providers: vec![],
             pools: vec![],
@@ -164,6 +166,60 @@ async fn shared_secret_patch_persists_and_rotates_live_bearer_secret() {
 }
 
 #[tokio::test]
+async fn security_status_flags_the_default_secret_and_clears_once_rotated() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    // test_state's "initial" isn't the published default - swap it in
+    // directly so this test exercises the real default value rather than
+    // duplicating it as a literal.
+    state.shared_secret.store(Arc::new(
+        router::core::config::DEFAULT_SHARED_SECRET.to_string(),
+    ));
+    let router = build_router(state);
+
+    let default_status = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/admin/settings/security-status",
+            router::core::config::DEFAULT_SHARED_SECRET,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(default_status.status(), StatusCode::OK);
+    let body = json_body(default_status).await;
+    assert_eq!(body["shared_secret_is_default"], true);
+    // No admin_users row in this test's fresh DB, so nothing to flag as a
+    // default password - that path is covered at the onboarding-module
+    // level (admin_password_is_default_is_false_once_rotated).
+    assert_eq!(body["admin_password_is_default"], false);
+
+    let patched = router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/admin/settings/shared-secret",
+            router::core::config::DEFAULT_SHARED_SECRET,
+            Some(json!({ "shared_secret": "a-real-rotated-secret" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+
+    let rotated_status = router
+        .oneshot(request(
+            Method::GET,
+            "/admin/settings/security-status",
+            "a-real-rotated-secret",
+            None,
+        ))
+        .await
+        .unwrap();
+    let body = json_body(rotated_status).await;
+    assert_eq!(body["shared_secret_is_default"], false);
+}
+
+#[tokio::test]
 async fn shared_secret_patch_conflicts_when_secret_origin_is_env() {
     let (state, _dir) = test_state(SecretOrigin::Env).await;
     let secret_path = secret_file_path(&state.config.sqlite_path);
@@ -209,4 +265,103 @@ async fn shared_secret_patch_conflicts_when_secret_origin_is_env() {
         .await
         .unwrap();
     assert_eq!(new_secret_does_not_work.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_mode_get_reflects_current_state_and_origin() {
+    let (mut state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    state
+        .require_shared_secret
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    state.auth_mode_origin = AuthModeOrigin::Db;
+    let router = build_router(state);
+
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            "/admin/settings/auth-mode",
+            "initial",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body,
+        json!({"require_shared_secret": false, "origin": "db"})
+    );
+}
+
+#[tokio::test]
+async fn auth_mode_patch_toggles_and_takes_effect_on_next_request_without_restart() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    let router = build_router(state);
+
+    let patched = router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/admin/settings/auth-mode",
+            "initial",
+            Some(json!({"require_shared_secret": false})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    assert_eq!(json_body(patched).await["require_shared_secret"], false);
+
+    let open_request = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(open_request.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn auth_mode_patch_conflicts_when_env_controlled() {
+    let (mut state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    state.auth_mode_origin = AuthModeOrigin::Env;
+    let router = build_router(state);
+
+    let response = router
+        .oneshot(request(
+            Method::PATCH,
+            "/admin/settings/auth-mode",
+            "initial",
+            Some(json!({"require_shared_secret": false})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(json_body(response).await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("ROUTER_REQUIRE_SHARED_SECRET"));
+}
+
+#[tokio::test]
+async fn security_status_reports_require_shared_secret_and_loopback() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    let router = build_router(state);
+
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            "/admin/settings/security-status",
+            "initial",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["require_shared_secret"], true);
+    assert_eq!(body["listen_addr_is_loopback"], true);
 }

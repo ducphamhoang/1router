@@ -4,13 +4,37 @@ import userEvent from "@testing-library/user-event";
 import { Settings } from "./Settings";
 
 describe("Settings", () => {
+  let authMode = { require_shared_secret: true, origin: "db" };
+  let loopback = true;
+
   beforeEach(() => {
+    authMode = { require_shared_secret: true, origin: "db" };
+    loopback = true;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url === "/admin/settings/shared-secret" && (!init || init.method === "GET")) {
           return new Response(JSON.stringify({ shared_secret: "sec_****", masked: true, origin: "sidecar_file" }), { status: 200 });
+        }
+        if (url === "/admin/settings/auth-mode" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify(authMode), { status: 200 });
+        }
+        if (url === "/admin/settings/auth-mode" && init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body)) as { require_shared_secret: boolean };
+          authMode = { require_shared_secret: body.require_shared_secret, origin: "db" };
+          return new Response(JSON.stringify(authMode), { status: 200 });
+        }
+        if (url === "/admin/settings/security-status") {
+          return new Response(
+            JSON.stringify({
+              shared_secret_is_default: false,
+              admin_password_is_default: false,
+              require_shared_secret: authMode.require_shared_secret,
+              listen_addr_is_loopback: loopback
+            }),
+            { status: 200 }
+          );
         }
         if (url === "/admin/settings/shared-secret?reveal=true") {
           return new Response(JSON.stringify({ shared_secret: "sec_real", masked: false, origin: "sidecar_file" }), { status: 200 });
@@ -50,6 +74,37 @@ describe("Settings", () => {
         return new Response("{}", { status: 404 });
       })
     );
+  });
+
+  it("renders the current client API access mode", async () => {
+    render(<Settings />);
+    expect(await screen.findByLabelText(/Open access — \/v1/)).not.toBeChecked();
+    expect(screen.getByLabelText(/API key required — clients/)).toBeChecked();
+  });
+
+  it("requires a base confirmation before enabling open access on loopback", async () => {
+    render(<Settings />);
+    await userEvent.click(await screen.findByLabelText(/Open access — \/v1/));
+    expect(await screen.findByRole("button", { name: "Enable open access" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Enable open access" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Client API access updated.");
+  });
+
+  it("requires an extra confirmation for open access on a non-loopback listener", async () => {
+    loopback = false;
+    render(<Settings />);
+    await userEvent.click(await screen.findByLabelText(/Open access — \/v1/));
+    await userEvent.click(await screen.findByRole("button", { name: "Review non-local open access" }));
+    expect(await screen.findByRole("button", { name: "Yes, enable open access" })).toBeInTheDocument();
+  });
+
+  it("keeps the shared-secret form visible but disabled in open mode", async () => {
+    authMode = { require_shared_secret: false, origin: "db" };
+    render(<Settings />);
+    await screen.findByLabelText(/Open access — \/v1/);
+    expect(screen.getAllByText("Shared secret").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Shared secret")).toBeDisabled();
+    expect(screen.getByText(/Not required for \/v1/)).toBeInTheDocument();
   });
 
   it("loads_masked_secret_and_reveals_real_value", async () => {

@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -43,6 +44,14 @@ pub enum SecretOrigin {
     SidecarFile,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthModeOrigin {
+    Env,
+    Db,
+    Default,
+}
+
 impl SecretOrigin {
     pub fn from_source(source: &crate::core::config::SecretSource) -> Option<Self> {
         match source {
@@ -60,6 +69,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub shared_secret: Arc<ArcSwap<String>>,
     pub secret_origin: SecretOrigin,
+    pub require_shared_secret: Arc<AtomicBool>,
+    pub auth_mode_origin: AuthModeOrigin,
     pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
@@ -106,9 +117,7 @@ pub async fn reload_snapshot(state: &AppState) -> Result<(), AppError> {
 ///
 /// The public model list is built from pools, so providers imported before the
 /// direct-pool flow existed would otherwise be invisible and unroutable.
-pub async fn ensure_direct_pools_for_unassigned_providers(
-    db: &SqlitePool,
-) -> Result<(), AppError> {
+pub async fn ensure_direct_pools_for_unassigned_providers(db: &SqlitePool) -> Result<(), AppError> {
     let mut tx = db.begin().await?;
     sqlx::query(
         "INSERT INTO pools (id, wire_format, created_at)
@@ -184,7 +193,9 @@ mod tests {
         .await
         .unwrap();
 
-        ensure_direct_pools_for_unassigned_providers(&db).await.unwrap();
+        ensure_direct_pools_for_unassigned_providers(&db)
+            .await
+            .unwrap();
 
         let snap = load_snapshot(&db).await.unwrap();
         assert_eq!(snap.pools[0].pool.id, "codex-luna");

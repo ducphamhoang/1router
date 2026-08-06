@@ -1,14 +1,21 @@
-use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde_json::json;
 
 use crate::admin::auth::session;
 use crate::core::state::AppState;
 
 pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if !state
+        .require_shared_secret
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return next.run(req).await;
+    }
+
     let current_secret = state.shared_secret.load();
     let ok = req
         .headers()
@@ -109,11 +116,11 @@ fn missing_csrf_response() -> Response {
 #[cfg(test)]
 mod csrf_tests {
     use super::*;
-    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::middleware;
     use axum::routing::get;
+    use axum::Router;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -189,6 +196,79 @@ mod csrf_tests {
 }
 
 #[cfg(test)]
+mod require_bearer_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::middleware;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    async fn bearer_app(require_shared_secret: bool) -> axum::Router {
+        let state = super::require_admin_session_tests::state().await;
+        state
+            .require_shared_secret
+            .store(require_shared_secret, std::sync::atomic::Ordering::Relaxed);
+        axum::Router::new()
+            .route("/protected", get(|| async { "ok" }))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_bearer,
+            ))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn require_bearer_open_mode_allows_no_header() {
+        let res = bearer_app(false)
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_bearer_closed_mode_still_rejects_no_header() {
+        let res = bearer_app(true)
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn require_admin_session_still_rejects_with_no_credential_when_open_access_is_on() {
+        let state = super::require_admin_session_tests::state().await;
+        state
+            .require_shared_secret
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let app = super::require_admin_session_tests::app(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
 mod require_admin_session_tests {
     use super::*;
     use crate::admin::auth::session;
@@ -196,17 +276,17 @@ mod require_admin_session_tests {
     use crate::core::db::init_pool;
     use crate::core::state::{AppState, ConfigSnapshot, SecretOrigin};
     use arc_swap::ArcSwap;
-    use axum::Router;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{header, Request, StatusCode};
     use axum::middleware;
     use axum::routing::get;
+    use axum::Router;
     use dashmap::DashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tower::ServiceExt;
 
-    async fn state() -> AppState {
+    pub(super) async fn state() -> AppState {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("require_admin_session.db");
         let db = init_pool(path.to_str().unwrap()).await.unwrap();
@@ -236,12 +316,14 @@ mod require_admin_session_tests {
             refresh_locks: Arc::new(DashMap::new()),
             shared_secret: Arc::new(ArcSwap::from_pointee("test-secret".to_string())),
             secret_origin: SecretOrigin::SidecarFile,
+            require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auth_mode_origin: crate::core::state::AuthModeOrigin::Default,
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
         }
     }
 
-    fn app(state: AppState) -> Router {
+    pub(super) fn app(state: AppState) -> Router {
         Router::new()
             .route("/protected", get(|| async { "ok" }).post(|| async { "ok" }))
             .route_layer(middleware::from_fn_with_state(

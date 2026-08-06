@@ -5,7 +5,8 @@ use router::core::config::{self, Config, SecretSource};
 use router::core::db::init_pool;
 use router::core::http_client::build_client;
 use router::core::state::{
-    ensure_direct_pools_for_unassigned_providers, load_snapshot, AppState, SecretOrigin,
+    ensure_direct_pools_for_unassigned_providers, load_snapshot, AppState, AuthModeOrigin,
+    SecretOrigin,
 };
 use router::onboarding;
 use router::providers::refresh_task::spawn_background_refresh;
@@ -38,6 +39,17 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
         let db = init_pool(&sqlite_path).await?;
+        // Resolve and persist the auth-mode default before the manual menu
+        // creates the sidecar secret; otherwise a fresh setup would be
+        // misclassified as an upgrade and start in required mode.
+        let initial_secret_source = config::resolve_shared_secret(&sqlite_path)?;
+        let initial_auth_mode = config::resolve_auth_mode(
+            &initial_secret_source,
+            router::core::settings::get_bool(&db, "require_shared_secret").await?,
+        )?;
+        if let router::core::config::AuthModeSource::Default(value) = initial_auth_mode {
+            router::core::settings::set_bool(&db, "require_shared_secret", value).await?;
+        }
 
         // `--reset-admin-password` is a standalone recovery path, not part of
         // the provider/pool wizard: someone who forgot the admin UI password
@@ -53,7 +65,7 @@ async fn main() -> Result<()> {
         // own requests (only the OAuth exchange + model probes) rather than
         // ordering the two around each other.
         let http = reqwest::Client::new();
-        onboarding::run_wizard(&db, &http, &sqlite_path).await?;
+        onboarding::run_menu(&db, &http, &sqlite_path).await?;
         return Ok(());
     }
 
@@ -61,8 +73,8 @@ async fn main() -> Result<()> {
     let resolved_secret = config::resolve_shared_secret(&sqlite_path)?;
     let mut secret_origin = SecretOrigin::from_source(&resolved_secret);
 
-    let secret = match resolved_secret {
-        SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s),
+    let secret = match &resolved_secret {
+        SecretSource::Env(s) | SecretSource::SidecarFile(s) => Some(s.clone()),
         // TTY + no secret yet: bootstrap ONLY the secret here (not the full
         // provider-adding wizard) - a seed file must still be able to win
         // over interactive setup even when a secret has to be created, per
@@ -92,8 +104,52 @@ async fn main() -> Result<()> {
     let secret_origin = secret_origin.expect("all resolved runtime secrets have an origin");
 
     let db = init_pool(&sqlite_path).await?;
+    let auth_mode_source = config::resolve_auth_mode(
+        &resolved_secret,
+        router::core::settings::get_bool(&db, "require_shared_secret").await?,
+    )?;
+    if let router::core::config::AuthModeSource::Default(value) = auth_mode_source {
+        router::core::settings::set_bool(&db, "require_shared_secret", value).await?;
+    }
+    let (require_shared_secret, auth_mode_origin) = match auth_mode_source {
+        router::core::config::AuthModeSource::Env(value) => (value, AuthModeOrigin::Env),
+        router::core::config::AuthModeSource::Db(value) => (value, AuthModeOrigin::Db),
+        router::core::config::AuthModeSource::Default(value) => (value, AuthModeOrigin::Default),
+    };
+
+    let cfg = Config::from_env_with_secret(secret.clone())?;
     seed_if_configured_first(&db).await?;
     onboarding::resolve_or_prompt_admin_password(&db).await?;
+
+    // Every boot, not just first boot: an operator could still be running on
+    // the fast-path defaults from an earlier `1router setup` / first-boot
+    // run. Both are public information (README.md), so this is a nudge, not
+    // a secret-leak concern.
+    if secret == config::DEFAULT_SHARED_SECRET {
+        tracing::warn!(
+            "the shared secret is still the published default ('{}') - change it via \
+             `PATCH /admin/settings/shared-secret`, the admin UI Settings page, or \
+             `1router setup`, before exposing this instance beyond localhost.",
+            config::DEFAULT_SHARED_SECRET
+        );
+    }
+    if onboarding::admin_password_is_default(&db).await? {
+        tracing::warn!(
+            "the admin UI password is still the published default ('{}', username: admin) - \
+             change it via `1router setup --reset-admin-password` or the admin UI Settings page.",
+            config::DEFAULT_ADMIN_PASSWORD
+        );
+    }
+    if !require_shared_secret {
+        if config::listen_addr_is_loopback(&cfg.listen_addr) {
+            tracing::info!("open access is ON: /v1/* accepts requests with no API key");
+        } else {
+            tracing::warn!(
+                "open access is ON: /v1/* accepts requests with no API key, and this gateway is listening on {} — reachable from other machines. Anyone who can reach it can spend your provider credits. Set ROUTER_LISTEN_ADDR=127.0.0.1:8080, or ROUTER_REQUIRE_SHARED_SECRET=true.",
+                cfg.listen_addr
+            );
+        }
+    }
 
     // First-boot wizard (provider/pool prompts): empty DB + no seed file + a
     // real terminal. A seed file always wins over interactive setup, even if
@@ -107,12 +163,11 @@ async fn main() -> Result<()> {
         && onboarding::providers_table_is_empty(&db).await?
     {
         let http = reqwest::Client::new();
-        onboarding::run_wizard(&db, &http, &sqlite_path).await?;
+        onboarding::run_first_boot_wizard(&db, &http, &sqlite_path).await?;
     }
 
     ensure_direct_pools_for_unassigned_providers(&db).await?;
 
-    let cfg = Config::from_env_with_secret(secret)?;
     let http = build_client(&cfg);
     let snapshot = load_snapshot(&db).await?;
     let log_tx = spawn_writer(db.clone(), 4096, 100);
@@ -123,6 +178,8 @@ async fn main() -> Result<()> {
         config: Arc::new(cfg.clone()),
         shared_secret: Arc::new(arc_swap::ArcSwap::from_pointee(cfg.shared_secret.clone())),
         secret_origin,
+        require_shared_secret: Arc::new(std::sync::atomic::AtomicBool::new(require_shared_secret)),
+        auth_mode_origin,
         snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,

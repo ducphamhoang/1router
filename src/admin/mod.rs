@@ -15,6 +15,8 @@ use crate::providers::queries as prov_q;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportDump {
+    // Deliberately excludes the auth-mode setting: config backup/import must
+    // never be able to change whether `/v1/*` requires an API key.
     pub providers: Vec<Provider>,
     pub pools: Vec<Pool>,
     pub members: Vec<PoolMember>,
@@ -176,5 +178,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n.0, 0, "pools insert should have been rolled back too");
+    }
+
+    #[tokio::test]
+    async fn import_ignores_auth_mode_even_if_json_contains_it() {
+        let db = init_pool(":memory:").await.unwrap();
+        crate::core::settings::set_bool(&db, "require_shared_secret", false)
+            .await
+            .unwrap();
+
+        let dump: ExportDump = serde_json::from_value(serde_json::json!({
+            "providers": [],
+            "pools": [],
+            "members": [],
+            "require_shared_secret": true
+        }))
+        .unwrap();
+        import_config(&db, &dump).await.unwrap();
+
+        assert_eq!(
+            crate::core::settings::get_bool(&db, "require_shared_secret")
+                .await
+                .unwrap(),
+            Some(false)
+        );
     }
 }

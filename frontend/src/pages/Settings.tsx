@@ -10,6 +10,16 @@ type SharedSecretResponse = {
   origin: "env" | "sidecar_file";
 };
 
+type AuthModeResponse = {
+  require_shared_secret: boolean;
+  origin: "env" | "db" | "default";
+};
+
+type SecurityStatusResponse = {
+  require_shared_secret: boolean;
+  listen_addr_is_loopback: boolean;
+};
+
 type Pool = { id: string; wire_format: string };
 type Provider = { id: string; name: string; kind: string; wire_format: string };
 
@@ -30,6 +40,11 @@ export function Settings() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [discovery, setDiscovery] = useState<Record<string, Discovery>>({});
   const [discovering, setDiscovering] = useState(false);
+  const [requireSharedSecret, setRequireSharedSecret] = useState(true);
+  const [authModeOrigin, setAuthModeOrigin] = useState<AuthModeResponse["origin"]>("default");
+  const [listenAddrIsLoopback, setListenAddrIsLoopback] = useState(true);
+  const [selectedRequireSharedSecret, setSelectedRequireSharedSecret] = useState<boolean | null>(null);
+  const [openConfirmation, setOpenConfirmation] = useState<"base" | "critical" | null>(null);
 
   async function loadSharedSecret(reveal = false) {
     const suffix = reveal ? "?reveal=true" : "";
@@ -41,9 +56,64 @@ export function Settings() {
 
   useEffect(() => {
     void loadSharedSecret(false);
+    void apiJson<AuthModeResponse>("/admin/settings/auth-mode")
+      .then((body) => {
+        setRequireSharedSecret(body.require_shared_secret);
+        setAuthModeOrigin(body.origin);
+      })
+      .catch(() => undefined);
+    void apiJson<SecurityStatusResponse>("/admin/settings/security-status")
+      .then((body) => setListenAddrIsLoopback(body.listen_addr_is_loopback))
+      .catch(() => undefined);
     void apiJson<Pool[]>("/admin/pools").then(setPools).catch(() => setPools([]));
     void apiJson<Provider[]>("/admin/providers").then(setProviders).catch(() => setProviders([]));
   }, []);
+
+  const displayedRequireSharedSecret = selectedRequireSharedSecret ?? requireSharedSecret;
+
+  async function saveAuthMode(value: boolean) {
+    setMessage(null);
+    setError(null);
+    try {
+      const body = await apiJson<AuthModeResponse>("/admin/settings/auth-mode", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ require_shared_secret: value })
+      });
+      setRequireSharedSecret(body.require_shared_secret);
+      setAuthModeOrigin(body.origin);
+      setSelectedRequireSharedSecret(null);
+      setOpenConfirmation(null);
+      setMessage("Client API access updated.");
+    } catch (error) {
+      setSelectedRequireSharedSecret(null);
+      setOpenConfirmation(null);
+      setError(error instanceof Error ? error.message : "Client API access update failed.");
+    }
+  }
+
+  function selectAuthMode(value: boolean) {
+    if (authModeOrigin === "env") {
+      setError("ROUTER_REQUIRE_SHARED_SECRET is set; change or unset the environment variable instead.");
+      return;
+    }
+    setSelectedRequireSharedSecret(value);
+    if (value) {
+      void saveAuthMode(true);
+    } else if (listenAddrIsLoopback) {
+      setOpenConfirmation("base");
+    } else {
+      setOpenConfirmation("base");
+    }
+  }
+
+  function confirmOpenAccess() {
+    if (openConfirmation === "base" && !listenAddrIsLoopback) {
+      setOpenConfirmation("critical");
+      return;
+    }
+    void saveAuthMode(false);
+  }
 
   const baseUrl = `${window.location.origin}/v1`;
   const exampleModel = pools[0]?.id ?? "<pool-id>";
@@ -154,23 +224,69 @@ export function Settings() {
         <button type="submit">Change password</button>
       </form>
 
+      <section aria-labelledby="client-access-title">
+        <h2 id="client-access-title">Client API access</h2>
+        <fieldset disabled={authModeOrigin === "env"}>
+          <legend>/v1 access mode</legend>
+          <label>
+            <input
+              type="radio"
+              name="client-api-access"
+              checked={displayedRequireSharedSecret}
+              onChange={() => selectAuthMode(true)}
+            />
+            API key required — clients send Authorization: Bearer &lt;key&gt;
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="client-api-access"
+              checked={!displayedRequireSharedSecret}
+              onChange={() => selectAuthMode(false)}
+            />
+            Open access — /v1/* accepts requests with no API key
+          </label>
+        </fieldset>
+        <p>
+          The admin UI still requires this password. Anyone who can reach this gateway can send requests through your providers.
+        </p>
+        {openConfirmation ? (
+          <div role="group" aria-label="Confirm open access">
+            <p>
+              {openConfirmation === "critical"
+                ? "This gateway is not bound to localhost. Anyone who can reach it can use your providers."
+                : "Open access lets /v1/* accept requests without an API key."}
+            </p>
+            <button type="button" onClick={confirmOpenAccess}>
+              {openConfirmation === "critical" ? "Yes, enable open access" : listenAddrIsLoopback ? "Enable open access" : "Review non-local open access"}
+            </button>
+            <button type="button" onClick={() => { setSelectedRequireSharedSecret(null); setOpenConfirmation(null); }}>
+              Cancel
+            </button>
+          </div>
+        ) : null}
+      </section>
+
       <form onSubmit={saveSharedSecret}>
         <h2>Shared secret</h2>
+        {!requireSharedSecret ? (
+          <p>Not required for /v1/* while open access is on. Still accepted as a Bearer token for /admin/* — keep it secret.</p>
+        ) : null}
         <label>
           Shared secret
           <input
             value={sharedSecret}
-            disabled={!sharedSecretRevealed}
+            disabled={!sharedSecretRevealed || !requireSharedSecret}
             onChange={(event) => {
               setSharedSecret(event.target.value);
               setSharedSecretEdited(true);
             }}
           />
         </label>
-        <button type="button" onClick={() => loadSharedSecret(true)}>
+        <button type="button" disabled={!requireSharedSecret} onClick={() => loadSharedSecret(true)}>
           Reveal shared secret
         </button>
-        <button type="submit" disabled={!sharedSecretRevealed || !sharedSecretEdited}>
+        <button type="submit" disabled={!requireSharedSecret || !sharedSecretRevealed || !sharedSecretEdited}>
           Save shared secret
         </button>
       </form>
@@ -244,8 +360,13 @@ export function Settings() {
         )}
 
         <pre>
-          {`curl ${baseUrl}/chat/completions \\
+          {displayedRequireSharedSecret
+            ? `curl ${baseUrl}/chat/completions \\
   -H "Authorization: Bearer ${sharedSecretRevealed ? sharedSecret : "<your-api-key>"}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${exampleModel}","messages":[{"role":"user","content":"hi"}]}'`
+            : `curl ${baseUrl}/chat/completions \\
+  # no API key needed — open access is on \\
   -H "Content-Type: application/json" \\
   -d '{"model":"${exampleModel}","messages":[{"role":"user","content":"hi"}]}'`}
         </pre>

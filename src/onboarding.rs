@@ -156,10 +156,13 @@ fn theme() -> dialoguer::theme::ColorfulTheme {
     dialoguer::theme::ColorfulTheme::default()
 }
 
-/// Pre-fills wire_format/base_url/upstream_model for a common provider;
-/// every value is still just the prompt's *default*, editable by pressing a
-/// different key before Enter. Mirrors PROVIDER_TEMPLATES in
-/// frontend/src/pages/Providers.tsx - keep the two in sync if either grows.
+/// Pre-fills wire_format/base_url/upstream_model for a common provider.
+/// base_url/api_key/upstream_model stay editable prompts with this as their
+/// *default* (press a different key before Enter to override); wire_format
+/// is the exception - a preset's base_url IS that wire format, so it's
+/// applied directly with no prompt at all (see add_passthrough_provider).
+/// Mirrors PROVIDER_TEMPLATES in frontend/src/pages/Providers.tsx - keep the
+/// two in sync if either grows.
 struct ProviderTemplate {
     label: &'static str,
     wire_format: WireFormat,
@@ -336,18 +339,22 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     let name: String = name_prompt.interact_text()?;
     let name = name.trim().to_string();
 
-    let wire_format_default = match preset.map(|p| p.wire_format) {
-        Some(WireFormat::Anthropic) => 1,
-        _ => 0,
-    };
-    let wire_format = match Select::with_theme(&theme())
-        .with_prompt("Wire format")
-        .items(["openai", "anthropic"])
-        .default(wire_format_default)
-        .interact()?
-    {
-        0 => WireFormat::OpenAi,
-        _ => WireFormat::Anthropic,
+    // A preset's base_url IS its wire format (it's the exact upstream path
+    // for that format) - no point asking the operator to confirm something
+    // the template already pinned. Only "Custom" (no preset) leaves the
+    // wire format ambiguous enough to need the prompt.
+    let wire_format = if let Some(p) = preset {
+        p.wire_format
+    } else {
+        match Select::with_theme(&theme())
+            .with_prompt("Wire format")
+            .items(["openai", "anthropic"])
+            .default(0)
+            .interact()?
+        {
+            0 => WireFormat::OpenAi,
+            _ => WireFormat::Anthropic,
+        }
     };
 
     println!(

@@ -97,27 +97,67 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
     // e2e run; the design spec had left this shape unconfirmed).
     if let Some(Value::Array(messages)) = obj.remove("messages") {
         if !obj.contains_key("input") {
-            let input: Vec<Value> = messages
-                .into_iter()
-                .map(|m| {
-                    let role = m
-                        .get("role")
-                        .and_then(|r| r.as_str())
-                        .unwrap_or("user")
-                        .to_string();
+            let mut input: Vec<Value> = Vec::new();
+            for m in messages {
+                let role = m
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("user")
+                    .to_string();
+                // Assistant tool calls and `tool` role results (which Claude
+                // Code's bridge emits as Chat Completions messages) have no
+                // `message` item equivalent in the Responses API - assistant
+                // calls become `function_call` items, tool results become
+                // `function_call_output` items. The old text-only conversion
+                // dropped both, so the second request of every tool-use round
+                // trip lost the assistant's tool calls and sent `role: tool`,
+                // which the Responses backend rejects with 400.
+                let tool_calls = m.get("tool_calls").and_then(|t| t.as_array());
+                if role == "assistant" && tool_calls.is_some() {
+                    let text = message_text(&m);
+                    if !text.is_empty() {
+                        input.push(json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": text }]
+                        }));
+                    }
+                    for tc in tool_calls.unwrap_or(&Vec::new()) {
+                        let call_id = tc.get("id").cloned().unwrap_or(json!(""));
+                        let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                        let arguments = tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or("{}")
+                            .to_string();
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments
+                        }));
+                    }
+                } else if role == "tool" {
+                    let call_id = m.get("tool_call_id").cloned().unwrap_or(json!(""));
+                    let output = message_text(&m);
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output
+                    }));
+                } else {
                     let text = message_text(&m);
                     let part_type = if role == "assistant" {
                         "output_text"
                     } else {
                         "input_text"
                     };
-                    json!({
+                    input.push(json!({
                         "type": "message",
                         "role": role,
                         "content": [{ "type": part_type, "text": text }]
-                    })
-                })
-                .collect();
+                    }));
+                }
+            }
             obj.insert("input".into(), json!(input));
         }
     }
@@ -489,6 +529,75 @@ mod tests {
         assert_eq!(items[1]["role"], "assistant");
         assert_eq!(items[1]["content"][0]["type"], "output_text");
         assert_eq!(items[1]["content"][0]["text"], "hello there");
+    }
+
+    #[test]
+    fn assistant_tool_calls_become_function_call_items() {
+        let input = json!({
+            "messages": [
+                {"role": "user", "content": "Run: echo hello"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{\"command\": \"echo hello\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "hello"}
+            ]
+        });
+        let out = transform_request(&input, "s");
+        let items = out["input"].as_array().unwrap();
+        // user message
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "user");
+        // assistant tool call -> function_call item
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["call_id"], "call_1");
+        assert_eq!(items[1]["name"], "Bash");
+        assert_eq!(items[1]["arguments"], "{\"command\": \"echo hello\"}");
+        // tool result -> function_call_output item
+        assert_eq!(items[2]["type"], "function_call_output");
+        assert_eq!(items[2]["call_id"], "call_1");
+        assert_eq!(items[2]["output"], "hello");
+        // no `role: tool` may leak through to the Responses API
+        assert!(items.iter().all(|i| i.get("role").and_then(|r| r.as_str()) != Some("tool")));
+    }
+
+    #[test]
+    fn assistant_tool_call_with_text_keeps_message_and_call() {
+        let input = json!({
+            "messages": [
+                {"role": "assistant", "content": "Let me check.",
+                 "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{}"}}
+                ]}
+            ]
+        });
+        let out = transform_request(&input, "s");
+        let items = out["input"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"][0]["type"], "output_text");
+        assert_eq!(items[0]["content"][0]["text"], "Let me check.");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn strip_ids_preserves_call_id_on_function_call_items() {
+        let input = json!({
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+            ]
+        });
+        let out = transform_request(&input, "s");
+        let items = out["input"].as_array().unwrap();
+        assert_eq!(items[0]["call_id"], "call_1");
+        assert_eq!(items[1]["call_id"], "call_1");
     }
 
     #[test]

@@ -299,6 +299,7 @@ pub fn openai_chunk_to_claude_events(
         events.push((
             "message_start".into(),
             json!({
+                "type": "message_start",
                 "message": {
                     "id": id, "type": "message", "role": "assistant", "model": model,
                     "content": [], "stop_reason": null, "stop_sequence": null,
@@ -317,6 +318,7 @@ pub fn openai_chunk_to_claude_events(
                 events.push((
                     "content_block_start".into(),
                     json!({
+                        "type": "content_block_start",
                         "index": state.text_block_index,
                         "content_block": { "type": "text", "text": "" }
                     }),
@@ -325,6 +327,7 @@ pub fn openai_chunk_to_claude_events(
             events.push((
                 "content_block_delta".into(),
                 json!({
+                    "type": "content_block_delta",
                     "index": state.text_block_index,
                     "delta": { "type": "text_delta", "text": text }
                 }),
@@ -344,6 +347,7 @@ pub fn openai_chunk_to_claude_events(
                     events.push((
                         "content_block_start".into(),
                         json!({
+                            "type": "content_block_start",
                             "index": block_index,
                             "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} }
                         }),
@@ -355,6 +359,7 @@ pub fn openai_chunk_to_claude_events(
                     events.push((
                         "content_block_delta".into(),
                         json!({
+                            "type": "content_block_delta",
                             "index": tool.block_index,
                             "delta": { "type": "input_json_delta", "partial_json": args }
                         }),
@@ -366,19 +371,26 @@ pub fn openai_chunk_to_claude_events(
 
     if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
         if state.text_block_started {
-            events.push(("content_block_stop".into(), json!({ "index": state.text_block_index })));
+            events.push((
+                "content_block_stop".into(),
+                json!({ "type": "content_block_stop", "index": state.text_block_index }),
+            ));
         }
         for tool in state.tool_calls.values() {
-            events.push(("content_block_stop".into(), json!({ "index": tool.block_index })));
+            events.push((
+                "content_block_stop".into(),
+                json!({ "type": "content_block_stop", "index": tool.block_index }),
+            ));
         }
         events.push((
             "message_delta".into(),
             json!({
+                "type": "message_delta",
                 "delta": { "stop_reason": finish_to_stop_reason(finish), "stop_sequence": null },
                 "usage": usage_from(chunk)
             }),
         ));
-        events.push(("message_stop".into(), json!({})));
+        events.push(("message_stop".into(), json!({ "type": "message_stop" })));
     }
 
     events
@@ -1008,11 +1020,17 @@ mod tests {
         let events = openai_chunk_to_claude_events(&chunk, &mut state);
         assert_eq!(events[0].0, "message_start");
         assert_eq!(events[0].1["message"]["id"], "resp_1");
+        // The Anthropic SDK/Claude Code discriminates events by data.type,
+        // not the SSE event: line. Regression for "Stream completed without
+        // receiving message_start event".
+        assert_eq!(events[0].1["type"], "message_start");
 
         let chunk2 = json!({"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]});
         let events2 = openai_chunk_to_claude_events(&chunk2, &mut state);
         assert_eq!(events2[0].0, "content_block_start");
+        assert_eq!(events2[0].1["type"], "content_block_start");
         assert_eq!(events2[1].0, "content_block_delta");
+        assert_eq!(events2[1].1["type"], "content_block_delta");
         assert_eq!(events2[1].1["delta"]["text"], "hi");
     }
 
@@ -1028,6 +1046,7 @@ mod tests {
         });
         let events = openai_chunk_to_claude_events(&chunk, &mut state);
         assert_eq!(events[0].0, "content_block_start");
+        assert_eq!(events[0].1["type"], "content_block_start");
         assert_eq!(events[0].1["content_block"]["type"], "tool_use");
         assert_eq!(events[0].1["content_block"]["id"], "call_1");
 
@@ -1039,6 +1058,7 @@ mod tests {
         });
         let events2 = openai_chunk_to_claude_events(&chunk2, &mut state);
         assert_eq!(events2[0].0, "content_block_delta");
+        assert_eq!(events2[0].1["type"], "content_block_delta");
         assert_eq!(events2[0].1["delta"]["partial_json"], "{\"city\"");
     }
 
@@ -1052,10 +1072,13 @@ mod tests {
         let chunk = json!({"choices": [{"delta": {}, "finish_reason": "stop"}]});
         let events = openai_chunk_to_claude_events(&chunk, &mut state);
         assert_eq!(events[0].0, "content_block_stop");
+        assert_eq!(events[0].1["type"], "content_block_stop");
         assert_eq!(events[0].1["index"], 0);
         assert_eq!(events[1].0, "message_delta");
+        assert_eq!(events[1].1["type"], "message_delta");
         assert_eq!(events[1].1["delta"]["stop_reason"], "end_turn");
         assert_eq!(events[2].0, "message_stop");
+        assert_eq!(events[2].1["type"], "message_stop");
     }
 
     #[test]

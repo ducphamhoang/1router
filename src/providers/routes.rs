@@ -158,6 +158,11 @@ async fn patch(
 ) -> Result<Json<Value>, AppError> {
     let p = queries::update_provider(&s.db, &id, &patch).await?;
     reload_snapshot(&s).await?;
+    // An edit to the provider (key, base_url, model, ...) means its previous
+    // runtime flags no longer describe the current config - clear them.
+    if let Some(mut st) = s.runtime.get_mut(&id) {
+        st.reset_to_healthy();
+    }
     let credential_configured = if is_oauth_kind(p.kind) {
         queries::oauth_credential_configured(&s.db, &id).await?
     } else {
@@ -235,6 +240,13 @@ async fn validate_model(
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
+                // A successful probe proves this provider's credentials and
+                // request shape work right now - clear any stale
+                // Misconfigured/Cooling runtime flag so the proxy path stops
+                // skipping it without requiring a restart.
+                if let Some(mut st) = s.runtime.get_mut(&id) {
+                    st.reset_to_healthy();
+                }
                 Ok(Json(json!({ "ok": true, "status": status.as_u16() })))
             } else {
                 let text = resp.text().await.unwrap_or_default();

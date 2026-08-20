@@ -151,6 +151,12 @@ async fn set_commandcode_key(
         store_commandcode_key(&s.db, &id, key).await?;
     }
     reload_snapshot(&s).await?;
+    // A fresh key can fix whatever previously flagged the provider
+    // misconfigured (e.g. a 401) - clear the stale runtime flag so the proxy
+    // path tries it again without a restart.
+    if let Some(mut st) = s.runtime.get_mut(&id) {
+        st.reset_to_healthy();
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

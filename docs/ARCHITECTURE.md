@@ -34,12 +34,12 @@ for Claude Code simultaneously, no duplicate provider/OAuth needed.
 
 ## Addressing: pools vs. direct `<provider_id>/<model>`
 
-`<pool-id>` is whatever you named the pool during setup — that's the value
+`<pool-id>` is whatever you name the pool on the Pools page — that's the value
 clients put in `model` for round-robin/failover across one or more
-providers under a shared name. The setup wizard and the admin UI's "Make it
-directly callable" checkbox both default to creating a matching 1-member
-pool automatically, so a single-provider setup reads as "call the model by
-name" with no extra step.
+providers under a shared name. Pools are created explicitly now: the setup
+wizard and the admin UI no longer auto-create a matching pool when a
+provider is added, because direct addressing (below) already makes every
+provider's models callable by name with no extra step.
 
 For a provider that offers several models, you don't need a 1-member pool
 per model just to make each one callable - `model` also accepts

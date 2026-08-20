@@ -31,12 +31,6 @@ describe("Providers", () => {
           const sent = JSON.parse(String(init.body));
           return new Response(JSON.stringify({ ...providers[0], ...sent, id: sent.id ?? "prov_2" }), { status: 200 });
         }
-        if (url === "/admin/pools" && init?.method === "POST") {
-          return new Response(JSON.stringify({ id: "prov_2", wire_format: "anthropic" }), { status: 201 });
-        }
-        if (url === "/admin/pools/prov_2/members" && init?.method === "PUT") {
-          return new Response(JSON.stringify({ pool_id: "prov_2", provider_id: "prov_2", priority: 1 }), { status: 200 });
-        }
         if (url === "/admin/providers/prov_1" && init?.method === "PATCH") {
           return new Response(JSON.stringify({ ...providers[0], upstream_model: "gpt-4.1-mini" }), { status: 200 });
         }
@@ -245,9 +239,6 @@ describe("Providers", () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
     await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
-    // Skip pool auto-creation here - it's covered by its own tests, and this
-    // test only cares about the create -> edit-mode transition.
-    await userEvent.click(screen.getByLabelText(/Make it directly callable/));
     await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
 
     await waitFor(() =>
@@ -265,7 +256,6 @@ describe("Providers", () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
     await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
-    await userEvent.click(screen.getByLabelText(/Make it directly callable/));
     await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
 
     expect(await screen.findByRole("button", { name: "Validate key" })).toBeInTheDocument();
@@ -290,7 +280,7 @@ describe("Providers", () => {
     );
   });
 
-  it("exposes_the_new_provider_as_a_matching_1_member_pool_by_default", async () => {
+  it("does_not_auto_create_a_pool_when_saving_a_provider", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
     await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
@@ -302,28 +292,10 @@ describe("Providers", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
 
     await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        "/admin/pools",
-        expect.objectContaining({ method: "POST", body: JSON.stringify({ id: "prov_2", wire_format: "anthropic" }) })
-      )
-    );
-    expect(fetch).toHaveBeenCalledWith(
-      "/admin/pools/prov_2/members",
-      expect.objectContaining({ method: "PUT", body: JSON.stringify({ provider_id: "prov_2", priority: 1 }) })
-    );
-  });
-
-  it("skips_pool_creation_when_the_checkbox_is_unchecked", async () => {
-    render(<Providers />);
-    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
-    await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
-    await userEvent.type(screen.getByLabelText("Name"), "anthropic");
-    await userEvent.click(screen.getByLabelText(/Make it directly callable/));
-    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
-
-    await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith("/admin/providers", expect.objectContaining({ method: "POST" }))
     );
+    // Providers are directly callable via <provider>/<model>; saving must not
+    // also create a matching pool anymore.
     expect(fetch).not.toHaveBeenCalledWith("/admin/pools", expect.anything());
   });
 

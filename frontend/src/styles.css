@@ -594,3 +594,20 @@ button.modal-close {
 .checkbox-row input[type="checkbox"] {
   width: auto;
 }
+
+/* The global input rule adds padding/border/background that boxes up radio
+   buttons; undo it so the /v1 access mode radios render as plain circles. */
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-direction: row;
+}
+
+.radio-row input[type="radio"] {
+  width: auto;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+}

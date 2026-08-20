@@ -76,8 +76,9 @@ After that, the wizard walks you through:
    (Codex)** or **Command Code** log in through your browser instead, no
    API key needed. **Custom** (an unlisted provider) is last in the list —
    pick it if none of the templates fit.
-2. **Making it callable** — the wizard names it and makes it immediately
-   usable as a model.
+2. **Making it callable** — the wizard reports the provider's direct
+   `<provider-id>/<model>` name, which is immediately usable as a `model`
+   value. Optionally add it to a pool later for round-robin/failover.
 
 Adding a second provider of the same template (e.g. a second OpenAI key)
 suggests a name that doesn't collide with the first one (`openai-2`,
@@ -104,9 +105,7 @@ Admin secret: no secret file yet - using the default '1router-api-key' (document
 ✔ API key (input hidden) · ********
 ✔ Upstream model (the real model name this provider expects) · deepseek-v4-flash-free
   created provider 'opencode-free'
-✔ Pool id (this is the `model` name clients will request) · opencode-free
-  added 'opencode-free' to pool 'opencode-free' at priority 1
-✔ Add 'opencode-free' to another pool with a different model? · no
+  added 'opencode-free' — call it as model 'opencode-free/deepseek-v4-flash-free' (or add it to a pool from the Pools menu)
 ✔ Add another provider? · no
 
 Setup complete. Example request:
@@ -114,7 +113,7 @@ Setup complete. Example request:
   curl http://<host>:<port>/v1/chat/completions \
     -H 'Authorization: Bearer <your-admin-secret>' \
     -H 'Content-Type: application/json' \
-    -d '{"model":"<pool-id>","messages":[{"role":"user","content":"hi"}]}'
+    -d '{"model":"<pool-id> or <provider-id>/<model>","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 Then start the server:
@@ -155,12 +154,25 @@ removes the client API-key requirement.
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $(cat .router_secret)" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"<pool-id>","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"<provider-id>/<model>","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Replace `<pool-id>` with whatever you named the provider during setup —
-that's the value you put in `model`, from this `curl` example or from any
-client you point at `http://localhost:8080`.
+Replace `<provider-id>/<model>` with a provider you added — e.g.
+`opencode-free/deepseek-v4-flash-free` — or with a pool id if you've created
+one on the Pools page. `GET /v1/models` lists every callable model id.
+
+Vision (image) input is supported end-to-end. Send an OpenAI-style
+`image_url` part on `/v1/chat/completions`, or an Anthropic-style
+`image` + `source` block on `/v1/messages` — the router translates between
+the two shapes as needed, so the command-code branch accepts both and
+forwards a valid request to the model:
+
+```
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $(cat .router_secret)" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"command-code/Qwen/Qwen3.7-Flash","messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,<base64-data>"}}]}]}'
+```
 
 ## Admin dashboard
 

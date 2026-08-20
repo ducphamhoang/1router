@@ -87,13 +87,59 @@ fn convert_messages(messages: &[Value]) -> Vec<Value> {
                     }));
                 }
             }
-            _ => out.push(json!({
-                "role":role,
-                "content":message.get("content").cloned().unwrap_or(Value::Null)
-            })),
+            _ => {
+                // Command Code's upstream speaks Anthropic-style content
+                // blocks - it accepts `{type: "image", source: {...}}` but
+                // rejects OpenAI's `{type: "image_url", image_url: {...}}`.
+                // OpenAI clients (or the claude_bridge's Anthropic->OpenAI
+                // leg, which converts image/source to image_url) therefore
+                // need their image parts re-encoded before forwarding.
+                let content = message.get("content").cloned().unwrap_or(Value::Null);
+                out.push(json!({
+                    "role": role,
+                    "content": convert_user_content(content),
+                }));
+            }
         }
     }
     out
+}
+
+/// Rewrite OpenAI `image_url` content parts into Command Code's expected
+/// Anthropic-style `image` + `source` blocks; everything else passes through
+/// unchanged. A string content is returned as-is (both sides accept it).
+fn convert_user_content(content: Value) -> Value {
+    match content {
+        Value::String(_) => content,
+        Value::Array(parts) => Value::Array(
+            parts
+                .into_iter()
+                .map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("image_url") {
+                        let url = part["image_url"]["url"].as_str().unwrap_or("");
+                        if let Some(rest) = url.strip_prefix("data:") {
+                            let (media_type, data) = rest
+                                .split_once(";base64,")
+                                .map(|(m, d)| (m.to_string(), d.to_string()))
+                                .unwrap_or_else(|| ("image/png".into(), url.into()));
+                            return json!({
+                                "type": "image",
+                                "source": { "type": "base64", "media_type": media_type, "data": data }
+                            });
+                        }
+                        // Remote (http) image URLs: pass through as an
+                        // `image` block with a url source.
+                        return json!({
+                            "type": "image",
+                            "source": { "type": "url", "url": url }
+                        });
+                    }
+                    part
+                })
+                .collect(),
+        ),
+        _ => content,
+    }
 }
 
 fn convert_tools(tools: Option<&Vec<Value>>) -> Vec<Value> {
@@ -500,6 +546,39 @@ mod tests {
             json!({"type":"tool-result","toolCallId":"t1","output":{"type":"text","value":"ok"}})
         );
         assert_eq!(out["params"]["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn convert_user_content_rewrites_image_url_to_image_source() {
+        let input = json!({
+            "role":"user",
+            "content":[
+                {"type":"text","text":"look at this"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+                {"type":"image_url","image_url":{"url":"https://example.com/pic.png"}}
+            ]
+        });
+        let out = convert_user_content(input["content"].clone());
+        assert_eq!(
+            out[0],
+            json!({"type":"text","text":"look at this"})
+        );
+        assert_eq!(
+            out[1],
+            json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}})
+        );
+        assert_eq!(
+            out[2],
+            json!({"type":"image","source":{"type":"url","url":"https://example.com/pic.png"}})
+        );
+        assert_eq!(convert_user_content(json!("plain string")), json!("plain string"));
+    }
+
+    #[test]
+    fn transform_request_keeps_string_content_as_is() {
+        let input = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
+        let out = transform_request(&input, "t", "/p");
+        assert_eq!(out["params"]["messages"][0]["content"], "hi");
     }
 
     #[test]

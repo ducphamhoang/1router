@@ -43,6 +43,16 @@ impl ProviderRuntimeState {
         self.status = ProviderStatus::Healthy;
     }
 
+    /// Force a provider back to healthy - used when an admin action
+    /// (validate-model, provider update) proves the credentials/model work,
+    /// so a stale `Misconfigured`/`Cooling` flag can't keep blocking the
+    /// proxy path until a restart.
+    pub fn reset_to_healthy(&mut self) {
+        self.backoff_level = 0;
+        self.unavailable_until = None;
+        self.status = ProviderStatus::Healthy;
+    }
+
     pub fn record_retryable(&mut self, cooldown: Duration, now: Instant) {
         self.backoff_level = self.backoff_level.saturating_add(1);
         self.unavailable_until = Some(now + cooldown);

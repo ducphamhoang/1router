@@ -51,13 +51,10 @@ type ProviderTemplate = {
   label: string;
   kind: string;
   // Only meaningful for passthrough: a passthrough provider hits exactly
-  // one upstream wire shape, so this also picks which single wire_format
-  // pool "Make it directly callable" auto-creates. OAuth-kind providers
-  // (Codex, Command Code) bridge Anthropic<->OpenAI themselves and serve
-  // both client formats regardless of this value - the field is hidden
-  // from the form for those kinds; this default just seeds the one pool
-  // auto-created on save. Add the provider to a second pool of the other
-  // wire_format from the Pools page if you need both routes callable.
+  // one upstream wire shape. OAuth-kind providers (Codex, Command Code)
+  // bridge Anthropic<->OpenAI themselves and serve both client formats
+  // regardless of this value - the field is hidden from the form for those
+  // kinds.
   wire_format: string;
   suggestedId: string;
   base_url?: string;
@@ -163,7 +160,6 @@ export function Providers() {
   const [modalOpen, setModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preset, setPreset] = useState("custom");
-  const [exposeAsPool, setExposeAsPool] = useState(true);
   // Tracks whether the user has typed their own id/name since the modal
   // opened, so applying a template never clobbers something they already
   // typed - only the untouched default gets overwritten.
@@ -255,7 +251,6 @@ export function Providers() {
     // pre-filled id/name text sitting in the fields to clear first. "Custom"
     // is still last in the dropdown list, though - see PROVIDER_TEMPLATES.
     setPreset("custom");
-    setExposeAsPool(true);
     setIdTouched(false);
     setNameTouched(false);
     setCommandCodeModels([]);
@@ -405,38 +400,6 @@ export function Providers() {
           body: JSON.stringify(body)
         }
       );
-
-      if (!editing && exposeAsPool) {
-        // Best-effort: the provider is already saved above, so a pool-name
-        // clash here (e.g. that id is already a pool of a different
-        // wire_format) must surface as a warning, not undo the provider.
-        try {
-          await apiJson("/admin/pools", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: form.id, wire_format: form.wire_format })
-          });
-          await apiJson(`/admin/pools/${encodeURIComponent(form.id)}/members`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider_id: form.id, priority: 1 })
-          });
-        } catch (err) {
-          setError(
-            `Provider '${form.id}' was created, but could not expose it as a pool: ${
-              err instanceof Error ? err.message : "unknown error"
-            }. Add it to a pool from the Pools page instead.`
-          );
-          if (saved.kind !== "passthrough") {
-            setEditing(saved);
-            setForm({ ...saved, api_key: "" });
-          } else {
-            setModalOpen(false);
-          }
-          await loadProviders();
-          return;
-        }
-      }
 
       // An OAuth-kind provider isn't usable yet - it still needs Connect (Codex)
       // or a pasted key (Command Code). Rather than closing the modal and
@@ -702,17 +665,6 @@ export function Providers() {
             </label>
             {form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed ? (
               <p className="hint">Log in or paste an API key above to fetch the model list.</p>
-            ) : null}
-            {!editing ? (
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={exposeAsPool}
-                  onChange={(event) => setExposeAsPool(event.target.checked)}
-                />
-                Make it directly callable (creates a matching pool, e.g. call <code>{form.id || "<id>"}</code> as the
-                model)
-              </label>
             ) : null}
             {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
             {error ? <p role="alert">{error}</p> : null}

@@ -1033,13 +1033,17 @@ fn mask_secret_for_cli(secret: &str) -> String {
 
 fn print_connection_details(require_shared_secret: bool) {
     println!("\nConnection details:\n");
+    // `model` can be either a pool id (from the Pools menu) or a direct
+    // `<provider-id>/<model>` addressing the provider's own upstream model -
+    // both work, the provider's models are listed by GET /v1/models.
+    let model = "<pool-id> or <provider-id>/<model>";
     if require_shared_secret {
         println!(
-            "  curl http://<host>:<port>/v1/chat/completions \\\n    -H 'Authorization: Bearer <your-admin-secret>' \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
+            "  curl http://<host>:<port>/v1/chat/completions \\\n    -H 'Authorization: Bearer <your-admin-secret>' \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
         );
     } else {
         println!(
-            "  curl http://<host>:<port>/v1/chat/completions \\\n    # no API key needed — open access is on \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"<pool-id>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
+            "  curl http://<host>:<port>/v1/chat/completions \\\n    # no API key needed — open access is on \\\n    -H 'Content-Type: application/json' \\\n    -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
         );
     }
 }
@@ -1094,80 +1098,13 @@ pub async fn run_first_boot_wizard(
             _ => add_commandcode_provider(db, http).await?,
         };
 
-        // Pool id: what clients will send as `model`. The provider row above
-        // is already committed, so an interrupt (Ctrl-C/EOF) here leaves a
-        // provider with no pool membership - print a clear recovery hint
-        // before propagating rather than a bare prompt error, since the next
-        // boot won't re-trigger the wizard (the providers table is no
-        // longer empty).
-        let default_pool = provider.id.clone();
-        let pool_id: String = Input::with_theme(&theme())
-            .with_prompt("Pool id (this is the `model` name clients will request)")
-            .default(default_pool)
-            .interact_text()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "setup interrupted: provider '{}' was created but not added to a pool. \
-                     Add it later via PUT /admin/pools/:id/members. ({e})",
-                    provider.id
-                )
-            })?;
-        let pool_id = pool_id.trim().to_string();
-        let priority = assign_to_pool(db, &pool_id, &provider, None).await?;
+        // No pool step anymore: providers are directly callable via
+        // `<provider_id>/<model>` (see `pools::select::select_direct_provider`),
+        // so clients can use any upstream model without a throwaway pool.
         println!(
-            "  added '{}' to pool '{pool_id}' at priority {priority}",
-            provider.id
+            "  added '{}' — call it as model '<{}/<model>' (or add it to a pool from the Pools menu)",
+            provider.name, provider.id
         );
-
-        // Let the same already-authenticated provider serve more pools under
-        // different upstream models (e.g. one Codex OAuth login backing
-        // codex-sol/codex-terra/codex-luna) without re-running the OAuth
-        // dance or creating duplicate provider rows.
-        let mut add_more_pools = Confirm::with_theme(&theme())
-            .with_prompt(format!(
-                "Add '{}' to another pool with a different model?",
-                provider.id
-            ))
-            .default(false)
-            .interact()?;
-        while add_more_pools {
-            let extra_pool_id: String = Input::with_theme(&theme())
-                .with_prompt("Pool id (this is the `model` name clients will request)")
-                .interact_text()?;
-            let extra_pool_id = extra_pool_id.trim().to_string();
-
-            let model_override: String = Input::with_theme(&theme())
-                .with_prompt(format!(
-                    "Model override for this pool (blank = use '{}')",
-                    provider.upstream_model
-                ))
-                .allow_empty(true)
-                .interact_text()?;
-            let model_override = model_override.trim();
-            let model_override = if model_override.is_empty() {
-                None
-            } else {
-                Some(model_override.to_string())
-            };
-
-            let priority =
-                assign_to_pool(db, &extra_pool_id, &provider, model_override.clone()).await?;
-            println!(
-                "  added '{}' to pool '{extra_pool_id}' at priority {priority}{}",
-                provider.id,
-                model_override
-                    .map(|m| format!(" (model override: '{m}')"))
-                    .unwrap_or_default()
-            );
-
-            add_more_pools = Confirm::with_theme(&theme())
-                .with_prompt(format!(
-                    "Add '{}' to yet another pool with a different model?",
-                    provider.id
-                ))
-                .default(false)
-                .interact()?;
-        }
 
         ask = Confirm::with_theme(&theme())
             .with_prompt("Add another provider?")
@@ -1205,57 +1142,10 @@ async fn run_provider_menu(db: &sqlx::SqlitePool, http: &reqwest::Client) -> any
             1 => add_codex_provider(db, http).await?,
             _ => add_commandcode_provider(db, http).await?,
         };
-        let pool_id: String = Input::with_theme(&theme())
-            .with_prompt("Pool id (this is the `model` name clients will request)")
-            .default(provider.id.clone())
-            .interact_text()?;
-        let priority = assign_to_pool(db, pool_id.trim(), &provider, None).await?;
         println!(
-            "  added '{}' to pool '{}' at priority {priority}",
-            provider.id,
-            pool_id.trim()
+            "  added '{}' — call it as model '<{}/<model>' (or add it to a pool from the Pools menu)",
+            provider.name, provider.id
         );
-        let mut add_more_pools = Confirm::with_theme(&theme())
-            .with_prompt(format!(
-                "Add '{}' to another pool with a different model?",
-                provider.id
-            ))
-            .default(false)
-            .interact()?;
-        while add_more_pools {
-            let extra_pool_id: String = Input::with_theme(&theme())
-                .with_prompt("Pool id (this is the `model` name clients will request)")
-                .interact_text()?;
-            let model_override: String = Input::with_theme(&theme())
-                .with_prompt(format!(
-                    "Model override for this pool (blank = use '{}')",
-                    provider.upstream_model
-                ))
-                .allow_empty(true)
-                .interact_text()?;
-            let model_override = if model_override.trim().is_empty() {
-                None
-            } else {
-                Some(model_override.trim().to_string())
-            };
-            let priority =
-                assign_to_pool(db, extra_pool_id.trim(), &provider, model_override.clone()).await?;
-            println!(
-                "  added '{}' to pool '{}' at priority {priority}{}",
-                provider.id,
-                extra_pool_id.trim(),
-                model_override
-                    .map(|model| format!(" (model override: '{model}')"))
-                    .unwrap_or_default()
-            );
-            add_more_pools = Confirm::with_theme(&theme())
-                .with_prompt(format!(
-                    "Add '{}' to yet another pool with a different model?",
-                    provider.id
-                ))
-                .default(false)
-                .interact()?;
-        }
         add = Confirm::with_theme(&theme())
             .with_prompt("Add another provider?")
             .default(false)

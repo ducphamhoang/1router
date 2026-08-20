@@ -148,6 +148,7 @@ pub async fn assign_to_pool(
 }
 
 use crate::core::model::{ProviderKind, WireFormat};
+use crate::providers::adapter::commandcode::api_key::commandcode_key_from_disk;
 use crate::providers::adapter::commandcode::browser_login::{self, AuthListener, LoginError};
 use crate::providers::queries as provider_queries;
 use dialoguer::{Confirm, Input, Password, Select};
@@ -415,6 +416,10 @@ pub async fn store_commandcode_key(
     provider_id: &str,
     key: &str,
 ) -> Result<(), AppError> {
+    // A new key may belong to a different account type (Go-plan vs Provider
+    // API), so drop the in-process transport choice - pi's transport.ts does
+    // the same.
+    crate::providers::adapter::commandcode::reset_transport(provider_id);
     provider_queries::upsert_oauth_tokens(
         db,
         provider_id,
@@ -436,6 +441,37 @@ async fn paste_commandcode_key() -> anyhow::Result<String> {
             .map_err(anyhow::Error::from)
     })
     .await??)
+}
+
+/// Run the interactive browser-login flow (open commandcode.ai, listen for
+/// the localhost callback), falling back to paste on timeout/bind failure.
+async fn prompt_commandcode_key(state_token: &str) -> anyhow::Result<String> {
+    match browser_login::bind_listener().await {
+        Ok((listener, port)) => {
+            let auth = AuthListener::new(listener, port, state_token.to_string());
+            let url = auth.authorize_url();
+            let task = tokio::spawn(auth.wait());
+            println!("\n=== Command Code login ===\nOpen this URL (it is also printed for headless use):\n\n{url}\n");
+            browser_login::open_in_browser(&url);
+            match task.await? {
+                Ok(callback) => browser_login::validate_state(state_token, callback)
+                    .map(|callback| callback.api_key)
+                    .map_err(|e| anyhow::anyhow!("Command Code login failed: {e:?}")),
+                Err(LoginError::Timeout) => {
+                    println!("Automatic transfer failed or timed out.");
+                    paste_commandcode_key().await
+                }
+                Err(LoginError::Denied(reason)) => {
+                    anyhow::bail!("Command Code login denied: {reason}")
+                }
+                Err(error) => anyhow::bail!("Command Code login failed: {error:?}"),
+            }
+        }
+        Err(error) => {
+            eprintln!("Could not bind the Command Code callback listener ({error}); falling back to paste.");
+            paste_commandcode_key().await
+        }
+    }
 }
 
 pub async fn add_commandcode_provider(
@@ -481,32 +517,19 @@ pub async fn add_commandcode_provider(
         .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", provider.id))?;
 
     let state_token = uuid::Uuid::new_v4().to_string();
-    let key = match browser_login::bind_listener().await {
-        Ok((listener, port)) => {
-            let auth = AuthListener::new(listener, port, state_token.clone());
-            let url = auth.authorize_url();
-            let task = tokio::spawn(auth.wait());
-            println!("\n=== Command Code login ===\nOpen this URL (it is also printed for headless use):\n\n{url}\n");
-            browser_login::open_in_browser(&url);
-            match task.await? {
-                Ok(callback) => browser_login::validate_state(&state_token, callback)
-                    .map(|callback| callback.api_key)
-                    .map_err(|e| anyhow::anyhow!("Command Code login failed: {e:?}")),
-                Err(LoginError::Timeout) => {
-                    println!("Automatic transfer failed or timed out.");
-                    paste_commandcode_key().await
-                }
-                Err(LoginError::Denied(reason)) => {
-                    anyhow::bail!("Command Code login denied: {reason}")
-                }
-                Err(error) => anyhow::bail!("Command Code login failed: {error:?}"),
-            }
+    let key = if let Some(existing) = commandcode_key_from_disk() {
+        if Confirm::with_theme(&theme())
+            .with_prompt("Found a Command Code key in ~/.commandcode/auth.json (or env); use it?")
+            .default(true)
+            .interact()?
+        {
+            existing
+        } else {
+            prompt_commandcode_key(&state_token).await?
         }
-        Err(error) => {
-            eprintln!("Could not bind the Command Code callback listener ({error}); falling back to paste.");
-            paste_commandcode_key().await
-        }
-    }?;
+    } else {
+        prompt_commandcode_key(&state_token).await?
+    };
     if key.trim().is_empty() {
         anyhow::bail!("Command Code API key cannot be empty");
     }

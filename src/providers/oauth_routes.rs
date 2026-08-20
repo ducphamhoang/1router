@@ -126,6 +126,7 @@ async fn complete(
 
 #[derive(Deserialize)]
 struct CommandCodeKeyBody {
+    /// May be empty to mean "use the key found on disk" (see below).
     api_key: String,
 }
 
@@ -142,9 +143,13 @@ async fn set_commandcode_key(
     }
     let key = body.api_key.trim();
     if key.is_empty() {
-        return Err(AppError::BadRequest("api_key must not be empty".into()));
+        let from_disk = crate::providers::adapter::commandcode::api_key::commandcode_key_from_disk();
+        let key = from_disk
+            .ok_or_else(|| AppError::BadRequest("api_key must not be empty".into()))?;
+        store_commandcode_key(&s.db, &id, &key).await?;
+    } else {
+        store_commandcode_key(&s.db, &id, key).await?;
     }
-    store_commandcode_key(&s.db, &id, key).await?;
     reload_snapshot(&s).await?;
     Ok(Json(json!({ "ok": true })))
 }

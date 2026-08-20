@@ -239,6 +239,36 @@ describe("CommandCodeKeyPanel", () => {
     await vi.waitFor(() => expect(onCredentialSaved).toHaveBeenCalledWith(["cc-large"]));
   });
 
+  it("uses_the_key_from_this_machine_when_requested", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers/prov_1/commandcode/key" && init?.method === "POST") {
+          expect(JSON.parse(String(init.body))).toEqual({ api_key: "" });
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/list-models") {
+          return new Response(JSON.stringify({ ok: true, models: ["cc-large"] }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/validate-model" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true, status: 200 }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    const onCredentialSaved = vi.fn();
+
+    render(<CommandCodeKeyPanel providerId="prov_1" hasCredential={false} onCredentialSaved={onCredentialSaved} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Use key from this machine" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Command Code key from this machine validated (tested against cc-large)."
+    );
+    expect(onCredentialSaved).toHaveBeenCalledWith(["cc-large"]);
+  });
+
   it("shows_a_masked_placeholder_for_an_existing_key_and_revalidates_it_without_resubmitting", async () => {
     vi.stubGlobal(
       "fetch",

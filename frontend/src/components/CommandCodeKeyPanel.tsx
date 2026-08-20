@@ -72,6 +72,7 @@ export function CommandCodeKeyPanel({
   const [error, setError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [usingDiskKey, setUsingDiskKey] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -228,6 +229,59 @@ export function CommandCodeKeyPanel({
     }
   }
 
+  // Ask the server to store the Command Code key it can read from this
+  // machine (env var, ~/.commandcode/auth.json, ~/.pi/agent/auth.json,
+  // ~/.omp/agent/auth.json - see api_key.rs), then run the same validation
+  // path as a pasted key. Only works when 1router runs on a machine that has
+  // one of those credentials.
+  async function useKeyFromDisk() {
+    setError(null);
+    setMessage(null);
+    setUsingDiskKey(true);
+    try {
+      await apiJson(`/admin/providers/${encodeURIComponent(providerId)}/commandcode/key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: "" })
+      });
+
+      const models = await discoverModels();
+      if (models.length === 0) {
+        throw new Error("Key saved, but no Command Code models were found to validate against.");
+      }
+
+      let lastFailure = "Command Code rejected this API key.";
+      let validatedModel: string | null = null;
+      for (const model of models.slice(0, MAX_VALIDATION_ATTEMPTS)) {
+        const validated = await apiJson<ValidateModelResponse>(
+          `/admin/providers/${encodeURIComponent(providerId)}/validate-model`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model })
+          }
+        );
+        if (validated.ok) {
+          validatedModel = model;
+          break;
+        }
+        lastFailure = validated.message ?? lastFailure;
+      }
+      if (!validatedModel) {
+        onCredentialSaved([]);
+        throw new Error(lastFailure);
+      }
+
+      setApiKey("");
+      setShowingPlaceholder(true);
+      setMessage(`Command Code key from this machine validated (tested against ${validatedModel}).`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Command Code key validation failed.");
+    } finally {
+      setUsingDiskKey(false);
+    }
+  }
+
   return (
     <section aria-labelledby="commandcode-key-title">
       <h2 id="commandcode-key-title">Command Code</h2>
@@ -239,6 +293,13 @@ export function CommandCodeKeyPanel({
       </p>
       <button type="button" onClick={loginWithBrowser} disabled={loggingIn}>
         {loggingIn ? "Waiting for login..." : "Login with browser"}
+      </button>
+      <button
+        type="button"
+        onClick={useKeyFromDisk}
+        disabled={usingDiskKey || loggingIn}
+      >
+        {usingDiskKey ? "Using key from this machine..." : "Use key from this machine"}
       </button>
       <p>Or paste an existing API key:</p>
       <label>

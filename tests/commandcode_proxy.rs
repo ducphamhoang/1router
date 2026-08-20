@@ -3,7 +3,7 @@ mod common;
 use common::{auth_header, spawn_app, TestApp};
 use serde_json::json;
 use std::sync::{Mutex, OnceLock};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn env_lock() -> &'static Mutex<()> {
@@ -49,6 +49,29 @@ async fn create_cc(app: &TestApp, pool_id: &str, wire: &str) {
         .unwrap();
 }
 
+/// Mount the provider-chat mock returning 403 `upgrade_required` so the
+/// adapter falls back to `/alpha/generate` (Go-plan accounts - this is what
+/// pi's transport.ts does). The generate mock then answers the real request.
+async fn mount_upgrade_required_and_generate(upstream: &MockServer, generate_body: &str) {
+    Mock::given(method("POST"))
+        .and(path("/provider/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({"error":{"code":"upgrade_required"}})),
+        )
+        .mount(upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/alpha/generate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/x-ndjson")
+                .set_body_string(generate_body),
+        )
+        .mount(upstream)
+        .await;
+}
+
 #[tokio::test]
 async fn openai_wire_streaming_end_to_end() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -59,7 +82,11 @@ async fn openai_wire_streaming_end_to_end() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"cc-model"}]})))
         .mount(&upstream)
         .await;
-    Mock::given(method("POST")).and(path("/alpha/generate")).and(header("authorization", "Bearer cc-key")).and(header("x-command-code-version", "0.29.0")).and(header("x-cli-environment", "production")).and(header("x-taste-learning", "true")).and(header("x-co-flag", "false")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "application/x-ndjson").set_body_string("{\"type\":\"text-delta\",\"text\":\"hi\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n")).mount(&upstream).await;
+    mount_upgrade_required_and_generate(
+        &upstream,
+        "{\"type\":\"text-delta\",\"text\":\"hi\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n",
+    )
+    .await;
     let app = spawn_app().await;
     create_cc(&app, "cc-pool", "openai").await;
     let client = reqwest::Client::new();
@@ -87,7 +114,11 @@ async fn anthropic_wire_streaming_end_to_end() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"cc-model"}]})))
         .mount(&upstream)
         .await;
-    Mock::given(method("POST")).and(path("/alpha/generate")).respond_with(ResponseTemplate::new(200).set_body_string("{\"type\":\"text-delta\",\"text\":\"hi\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n")).mount(&upstream).await;
+    mount_upgrade_required_and_generate(
+        &upstream,
+        "{\"type\":\"text-delta\",\"text\":\"hi\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n",
+    )
+    .await;
     let app = spawn_app().await;
     create_cc(&app, "cc-claude", "anthropic").await;
     let client = reqwest::Client::new();
@@ -109,7 +140,11 @@ async fn non_streaming_aggregates() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"cc-model"}]})))
         .mount(&upstream)
         .await;
-    Mock::given(method("POST")).and(path("/alpha/generate")).respond_with(ResponseTemplate::new(200).set_body_string("{\"type\":\"text-delta\",\"text\":\"hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n")).mount(&upstream).await;
+    mount_upgrade_required_and_generate(
+        &upstream,
+        "{\"type\":\"text-delta\",\"text\":\"hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n",
+    )
+    .await;
     let app = spawn_app().await;
     create_cc(&app, "cc-json", "openai").await;
     let client = reqwest::Client::new();
@@ -135,6 +170,11 @@ async fn upstream_429_cools_the_provider_and_fails_over() {
     Mock::given(method("GET"))
         .and(path("/provider/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"cc-model"}]})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/provider/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429))
         .mount(&upstream)
         .await;
     Mock::given(method("POST"))
@@ -180,6 +220,16 @@ async fn a_401_marks_the_provider_misconfigured_rather_than_attempting_a_refresh
     Mock::given(method("GET"))
         .and(path("/provider/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"cc-model"}]})))
+        .mount(&upstream)
+        .await;
+    // provider-chat 403s with upgrade_required, so the request falls back to
+    // /alpha/generate, which 401s - the provider must end up misconfigured.
+    Mock::given(method("POST"))
+        .and(path("/provider/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({"error":{"code":"upgrade_required"}})),
+        )
         .mount(&upstream)
         .await;
     Mock::given(method("POST"))

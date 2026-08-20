@@ -8,6 +8,9 @@ use crate::core::error::{ErrorClass, RefreshError};
 use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::state::AppState;
 use crate::pools::select::select;
+use crate::providers::adapter::commandcode::{
+    current_transport, is_upgrade_required, remember_transport, Transport,
+};
 use crate::providers::adapter::{adapter_for_wire, Credentials};
 use crate::providers::queries::get_oauth_state;
 use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
@@ -368,6 +371,142 @@ pub async fn handle_proxy(
                 }
             }
             ErrorClass::Retryable { retry_after } => {
+                let error_text = upstream.text().await.unwrap_or_default();
+
+                // Command Code transport fallback: a 403 with
+                // `upgrade_required` from the provider transport means this
+                // account must use `/alpha/generate` (Go-plan accounts - see
+                // pi's transport.ts). Remember it and retry the same provider
+                // once through the generate transport before the normal
+                // cooldown path.
+                if provider.kind == ProviderKind::OauthCommandCode
+                    && current_transport(&provider.id) == Transport::Provider
+                    && is_upgrade_required(status, &error_text)
+                {
+                    remember_transport(&provider.id, Transport::Generate);
+                    let retry_req = match adapter.build_request(&body, &creds).await {
+                        Ok(req) => req,
+                        Err(e) => {
+                            log(&state, &pool_id, &provider.id, None, 0, false);
+                            last_error_body = format!("retry request build failed: {e}");
+                            continue;
+                        }
+                    };
+                    let start2 = Instant::now();
+                    let resp2 = match state.http.execute(retry_req).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            let lat2 = start2.elapsed().as_millis() as i64;
+                            {
+                                let mut st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                let cooldown = backoff::cooldown_for(st.backoff_level + 1);
+                                st.record_retryable(cooldown, Instant::now());
+                            }
+                            log(&state, &pool_id, &provider.id, None, lat2, false);
+                            last_error_body = format!("retry upstream request error: {e}");
+                            continue;
+                        }
+                    };
+                    let lat2 = start2.elapsed().as_millis() as i64;
+                    let retry_status = resp2.status();
+                    let retry_headers = resp2.headers().clone();
+                    let retry_class = adapter
+                        .classify_error(retry_status, &retry_headers)
+                        .await;
+                    match retry_class {
+                        ErrorClass::Success => {
+                            {
+                                let mut st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                st.record_success();
+                            }
+                            match adapter
+                                .transform_response(resp2, client_wanted_stream)
+                                .await
+                            {
+                                Ok(response) => {
+                                    log(
+                                        &state,
+                                        &pool_id,
+                                        &provider.id,
+                                        Some(retry_status.as_u16() as i64),
+                                        lat2,
+                                        true,
+                                    );
+                                    return response;
+                                }
+                                Err(e) => {
+                                    log(
+                                        &state,
+                                        &pool_id,
+                                        &provider.id,
+                                        Some(retry_status.as_u16() as i64),
+                                        lat2,
+                                        false,
+                                    );
+                                    last_error_body =
+                                        format!("retry response transform failed: {e}");
+                                }
+                            }
+                        }
+                        ErrorClass::NonRetryable => {
+                            {
+                                let mut st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                st.mark_misconfigured();
+                            }
+                            last_error_body = resp2.text().await.unwrap_or_default();
+                            log(
+                                &state,
+                                &pool_id,
+                                &provider.id,
+                                Some(retry_status.as_u16() as i64),
+                                lat2,
+                                false,
+                            );
+                        }
+                        ErrorClass::AuthExpired => {
+                            {
+                                let mut st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                st.mark_misconfigured();
+                            }
+                            last_error_body = resp2.text().await.unwrap_or_default();
+                            log(
+                                &state,
+                                &pool_id,
+                                &provider.id,
+                                Some(retry_status.as_u16() as i64),
+                                lat2,
+                                false,
+                            );
+                        }
+                        ErrorClass::Retryable { .. } => {
+                            let cooldown = {
+                                let st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                backoff::cooldown_for(st.backoff_level + 1)
+                            };
+                            {
+                                let mut st =
+                                    state.runtime.entry(provider.id.clone()).or_default();
+                                st.record_retryable(cooldown, Instant::now());
+                            }
+                            last_error_body = resp2.text().await.unwrap_or_default();
+                            log(
+                                &state,
+                                &pool_id,
+                                &provider.id,
+                                Some(retry_status.as_u16() as i64),
+                                lat2,
+                                false,
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 let cooldown = retry_after.unwrap_or_else(|| {
                     if status.is_server_error()
                         || status == StatusCode::TOO_MANY_REQUESTS
@@ -383,7 +522,7 @@ pub async fn handle_proxy(
                     let mut st = state.runtime.entry(provider.id.clone()).or_default();
                     st.record_retryable(cooldown, Instant::now());
                 }
-                last_error_body = upstream.text().await.unwrap_or_default();
+                last_error_body = error_text;
                 log(
                     &state,
                     &pool_id,

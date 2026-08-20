@@ -214,11 +214,28 @@ async fn commandcode_key_endpoint_rejects_a_non_commandcode_provider() {
 }
 
 #[tokio::test]
-async fn commandcode_key_endpoint_rejects_an_empty_key() {
+async fn commandcode_key_endpoint_rejects_an_empty_key_when_none_on_disk() {
     let app = spawn_app().await;
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
     client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})).send().await.unwrap();
+
+    // The empty-key path means "use the key found on this machine" (env or
+    // ~/.commandcode/auth.json etc). Point the home dir at a non-existent
+    // directory so the test is deterministic regardless of the runner's
+    // actual auth files, and clear the env overrides.
+    let empty_home = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let original = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let original = std::env::var_os("HOME");
+    #[cfg(windows)]
+    std::env::set_var("USERPROFILE", empty_home.path());
+    #[cfg(not(windows))]
+    std::env::set_var("HOME", empty_home.path());
+    std::env::remove_var("COMMANDCODE_API_KEY");
+    std::env::remove_var("ROUTER_COMMANDCODE_API_KEY");
+
     let response = client
         .post(format!(
             "{}/admin/providers/cc/commandcode/key",
@@ -230,6 +247,75 @@ async fn commandcode_key_endpoint_rejects_an_empty_key() {
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
+
+    #[cfg(windows)]
+    match original {
+        Some(value) => std::env::set_var("USERPROFILE", value),
+        None => std::env::remove_var("USERPROFILE"),
+    }
+    #[cfg(not(windows))]
+    match original {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[tokio::test]
+async fn commandcode_key_endpoint_uses_a_key_from_disk_when_body_key_is_empty() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})).send().await.unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let auth_dir = home.path().join(".commandcode");
+    std::fs::create_dir_all(&auth_dir).unwrap();
+    std::fs::write(
+        auth_dir.join("auth.json"),
+        r#"{"apiKey":"user_disk_key"}"#,
+    )
+    .unwrap();
+    std::env::remove_var("COMMANDCODE_API_KEY");
+    std::env::remove_var("ROUTER_COMMANDCODE_API_KEY");
+    #[cfg(windows)]
+    let original = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let original = std::env::var_os("HOME");
+    #[cfg(windows)]
+    std::env::set_var("USERPROFILE", home.path());
+    #[cfg(not(windows))]
+    std::env::set_var("HOME", home.path());
+
+    let response = client
+        .post(format!(
+            "{}/admin/providers/cc/commandcode/key",
+            app.base_url
+        ))
+        .header(k, v)
+        .json(&json!({"api_key":""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let state = sqlx::query_as::<_, router::core::model::OAuthState>(
+        "SELECT * FROM provider_oauth_state WHERE provider_id = 'cc'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(state.access_token.as_deref(), Some("user_disk_key"));
+
+    #[cfg(windows)]
+    match original {
+        Some(value) => std::env::set_var("USERPROFILE", value),
+        None => std::env::remove_var("USERPROFILE"),
+    }
+    #[cfg(not(windows))]
+    match original {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
 }
 
 #[tokio::test]

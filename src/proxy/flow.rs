@@ -4,7 +4,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 
-use crate::core::error::{ErrorClass, RefreshError};
+use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::state::AppState;
 use crate::pools::select::select;
@@ -157,6 +157,13 @@ pub async fn handle_proxy(
                             latency_ms,
                             false,
                         );
+                        // An embedded error with a known HTTP status (e.g.
+                        // commandcode's `<400>` prefix on a bad vision
+                        // request) should reach the client as that status,
+                        // not a generic 503.
+                        if let AppError::UpstreamWithStatus(s, msg) = &e {
+                            return build_wire_error(wire, *s, msg, &tried, &provider.id);
+                        }
                         last_error_body = format!("response transform failed: {e}");
                         continue;
                     }
@@ -276,6 +283,15 @@ pub async fn handle_proxy(
                                             lat2,
                                             false,
                                         );
+                                        if let AppError::UpstreamWithStatus(s, msg) = &e {
+                                            return build_wire_error(
+                                                wire,
+                                                *s,
+                                                msg,
+                                                &tried,
+                                                &provider.id,
+                                            );
+                                        }
                                         last_error_body = format!(
                                             "retry response transform failed: {e}"
                                         );
@@ -445,6 +461,15 @@ pub async fn handle_proxy(
                                         lat2,
                                         false,
                                     );
+                                    if let AppError::UpstreamWithStatus(s, msg) = &e {
+                                        return build_wire_error(
+                                            wire,
+                                            *s,
+                                            msg,
+                                            &tried,
+                                            &provider.id,
+                                        );
+                                    }
                                     last_error_body =
                                         format!("retry response transform failed: {e}");
                                 }
@@ -556,6 +581,20 @@ fn build_error_passthrough(
         resp.headers_mut()
             .insert(axum::http::header::CONTENT_TYPE, ct);
     }
+    insert_debug_headers(resp.headers_mut(), tried, provider_id, body);
+    resp
+}
+
+/// Relay an embedded upstream error whose HTTP status we know in the
+/// client's wire shape (OpenAI/Anthropic JSON), with the debug headers.
+fn build_wire_error(
+    wire: WireFormat,
+    status: StatusCode,
+    body: &str,
+    tried: &[String],
+    provider_id: &str,
+) -> Response {
+    let mut resp = wire_error(wire, status, body);
     insert_debug_headers(resp.headers_mut(), tried, provider_id, body);
     resp
 }

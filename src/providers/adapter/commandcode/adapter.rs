@@ -216,9 +216,10 @@ impl ProviderAdapter for CommandCodeAdapter {
             .await
             .map_err(|e| AppError::Upstream(format!("commandcode response read: {e}")))?;
         if let Some(error) = transform::ndjson_embedded_error(&body) {
-            return Err(AppError::Upstream(format!(
-                "commandcode embedded error: {error}"
-            )));
+            return Err(match transform::embedded_error_status(&error) {
+                Some(status) => AppError::UpstreamWithStatus(status, error),
+                None => AppError::Upstream(format!("commandcode embedded error: {error}")),
+            });
         }
         let json = transform::aggregate_ndjson(&body, &self.provider.upstream_model);
         if self.client_wire == WireFormat::Anthropic {

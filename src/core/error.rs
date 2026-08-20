@@ -13,6 +13,10 @@ pub enum AppError {
     Conflict(String),
     Db(sqlx::Error),
     Upstream(String),
+    /// An upstream failure whose HTTP status we know (e.g. commandcode's
+    /// embedded NDJSON error events carry a `<400>`-style prefix) - lets the
+    /// proxy relay the right status instead of a generic 502/503.
+    UpstreamWithStatus(StatusCode, String),
     Internal(String),
 }
 
@@ -25,6 +29,7 @@ impl std::fmt::Display for AppError {
             AppError::Conflict(m) => write!(f, "conflict: {m}"),
             AppError::Db(e) => write!(f, "db error: {e}"),
             AppError::Upstream(m) => write!(f, "upstream error: {m}"),
+            AppError::UpstreamWithStatus(s, m) => write!(f, "upstream error ({s}): {m}"),
             AppError::Internal(m) => write!(f, "internal error: {m}"),
         }
     }
@@ -47,6 +52,7 @@ impl IntoResponse for AppError {
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
             AppError::Db(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
+            AppError::UpstreamWithStatus(s, m) => (s, m),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
         (status, Json(json!({ "error": { "message": msg } }))).into_response()

@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::Stream;
@@ -320,6 +321,26 @@ pub fn render_chunk(chunk: &Value) -> Bytes {
     Bytes::from(format!("data: {chunk}\n\n"))
 }
 
+/// Map a commandcode `{"type":"error",...}` NDJSON event to an OpenAI
+/// chat.completion.chunk that carries the error as content + a
+/// `finish_reason` so streaming clients (OpenAI SSE, or Anthropic via the
+/// claude_bridge) see the failure instead of a silent `[DONE]`.
+pub fn error_chunk_for_event(state: &mut ChunkState, event: &Value, model: &str) -> Option<Value> {
+    let message = event["error"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| event["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "upstream error".into());
+    let mut out = chunk(
+        state,
+        model,
+        json!({"content": format!("[commandcode error: {message}]")}),
+        Some("stop"),
+    );
+    out["error"] = json!({"message": message, "type": "upstream_error"});
+    Some(out)
+}
+
 pub const SSE_DONE: &[u8] = b"data: [DONE]\n\n";
 
 pub fn convert_ndjson_stream<S, E>(
@@ -354,6 +375,22 @@ where
                 if let Some(pos) = state.buffer.find('\n') {
                     let line: String = state.buffer.drain(..=pos).collect();
                     if let Some(event) = parse_event_line(&line) {
+                        // An error event mid-stream (e.g. a vision request the
+                        // model rejects) must surface to the client, not be
+                        // silently swallowed into a bare `[DONE]`.
+                        if event["type"] == "error" {
+                            state.done = true;
+                            return Some((
+                                Ok(error_chunk_for_event(
+                                    &mut state.chunks,
+                                    &event,
+                                    &state.model,
+                                )
+                                .map(|c| render_chunk(&c))
+                                .unwrap_or_else(|| Bytes::from_static(SSE_DONE))),
+                                state,
+                            ));
+                        }
                         if let Some(chunk) =
                             chat_chunk_for_event(&mut state.chunks, &event, &state.model)
                         {
@@ -372,6 +409,21 @@ where
                         if !state.buffer.is_empty() {
                             if let Some(event) = parse_event_line(&state.buffer) {
                                 state.buffer.clear();
+                                // Trailing error event (no trailing newline or
+                                // split across chunks) must surface too.
+                                if event["type"] == "error" {
+                                    state.done = true;
+                                    return Some((
+                                        Ok(error_chunk_for_event(
+                                            &mut state.chunks,
+                                            &event,
+                                            &state.model,
+                                        )
+                                        .map(|c| render_chunk(&c))
+                                        .unwrap_or_else(|| Bytes::from_static(SSE_DONE))),
+                                        state,
+                                    ));
+                                }
                                 if let Some(chunk) =
                                     chat_chunk_for_event(&mut state.chunks, &event, &state.model)
                                 {
@@ -446,6 +498,18 @@ pub fn ndjson_embedded_error(body: &str) -> Option<String> {
             .or_else(|| event["error"]["message"].as_str().map(str::to_string))
             .or_else(|| Some("upstream error".into()))
     })
+}
+
+/// Extract the `<NNN>` status prefix commandcode's embedded error events
+/// carry (e.g. `<400> InternalError.Algo.InvalidParameter: ...`) so the
+/// proxy can relay the real HTTP status instead of a generic 502/503.
+pub fn embedded_error_status(message: &str) -> Option<StatusCode> {
+    let rest = message.strip_prefix('<')?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    StatusCode::from_u16(digits.parse().ok()?).ok()
 }
 
 pub fn project_slug_from_path(path: &str) -> String {
@@ -579,6 +643,75 @@ mod tests {
         let input = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
         let out = transform_request(&input, "t", "/p");
         assert_eq!(out["params"]["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn error_chunk_for_event_surfaces_the_message() {
+        let mut state = ChunkState::default();
+        let chunk = error_chunk_for_event(
+            &mut state,
+            &json!({"type":"error","error":{"message":"<400> bad image"}}),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(
+            chunk["choices"][0]["delta"]["content"],
+            "[commandcode error: <400> bad image]"
+        );
+        assert_eq!(chunk["error"]["message"], "<400> bad image");
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn convert_ndjson_stream_surfaces_an_error_event_instead_of_silent_done() {
+        let body = concat!(
+            r#"{"type":"text-delta","text":"hi"}"#,
+            "\n",
+            r#"{"type":"error","error":{"message":"<400> bad image"}}"#,
+            "\n"
+        );
+        let chunks = vec![Ok::<Bytes, ()>(Bytes::from(body))];
+        let output = convert_ndjson_stream(futures::stream::iter(chunks), "m".into())
+            .try_collect::<Vec<Bytes>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<u8>>();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("hi"), "text delta still emitted");
+        assert!(
+            text.contains("[commandcode error: <400> bad image]"),
+            "error surfaced, got: {text}"
+        );
+        assert!(!text.contains("[DONE]"), "no silent [DONE] after an error");
+    }
+
+    #[tokio::test]
+    async fn convert_ndjson_stream_surfaces_a_trailing_error_without_newline() {
+        // The real upstream (generate transport) emits `{"type":"start"}\n`
+        // then `{"type":"error",...}` with NO trailing newline, and the two
+        // events can arrive split across network chunks.
+        let chunks = vec![
+            Ok::<Bytes, ()>(Bytes::from(r#"{"type":"start"}"#)),
+            Ok(Bytes::from(
+                r#"
+{"type":"error","error":{"message":"<400> bad image","statusCode":400}}"#,
+            )),
+        ];
+        let output = convert_ndjson_stream(futures::stream::iter(chunks), "m".into())
+            .try_collect::<Vec<Bytes>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<u8>>();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.contains("[commandcode error: <400> bad image]"),
+            "trailing error surfaced, got: {text}"
+        );
+        assert!(!text.contains("[DONE]"), "no silent [DONE] after an error");
     }
 
     #[test]
@@ -725,6 +858,21 @@ mod tests {
             ndjson_embedded_error(r#"{"type":"error","error":"boom"}"#),
             Some("boom".into())
         );
+    }
+
+    #[test]
+    fn embedded_error_status_parses_the_prefix() {
+        assert_eq!(
+            embedded_error_status("<400> InternalError.Algo.InvalidParameter: bad image"),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            embedded_error_status("<429> rate limited"),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(embedded_error_status("no prefix here"), None);
+        assert_eq!(embedded_error_status(""), None);
+        assert_eq!(embedded_error_status("<99999> out of range"), None);
     }
 
     #[test]

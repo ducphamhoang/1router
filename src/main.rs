@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),
+        pool_rotation: Arc::new(dashmap::DashMap::new()),
     };
 
     if let Err(e) = router::admin::auth::session::delete_expired(&state.db).await {

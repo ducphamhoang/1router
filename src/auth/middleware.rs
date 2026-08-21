@@ -320,6 +320,7 @@ mod require_admin_session_tests {
             auth_mode_origin: crate::core::state::AuthModeOrigin::Default,
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
+            pool_rotation: Arc::new(DashMap::new()),
         }
     }
 

@@ -50,7 +50,7 @@ pub async fn handle_proxy(
     body: Bytes,
 ) -> Response {
     let snapshot = state.snapshot.load();
-    let selection = match select(&snapshot, &pool_id, wire) {
+    let selection = match select(&snapshot, &pool_id, wire, &state.pool_rotation) {
         Some(s) => s,
         None => {
             return wire_error(

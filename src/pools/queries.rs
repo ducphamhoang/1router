@@ -135,6 +135,8 @@ mod tests {
                 id: "gpt-4o".into(),
                 wire_format: WireFormat::OpenAi,
                 created_at: Utc::now(),
+                strategy: Default::default(),
+                sticky_limit: None,
             },
         )
         .await

@@ -100,7 +100,10 @@ mod tests {
         ConfigSnapshot {
             providers: vec![prov("a"), prov("b")],
             pools: vec![PoolWithMembers {
-                pool: Pool { id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now() },
+                pool: Pool {
+                    id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now(),
+                    strategy: Default::default(), sticky_limit: None,
+                },
                 members: vec![
                     PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None },
                     PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None },

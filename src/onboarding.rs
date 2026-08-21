@@ -119,6 +119,8 @@ pub async fn assign_to_pool(
                     // provider so the two can't disagree.
                     wire_format: provider.wire_format,
                     created_at: chrono::Utc::now(),
+                    strategy: Default::default(),
+                    sticky_limit: None,
                 },
             )
             .await
@@ -1636,6 +1638,8 @@ mod tests {
                 id: "pre".into(),
                 wire_format: WireFormat::OpenAi,
                 created_at: created,
+                strategy: Default::default(),
+                sticky_limit: None,
             },
         )
         .await

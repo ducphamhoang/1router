@@ -45,6 +45,8 @@ async fn create(
         id: b.id,
         wire_format: b.wire_format,
         created_at: Utc::now(),
+        strategy: Default::default(),
+        sticky_limit: None,
     };
     queries::insert_pool(&s.db, &p).await?;
     reload_snapshot(&s).await?;

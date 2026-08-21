@@ -60,6 +60,31 @@ instead of failing to compile — this bit Phase 1 for real (see plan's P1-3
 fix commit). Grep for `{[a-zA-Z_]*}` in route strings if something 404s
 unexpectedly.
 
+## Resuming work after a context compaction
+
+Whenever you execute a checkbox-style plan from `docs/superpowers/plans/`
+task-by-task (whether via subagent dispatch or working directly), keep
+`.superpowers/sdd/progress.md` updated **immediately after finishing each
+task** — not batched at the end of a session. This file is git-ignored
+scratch (`.superpowers/` is in `.gitignore`) that persists on disk across a
+context compaction/reset; it is the first thing to read when resuming, and
+must be self-sufficient enough that a fresh session with no memory of the
+prior conversation can reconstruct exactly where work stopped without
+re-reading chat history. Each entry should record, at minimum:
+
+- which plan file is active (path under `docs/superpowers/plans/`)
+- which task/step number just completed (or is mid-flight, and why it
+  isn't finished)
+- the branch name work is happening on
+- the last commit hash for that task, if one was made
+- any deviation from the plan and why (mirrors the plan-execution skill's
+  deviation-handling — don't silently diverge without a note here)
+
+Create the file (and `.superpowers/sdd/` if absent — it's gitignored, so a
+fresh checkout never has it) the first time a plan execution starts if it
+doesn't already exist. Read it first, before re-deriving status from `git
+log`/`git diff`, whenever resuming a plan that was already in progress.
+
 ## Onboarding
 
 - `src/onboarding.rs` is the interactive wizard (`1router setup`, plus the

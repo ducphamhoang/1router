@@ -215,3 +215,147 @@ async fn codex_provider_can_join_a_pool_with_a_different_stored_wire_format() {
         .unwrap();
     assert_eq!(m.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn create_pool_defaults_to_priority_strategy() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let c = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.status(), StatusCode::CREATED);
+    let bytes = to_bytes(c.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["strategy"], "priority");
+    assert_eq!(body["sticky_limit"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn create_pool_accepts_round_robin_strategy() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let c = router
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({
+                "id": "gpt-4o", "wire_format": "openai",
+                "strategy": "round_robin", "sticky_limit": 3
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.status(), StatusCode::CREATED);
+    let bytes = to_bytes(c.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["strategy"], "round_robin");
+    assert_eq!(body["sticky_limit"], 3);
+}
+
+#[tokio::test]
+async fn put_pool_updates_strategy() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+
+    let u = router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o",
+            secret.as_str(),
+            json!({ "strategy": "round_robin", "sticky_limit": 2 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(u.status(), StatusCode::OK);
+    let bytes = to_bytes(u.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["strategy"], "round_robin");
+    assert_eq!(body["sticky_limit"], 2);
+
+    // Persisted, not just returned in the response.
+    let list = router
+        .oneshot(empty_request(Method::GET, "/admin/pools", secret.as_str()))
+        .await
+        .unwrap();
+    let bytes = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(arr[0]["strategy"], "round_robin");
+}
+
+#[tokio::test]
+async fn put_pool_patching_sticky_limit_alone_does_not_reset_strategy() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai", "strategy": "round_robin" }),
+        ))
+        .await
+        .unwrap();
+
+    // Patch only sticky_limit - strategy must stay round_robin, not reset
+    // to the default priority.
+    let u = router
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o",
+            secret.as_str(),
+            json!({ "sticky_limit": 5 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(u.status(), StatusCode::OK);
+    let bytes = to_bytes(u.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["strategy"], "round_robin");
+    assert_eq!(body["sticky_limit"], 5);
+}
+
+#[tokio::test]
+async fn put_pool_rejects_unknown_id() {
+    let state = test_state().await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let u = router
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/nope",
+            secret.as_str(),
+            json!({ "strategy": "round_robin" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(u.status(), StatusCode::NOT_FOUND);
+}

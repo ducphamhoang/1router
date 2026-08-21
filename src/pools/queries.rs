@@ -18,12 +18,16 @@ pub async fn get_pool(db: &SqlitePool, id: &str) -> Result<Pool, AppError> {
 }
 
 pub async fn insert_pool(db: &SqlitePool, p: &Pool) -> Result<(), AppError> {
-    let res = sqlx::query("INSERT INTO pools (id, wire_format, created_at) VALUES (?, ?, ?)")
-        .bind(&p.id)
-        .bind(p.wire_format)
-        .bind(p.created_at)
-        .execute(db)
-        .await;
+    let res = sqlx::query(
+        "INSERT INTO pools (id, wire_format, created_at, strategy, sticky_limit) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&p.id)
+    .bind(p.wire_format)
+    .bind(p.created_at)
+    .bind(p.strategy)
+    .bind(p.sticky_limit)
+    .execute(db)
+    .await;
 
     match res {
         Ok(_) => Ok(()),
@@ -31,6 +35,30 @@ pub async fn insert_pool(db: &SqlitePool, p: &Pool) -> Result<(), AppError> {
             format!("pool '{}' already exists", p.id),
         )),
         Err(e) => Err(AppError::Db(e)),
+    }
+}
+
+/// Update an existing pool's selection strategy/sticky_limit. There is no
+/// "update wire_format" path - a pool's wire format is fixed at creation,
+/// same as `Provider::wire_format` for OAuth kinds.
+pub async fn update_pool_strategy(
+    db: &SqlitePool,
+    id: &str,
+    strategy: crate::core::model::PoolStrategy,
+    sticky_limit: Option<i64>,
+) -> Result<(), AppError> {
+    let n = sqlx::query("UPDATE pools SET strategy = ?, sticky_limit = ? WHERE id = ?")
+        .bind(strategy)
+        .bind(sticky_limit)
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+
+    if n == 0 {
+        Err(AppError::NotFound)
+    } else {
+        Ok(())
     }
 }
 

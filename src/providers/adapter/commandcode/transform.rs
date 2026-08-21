@@ -45,6 +45,21 @@ fn complete_tool_call_ids(messages: &[Value]) -> std::collections::HashSet<Strin
 
 fn convert_messages(messages: &[Value]) -> Vec<Value> {
     let paired = complete_tool_call_ids(messages);
+    // Map tool_call_id -> tool name from the assistant's tool_calls, so a
+    // following `tool` role message can include the `toolName` the generate
+    // transport requires on its tool-result content block (without it the
+    // upstream 400s: "expected string, received undefined at
+    // params.messages[..].content[0].toolName").
+    let tool_names: std::collections::HashMap<String, String> = messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .filter_map(|call| {
+            let id = call["id"].as_str()?;
+            let name = call["function"]["name"].as_str()?;
+            Some((id.to_string(), name.to_string()))
+        })
+        .collect();
     let mut out = Vec::new();
     for message in messages {
         let role = message["role"].as_str().unwrap_or("user");
@@ -84,7 +99,12 @@ fn convert_messages(messages: &[Value]) -> Vec<Value> {
                 if paired.contains(id) {
                     out.push(json!({
                         "role":"tool",
-                        "content":[{"type":"tool-result","toolCallId":id,"output":{"type":"text","value":content_text(&message["content"])}}]
+                        "content":[{
+                            "type":"tool-result",
+                            "toolCallId":id,
+                            "toolName":tool_names.get(id).map(String::as_str).unwrap_or_default(),
+                            "output":{"type":"text","value":content_text(&message["content"])}
+                        }]
                     }));
                 }
             }
@@ -607,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             out["params"]["messages"][1]["content"][0],
-            json!({"type":"tool-result","toolCallId":"t1","output":{"type":"text","value":"ok"}})
+            json!({"type":"tool-result","toolCallId":"t1","toolName":"lookup","output":{"type":"text","value":"ok"}})
         );
         assert_eq!(out["params"]["messages"].as_array().unwrap().len(), 2);
     }

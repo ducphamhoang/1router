@@ -14,7 +14,14 @@ type PoolMember = {
 type Pool = {
   id: string;
   wire_format: string;
+  strategy: string;
+  sticky_limit?: number | null;
 };
+
+const STRATEGY_OPTIONS = [
+  { value: "priority", label: "Priority (fallback)" },
+  { value: "round_robin", label: "Round Robin (rotate)" }
+];
 
 type Provider = {
   id: string;
@@ -104,6 +111,8 @@ export function Pools() {
   const [membersByPool, setMembersByPool] = useState<Record<string, PoolMember[]>>({});
   const [poolId, setPoolId] = useState("");
   const [wireFormat, setWireFormat] = useState("openai");
+  const [strategy, setStrategy] = useState("priority");
+  const [stickyLimit, setStickyLimit] = useState("");
   const [addMemberDraft, setAddMemberDraft] = useState<Record<string, { providerId: string; modelOverride: string }>>({});
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
@@ -161,16 +170,40 @@ export function Pools() {
   async function createPool(event: FormEvent) {
     event.preventDefault();
     try {
+      const parsedStickyLimit = Number.parseInt(stickyLimit, 10);
       await apiJson("/admin/pools", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: poolId, wire_format: wireFormat })
+        body: JSON.stringify({
+          id: poolId,
+          wire_format: wireFormat,
+          strategy,
+          sticky_limit: Number.isFinite(parsedStickyLimit) ? parsedStickyLimit : undefined
+        })
       });
       setPoolId("");
+      setStrategy("priority");
+      setStickyLimit("");
       setCreateOpen(false);
       await loadPools();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Creating pool failed.");
+    }
+  }
+
+  // Round Robin only - Priority pools ignore sticky_limit entirely. Refetches
+  // the pool list afterward so the header badge reflects what's persisted,
+  // not just what was requested.
+  async function updateStrategy(pool: Pool, patch: { strategy?: string; sticky_limit?: number }) {
+    try {
+      await apiJson(`/admin/pools/${encodeURIComponent(pool.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      await loadPools();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Updating pool strategy failed.");
     }
   }
 
@@ -376,6 +409,39 @@ export function Pools() {
             <span className="badge">{pool.wire_format}</span>
             <span className="pool-meta">{describeCount(members.length)}</span>
           </div>
+          <div className="pool-strategy">
+            <label>
+              Strategy
+              <select
+                aria-label={`Strategy for ${pool.id}`}
+                value={pool.strategy ?? "priority"}
+                onChange={(event) => void updateStrategy(pool, { strategy: event.target.value })}
+              >
+                {STRATEGY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {pool.strategy === "round_robin" ? (
+              <label>
+                Sticky limit
+                <input
+                  aria-label={`Sticky limit for ${pool.id}`}
+                  type="number"
+                  min={1}
+                  defaultValue={pool.sticky_limit ?? 1}
+                  onBlur={(event) => {
+                    const parsed = Number.parseInt(event.target.value, 10);
+                    if (Number.isFinite(parsed) && parsed > 0) {
+                      void updateStrategy(pool, { sticky_limit: parsed });
+                    }
+                  }}
+                />
+              </label>
+            ) : null}
+          </div>
         </header>
 
         {pendingDelete === poolDeleteKey ? (
@@ -402,6 +468,10 @@ export function Pools() {
         {members.length === 0 ? (
           <p className="empty-state">This pool has no providers yet, so it can't serve traffic. Add one below.</p>
         ) : (
+          // This ordering still matters for a Round Robin pool: it's the
+          // base rotation order (which member the cursor starts pointing at
+          // after a rotation), not just the fallback order used by Priority
+          // pools - reordering isn't hidden for round-robin strategies.
           <DndContext onDragEnd={(event) => void onDragEnd(pool, event)}>
             <SortableContext items={members.map((member) => member.provider_id)}>
               <ol className="member-list">
@@ -648,6 +718,28 @@ export function Pools() {
                 <option value="anthropic">anthropic</option>
               </select>
             </label>
+            <label>
+              Strategy
+              <select aria-label="Strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)}>
+                {STRATEGY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {strategy === "round_robin" ? (
+              <label>
+                Sticky limit <span className="optional">requests per provider before rotating, default 1</span>
+                <input
+                  aria-label="Sticky limit"
+                  type="number"
+                  min={1}
+                  value={stickyLimit}
+                  onChange={(event) => setStickyLimit(event.target.value)}
+                />
+              </label>
+            ) : null}
             <div className="modal-actions">
               <button type="button" className="btn-ghost" onClick={() => setCreateOpen(false)} aria-label="Cancel creating pool">
                 Cancel

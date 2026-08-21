@@ -34,8 +34,8 @@ describe("Pools", () => {
         if (url === "/admin/pools" && (!init || init.method === "GET")) {
           return new Response(
             JSON.stringify([
-              { id: "openai", wire_format: "openai" },
-              { id: "claude", wire_format: "anthropic" }
+              { id: "openai", wire_format: "openai", strategy: "priority", sticky_limit: null },
+              { id: "claude", wire_format: "anthropic", strategy: "priority", sticky_limit: null }
             ]),
             { status: 200 }
           );
@@ -62,9 +62,21 @@ describe("Pools", () => {
           );
         }
         if (url === "/admin/pools" && init?.method === "POST") {
-          return new Response(JSON.stringify({ id: "extra", wire_format: "anthropic" }), { status: 200 });
+          const body = JSON.parse(String(init.body));
+          return new Response(
+            JSON.stringify({
+              id: "extra",
+              wire_format: "anthropic",
+              strategy: body.strategy ?? "priority",
+              sticky_limit: body.sticky_limit ?? null
+            }),
+            { status: 200 }
+          );
         }
         if (url === "/admin/pools/openai" && init?.method === "DELETE") {
+          return new Response("{}", { status: 200 });
+        }
+        if (url === "/admin/pools/openai" && init?.method === "PUT") {
           return new Response("{}", { status: 200 });
         }
         if (url === "/admin/pools/openai/members" && init?.method === "PUT") {
@@ -128,9 +140,55 @@ describe("Pools", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "/admin/pools",
-      expect.objectContaining({ method: "POST", body: JSON.stringify({ id: "extra", wire_format: "anthropic" }) })
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ id: "extra", wire_format: "anthropic", strategy: "priority" })
+      })
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("create_form_defaults_strategy_to_priority", async () => {
+    render(<Pools />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Create pool" }));
+    const dialog = screen.getByRole("dialog", { name: "Create pool" });
+    expect(within(dialog).getByLabelText("Strategy")).toHaveValue("priority");
+    // Sticky limit only makes sense for round_robin - hidden by default.
+    expect(within(dialog).queryByLabelText("Sticky limit")).not.toBeInTheDocument();
+  });
+
+  it("create_form_can_select_round_robin_and_sets_a_sticky_limit", async () => {
+    render(<Pools />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Create pool" }));
+    const dialog = screen.getByRole("dialog", { name: "Create pool" });
+    await userEvent.type(within(dialog).getByLabelText("Pool id"), "extra");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Strategy"), "round_robin");
+    await userEvent.type(within(dialog).getByLabelText("Sticky limit"), "3");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Submit new pool" }));
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/pools",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ id: "extra", wire_format: "openai", strategy: "round_robin", sticky_limit: 3 })
+      })
+    );
+  });
+
+  it("pool_detail_shows_a_strategy_editor_that_puts_on_change", async () => {
+    render(<Pools />);
+
+    const dialog = await openPool("openai");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Strategy for openai"), "round_robin");
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ strategy: "round_robin" }) })
+      );
+    });
   });
 
   it("cancels_the_create_dialog_without_creating_anything", async () => {

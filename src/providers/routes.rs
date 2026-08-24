@@ -160,9 +160,9 @@ async fn patch(
     reload_snapshot(&s).await?;
     // An edit to the provider (key, base_url, model, ...) means its previous
     // runtime flags no longer describe the current config - clear them.
-    if let Some(mut st) = s.runtime.get_mut(&id) {
-        st.reset_to_healthy();
-    }
+    // A provider can back several models (each its own runtime_key), so
+    // reset every entry belonging to it, not just one lookup by bare id.
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
     let credential_configured = if is_oauth_kind(p.kind) {
         queries::oauth_credential_configured(&s.db, &id).await?
     } else {
@@ -243,10 +243,10 @@ async fn validate_model(
                 // A successful probe proves this provider's credentials and
                 // request shape work right now - clear any stale
                 // Misconfigured/Cooling runtime flag so the proxy path stops
-                // skipping it without requiring a restart.
-                if let Some(mut st) = s.runtime.get_mut(&id) {
-                    st.reset_to_healthy();
-                }
+                // skipping it without requiring a restart. A provider can
+                // back several models (each its own runtime_key), so reset
+                // every entry belonging to it.
+                crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
                 Ok(Json(json!({ "ok": true, "status": status.as_u16() })))
             } else {
                 let text = resp.text().await.unwrap_or_default();
@@ -527,7 +527,11 @@ async fn state_stub(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     queries::get_provider(&s.db, &id).await?;
-    let entry = s.runtime.get(&id);
+    // A provider can back several models (each its own runtime_key, see
+    // migrations/0005_pool_member_model_identity.sql) - show the worst
+    // status across all of them, so one provider row still shows one
+    // status in the admin UI.
+    let entry = crate::core::runtime::worst_provider_state(&s.runtime, &id);
     let (level, status, until_secs) = match entry {
         Some(st) => {
             let secs = st.unavailable_until.map(|u| {

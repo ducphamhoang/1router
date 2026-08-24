@@ -52,11 +52,12 @@ pub async fn refresh_due_providers(state: &AppState) {
                 // Mirrors the reactive refresh path in proxy::flow so a background-
                 // discovered invalid_grant is just as visible via /admin/providers/:id/state
                 // as one discovered by a live request.
-                state
-                    .runtime
-                    .entry(provider.id.clone())
-                    .or_default()
-                    .mark_misconfigured();
+                // Credential-level failure - dooms every model this
+                // provider backs, not just whichever runtime_key exists
+                // today. Models it hasn't served a request for yet have no
+                // entry to mark here; they self-detect the same dead
+                // credential on their own first live request instead.
+                crate::core::runtime::mark_provider_misconfigured(&state.runtime, &provider.id);
                 tracing::warn!(provider = %provider.id, "background token refresh: invalid_grant, re-auth required");
             }
             Err(e) => {

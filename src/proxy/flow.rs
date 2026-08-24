@@ -6,6 +6,7 @@ use bytes::Bytes;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
+use crate::core::runtime::runtime_key;
 use crate::core::state::AppState;
 use crate::pools::select::select;
 use crate::providers::adapter::commandcode::{
@@ -73,7 +74,7 @@ pub async fn handle_proxy(
     for (provider, effective_model) in &selection.providers {
         let now = Instant::now();
         {
-            let st = state.runtime.entry(provider.id.clone()).or_default();
+            let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
             if !st.is_available(now) {
                 continue;
             }
@@ -109,7 +110,7 @@ pub async fn handle_proxy(
             Ok(r) => r,
             Err(e) => {
                 {
-                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                     let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                     st.record_retryable(cooldown, Instant::now());
                 }
@@ -126,7 +127,7 @@ pub async fn handle_proxy(
         match class {
             ErrorClass::Success => {
                 {
-                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                     st.record_success();
                 }
                 match adapter
@@ -171,7 +172,7 @@ pub async fn handle_proxy(
             }
             ErrorClass::NonRetryable => {
                 {
-                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                     st.mark_misconfigured();
                 }
                 let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
@@ -192,7 +193,7 @@ pub async fn handle_proxy(
                     || creds.refresh_token.is_none()
                 {
                     {
-                        let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                        let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                         st.mark_misconfigured();
                     }
                     let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
@@ -236,7 +237,7 @@ pub async fn handle_proxy(
                                 let lat2 = start2.elapsed().as_millis() as i64;
                                 {
                                     let mut st =
-                                        state.runtime.entry(provider.id.clone()).or_default();
+                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                                     st.record_retryable(cooldown, Instant::now());
                                 }
@@ -256,7 +257,7 @@ pub async fn handle_proxy(
                             ErrorClass::Success => {
                                 {
                                     let mut st =
-                                        state.runtime.entry(provider.id.clone()).or_default();
+                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.record_success();
                                 }
                                 match adapter
@@ -301,7 +302,7 @@ pub async fn handle_proxy(
                             ErrorClass::NonRetryable => {
                                 {
                                     let mut st =
-                                        state.runtime.entry(provider.id.clone()).or_default();
+                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.mark_misconfigured();
                                 }
                                 let text = resp2.text().await.unwrap_or_default();
@@ -318,7 +319,7 @@ pub async fn handle_proxy(
                             ErrorClass::AuthExpired => {
                                 {
                                     let mut st =
-                                        state.runtime.entry(provider.id.clone()).or_default();
+                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.mark_misconfigured();
                                 }
                                 let text = resp2.text().await.unwrap_or_default();
@@ -339,7 +340,7 @@ pub async fn handle_proxy(
                                         || retry_status == StatusCode::REQUEST_TIMEOUT
                                     {
                                         let st =
-                                            state.runtime.entry(provider.id.clone()).or_default();
+                                            state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                         backoff::cooldown_for(st.backoff_level + 1)
                                     } else {
                                         Duration::from_secs(30)
@@ -347,7 +348,7 @@ pub async fn handle_proxy(
                                 });
                                 {
                                     let mut st =
-                                        state.runtime.entry(provider.id.clone()).or_default();
+                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.record_retryable(cooldown, Instant::now());
                                 }
                                 last_error_body = resp2.text().await.unwrap_or_default();
@@ -367,7 +368,7 @@ pub async fn handle_proxy(
                     }
                     Err(RefreshError::InvalidGrant) => {
                         {
-                            let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                            let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                             st.mark_misconfigured();
                         }
                         last_error_body = "refresh token invalid_grant; re-auth required".into();
@@ -376,7 +377,7 @@ pub async fn handle_proxy(
                     }
                     Err(RefreshError::Transient(msg)) => {
                         {
-                            let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                            let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                             let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                             st.record_retryable(cooldown, Instant::now());
                         }
@@ -415,7 +416,7 @@ pub async fn handle_proxy(
                             let lat2 = start2.elapsed().as_millis() as i64;
                             {
                                 let mut st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                                 st.record_retryable(cooldown, Instant::now());
                             }
@@ -434,7 +435,7 @@ pub async fn handle_proxy(
                         ErrorClass::Success => {
                             {
                                 let mut st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.record_success();
                             }
                             match adapter
@@ -478,7 +479,7 @@ pub async fn handle_proxy(
                         ErrorClass::NonRetryable => {
                             {
                                 let mut st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.mark_misconfigured();
                             }
                             last_error_body = resp2.text().await.unwrap_or_default();
@@ -494,7 +495,7 @@ pub async fn handle_proxy(
                         ErrorClass::AuthExpired => {
                             {
                                 let mut st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.mark_misconfigured();
                             }
                             last_error_body = resp2.text().await.unwrap_or_default();
@@ -510,12 +511,12 @@ pub async fn handle_proxy(
                         ErrorClass::Retryable { .. } => {
                             let cooldown = {
                                 let st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 backoff::cooldown_for(st.backoff_level + 1)
                             };
                             {
                                 let mut st =
-                                    state.runtime.entry(provider.id.clone()).or_default();
+                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.record_retryable(cooldown, Instant::now());
                             }
                             last_error_body = resp2.text().await.unwrap_or_default();
@@ -537,14 +538,14 @@ pub async fn handle_proxy(
                         || status == StatusCode::TOO_MANY_REQUESTS
                         || status == StatusCode::REQUEST_TIMEOUT
                     {
-                        let st = state.runtime.entry(provider.id.clone()).or_default();
+                        let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                         backoff::cooldown_for(st.backoff_level + 1)
                     } else {
                         Duration::from_secs(30)
                     }
                 });
                 {
-                    let mut st = state.runtime.entry(provider.id.clone()).or_default();
+                    let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                     st.record_retryable(cooldown, Instant::now());
                 }
                 last_error_body = error_text;

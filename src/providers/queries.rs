@@ -89,8 +89,12 @@ pub async fn update_provider(
             // this provider in a pool speaking the other format. OAuth
             // credentials live in provider_oauth_state keyed by provider id,
             // not wire_format, so flipping either OAuth kind strands nothing.
+            // DISTINCT pm.pool_id, not COUNT(*): a provider can now have
+            // several memberships in the same pool (one per model_override,
+            // see migrations/0005_pool_member_model_identity.sql), and the
+            // error message below counts pools, not memberships.
             let mismatched: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM pool_members pm
+                "SELECT COUNT(DISTINCT pm.pool_id) FROM pool_members pm
                  JOIN pools ON pools.id = pm.pool_id
                  WHERE pm.provider_id = ? AND pools.wire_format != ?",
             )

@@ -359,3 +359,158 @@ async fn put_pool_rejects_unknown_id() {
         .unwrap();
     assert_eq!(u.status(), StatusCode::NOT_FOUND);
 }
+
+/// Sets up one pool with one provider occupying two member slots via
+/// different `model_override`s - the shared fixture for the three
+/// delete-by-model tests below.
+async fn setup_pool_with_two_models_of_one_provider(state: &AppState) {
+    create_provider(&state.db, "p1", WireFormat::OpenAi).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+    for (priority, model) in [(1, "model-a"), (2, "model-b")] {
+        let resp = router
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/admin/pools/gpt-4o/members",
+                secret.as_str(),
+                json!({ "provider_id": "p1", "priority": priority, "model_override": model }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
+
+async fn list_members(router: axum::Router, secret: &str) -> serde_json::Value {
+    let list = router
+        .oneshot(empty_request(
+            Method::GET,
+            "/admin/pools/gpt-4o/members",
+            secret,
+        ))
+        .await
+        .unwrap();
+    let bytes = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Deleting without `?model=` preserves the pre-fix behavior: every
+/// member for that provider in the pool is removed, regardless of model.
+#[tokio::test]
+async fn delete_member_without_model_removes_every_member_for_that_provider() {
+    let state = test_state().await;
+    setup_pool_with_two_models_of_one_provider(&state).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let d = router
+        .clone()
+        .oneshot(empty_request(
+            Method::DELETE,
+            "/admin/pools/gpt-4o/members/p1",
+            secret.as_str(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(d.status(), StatusCode::NO_CONTENT);
+
+    let members = list_members(router, secret.as_str()).await;
+    assert_eq!(members.as_array().unwrap().len(), 0);
+}
+
+/// Deleting with `?model=<x>` removes only that one member, leaving its
+/// same-provider sibling intact.
+#[tokio::test]
+async fn delete_member_with_model_removes_only_that_one() {
+    let state = test_state().await;
+    setup_pool_with_two_models_of_one_provider(&state).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    let d = router
+        .clone()
+        .oneshot(empty_request(
+            Method::DELETE,
+            "/admin/pools/gpt-4o/members/p1?model=model-a",
+            secret.as_str(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(d.status(), StatusCode::NO_CONTENT);
+
+    let members = list_members(router, secret.as_str()).await;
+    let arr = members.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["model_override"], "model-b");
+}
+
+/// `?model=` (present, empty) means "the member with no override"
+/// (`model_override IS NULL`) - distinct from the param being absent
+/// entirely. Verified against a pool where one member has no override and
+/// the other has a real one.
+#[tokio::test]
+async fn delete_member_with_empty_model_removes_only_the_no_override_member() {
+    let state = test_state().await;
+    create_provider(&state.db, "p1", WireFormat::OpenAi).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+            json!({ "provider_id": "p1", "priority": 1 }),
+        ))
+        .await
+        .unwrap();
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+            json!({ "provider_id": "p1", "priority": 2, "model_override": "model-a" }),
+        ))
+        .await
+        .unwrap();
+
+    let d = router
+        .clone()
+        .oneshot(empty_request(
+            Method::DELETE,
+            "/admin/pools/gpt-4o/members/p1?model=",
+            secret.as_str(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(d.status(), StatusCode::NO_CONTENT);
+
+    let members = list_members(router, secret.as_str()).await;
+    let arr = members.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["model_override"], "model-a");
+}

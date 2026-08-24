@@ -78,22 +78,33 @@ pub async fn delete_pool(db: &SqlitePool, id: &str) -> Result<(), AppError> {
 
 pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMember>, AppError> {
     Ok(sqlx::query_as::<_, PoolMember>(
-        "SELECT pool_id, provider_id, priority, model_override FROM pool_members WHERE pool_id = ? ORDER BY priority ASC",
+        "SELECT pool_id, provider_id, priority, model_override FROM pool_members
+         WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
     )
     .bind(pool_id)
     .fetch_all(db)
     .await?)
 }
 
+/// A member's real identity is `(pool_id, provider_id, model_override)`
+/// (enforced by the `idx_pool_members_identity` unique expression index
+/// added in `0005_pool_member_model_identity.sql`) - `model_override ==
+/// None` means "inherit `provider.upstream_model`", and `''` collapses to
+/// that same slot under the index's `COALESCE(model_override, '')`. A
+/// client-supplied empty string must never be stored literally (it would
+/// silently collide with a real no-override row, or worse, survive as its
+/// own distinct-looking-but-empty upstream model) - normalize it to `None`
+/// here rather than trusting every caller to have done so already.
 pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppError> {
+    let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
     let res = sqlx::query(
         "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?, ?, ?, ?)
-         ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority = excluded.priority, model_override = excluded.model_override",
+         ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET priority = excluded.priority",
     )
     .bind(&m.pool_id)
     .bind(&m.provider_id)
     .bind(m.priority)
-    .bind(&m.model_override)
+    .bind(model_override)
     .execute(db)
     .await;
 
@@ -106,17 +117,40 @@ pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppErr
     }
 }
 
+/// `model` selects one specific member by its full identity
+/// `(pool_id, provider_id, model_override)` - `Some("")` means "the member
+/// with no override" (`model_override IS NULL`), matching how `''`
+/// collapses to `NULL` under `idx_pool_members_identity`. `None` preserves
+/// the pre-fix behavior: delete every member for that provider in the
+/// pool, regardless of model (a no-op distinction when there's only ever
+/// been one, which is every caller that predates this).
 pub async fn delete_member(
     db: &SqlitePool,
     pool_id: &str,
     provider_id: &str,
+    model: Option<&str>,
 ) -> Result<(), AppError> {
-    let n = sqlx::query("DELETE FROM pool_members WHERE pool_id = ? AND provider_id = ?")
-        .bind(pool_id)
-        .bind(provider_id)
-        .execute(db)
-        .await?
-        .rows_affected();
+    let n = match model {
+        Some(m) => {
+            sqlx::query(
+                "DELETE FROM pool_members WHERE pool_id = ? AND provider_id = ? AND COALESCE(model_override, '') = ?",
+            )
+            .bind(pool_id)
+            .bind(provider_id)
+            .bind(m)
+            .execute(db)
+            .await?
+            .rows_affected()
+        }
+        None => {
+            sqlx::query("DELETE FROM pool_members WHERE pool_id = ? AND provider_id = ?")
+                .bind(pool_id)
+                .bind(provider_id)
+                .execute(db)
+                .await?
+                .rows_affected()
+        }
+    };
 
     if n == 0 {
         Err(AppError::NotFound)
@@ -186,6 +220,27 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].priority, 5);
 
+        // Same identity (provider p1, no override) - upserting again
+        // updates the existing row in place rather than inserting a
+        // second one.
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 9,
+                model_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let same_identity = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(same_identity.len(), 1, "same (provider, model) upsert must update in place, not insert");
+        assert_eq!(same_identity[0].priority, 9);
+
+        // Different identity (same provider p1, but a real model_override)
+        // - this is the whole point of the fix: p1 can occupy a second
+        // slot in the same pool as long as the model differs.
         upsert_member(
             &db,
             &PoolMember {
@@ -198,10 +253,15 @@ mod tests {
         .await
         .unwrap();
         let updated = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(updated.len(), 2, "different model_override for the same provider must insert a new member");
         assert_eq!(updated[0].priority, 1);
         assert_eq!(updated[0].model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(updated[1].priority, 9);
+        assert_eq!(updated[1].model_override, None);
 
-        delete_member(&db, "gpt-4o", "p1").await.unwrap();
+        // Deleting without a `model` filter removes every member for that
+        // provider in the pool - today's behavior, preserved.
+        delete_member(&db, "gpt-4o", "p1", None).await.unwrap();
         assert!(list_members(&db, "gpt-4o").await.unwrap().is_empty());
 
         delete_pool(&db, "gpt-4o").await.unwrap();

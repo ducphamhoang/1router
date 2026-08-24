@@ -67,6 +67,116 @@ impl ProviderRuntimeState {
 
 pub type RuntimeStateMap = Arc<dashmap::DashMap<String, ProviderRuntimeState>>;
 
+/// Reset every runtime-state entry belonging to `provider_id`, across all
+/// of its models - used after a credential/config update proves the
+/// provider works again. Before pool members could carry their own model
+/// (`migrations/0005_pool_member_model_identity.sql`), a provider had
+/// exactly one runtime-state entry keyed by its bare id; now it may have
+/// one per `(provider_id, model)` pair it backs, so "reset this provider"
+/// means "reset all of them", not just one lookup.
+pub fn reset_provider_to_healthy(map: &RuntimeStateMap, provider_id: &str) {
+    let prefix = runtime_key_prefix(provider_id);
+    for mut entry in map.iter_mut() {
+        if entry.key().starts_with(&prefix) {
+            entry.value_mut().reset_to_healthy();
+        }
+    }
+}
+
+/// Mark every *currently tracked* `(provider_id, *)` entry misconfigured -
+/// used when a failure is credential-level (e.g. a background OAuth
+/// refresh discovers `invalid_grant`), which dooms every model that
+/// credential backs, not just whichever one happened to trigger the
+/// refresh. Models this provider backs but hasn't served a request for
+/// yet have no entry to mark here; they self-detect the same dead
+/// credential on their own first live request instead (via
+/// `proxy::flow`'s own `AuthExpired` -> `RefreshError::InvalidGrant`
+/// handling), so nothing is silently missed - just detected slightly
+/// later for a model nobody has called yet.
+pub fn mark_provider_misconfigured(map: &RuntimeStateMap, provider_id: &str) {
+    let prefix = runtime_key_prefix(provider_id);
+    for mut entry in map.iter_mut() {
+        if entry.key().starts_with(&prefix) {
+            entry.value_mut().mark_misconfigured();
+        }
+    }
+}
+
+/// The single worst status across every `(provider_id, *)` entry, for
+/// admin display where one provider row shows one status regardless of
+/// how many models it backs. Ranks `Misconfigured` > `Cooling` >
+/// `Healthy`; among same-rank entries, keeps the one with the higher
+/// `backoff_level` (i.e. the most-troubled one), so the admin sees the
+/// worst case rather than an arbitrary member's.
+pub fn worst_provider_state(map: &RuntimeStateMap, provider_id: &str) -> Option<ProviderRuntimeState> {
+    let prefix = runtime_key_prefix(provider_id);
+    fn rank(status: ProviderStatus) -> u8 {
+        match status {
+            ProviderStatus::Healthy => 0,
+            ProviderStatus::Cooling => 1,
+            ProviderStatus::Misconfigured => 2,
+        }
+    }
+    map.iter()
+        .filter(|entry| entry.key().starts_with(&prefix))
+        .map(|entry| entry.value().clone())
+        .fold(None, |worst, candidate| match worst {
+            None => Some(candidate),
+            Some(current) => {
+                if (rank(candidate.status), candidate.backoff_level)
+                    > (rank(current.status), current.backoff_level)
+                {
+                    Some(candidate)
+                } else {
+                    Some(current)
+                }
+            }
+        })
+}
+
+/// `RuntimeStateMap`'s key. Widened from bare `provider_id` so a failure
+/// on one `(provider, model)` pair - e.g. one pool member's
+/// `model_override`, per
+/// `migrations/0005_pool_member_model_identity.sql` - doesn't cool down
+/// or misconfigure its siblings sharing the same provider/credential.
+/// `\u{1f}` (unit separator) can't appear in either half (provider ids are
+/// validated path-id-like strings via `validate_path_id`; model names are
+/// upstream identifiers, never containing control characters in practice),
+/// so this is unambiguous with no escaping needed.
+pub fn runtime_key(provider_id: &str, model: &str) -> String {
+    format!("{provider_id}\u{1f}{model}")
+}
+
+/// The prefix every `runtime_key` for a given provider starts with,
+/// regardless of model - used to find/reset/aggregate every runtime-state
+/// entry belonging to one provider (e.g. after a credential update, or for
+/// admin status display) without knowing which models it currently backs.
+pub fn runtime_key_prefix(provider_id: &str) -> String {
+    format!("{provider_id}\u{1f}")
+}
+
+#[cfg(test)]
+mod runtime_key_tests {
+    use super::*;
+
+    #[test]
+    fn different_models_get_different_keys() {
+        assert_ne!(
+            runtime_key("p1", "model-a"),
+            runtime_key("p1", "model-b"),
+        );
+    }
+
+    #[test]
+    fn key_starts_with_its_provider_prefix() {
+        let key = runtime_key("p1", "model-a");
+        assert!(key.starts_with(&runtime_key_prefix("p1")));
+        // A different provider id must not share the prefix, even one
+        // that's a plain-string prefix of it.
+        assert!(!key.starts_with(&runtime_key_prefix("p")));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

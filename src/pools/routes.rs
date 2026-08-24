@@ -126,13 +126,17 @@ async fn put_member(
 ) -> Result<Json<Value>, AppError> {
     queries::get_pool(&s.db, &pool_id).await?;
     pq::get_provider(&s.db, &b.provider_id).await?;
+    // Normalize "" to None before echoing it back - `upsert_member`
+    // normalizes it the same way at the DB layer, so the response should
+    // reflect what actually got stored, not the raw request body.
+    let model_override = b.model_override.filter(|s| !s.is_empty());
     queries::upsert_member(
         &s.db,
         &PoolMember {
             pool_id: pool_id.clone(),
             provider_id: b.provider_id.clone(),
             priority: b.priority,
-            model_override: b.model_override.clone(),
+            model_override: model_override.clone(),
         },
     )
     .await?;
@@ -141,15 +145,29 @@ async fn put_member(
         "pool_id": pool_id,
         "provider_id": b.provider_id,
         "priority": b.priority,
-        "model_override": b.model_override,
+        "model_override": model_override,
     })))
+}
+
+/// `model` selects one specific member by its full identity. Absent
+/// entirely (`DELETE .../members/:provider_id`, no query string) means
+/// "delete every member for this provider in the pool" - today's
+/// pre-fix behavior, preserved for backward compatibility. Present but
+/// empty (`?model=`) means "the member with no override"
+/// (`model_override IS NULL`) - distinct from the param being absent,
+/// per `serde`'s `Option<String>` deserialization (missing field ->
+/// `None`, empty value -> `Some(String::new())`).
+#[derive(Deserialize)]
+struct DeleteMemberQuery {
+    model: Option<String>,
 }
 
 async fn delete_member(
     State(s): State<AppState>,
     Path((pool_id, provider_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<DeleteMemberQuery>,
 ) -> Result<StatusCode, AppError> {
-    queries::delete_member(&s.db, &pool_id, &provider_id).await?;
+    queries::delete_member(&s.db, &pool_id, &provider_id, q.model.as_deref()).await?;
     reload_snapshot(&s).await?;
     Ok(StatusCode::NO_CONTENT)
 }

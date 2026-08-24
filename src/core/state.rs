@@ -109,7 +109,7 @@ pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> 
     for pool in pools {
         let members: Vec<PoolMember> = sqlx::query_as::<_, PoolMember>(
             "SELECT pool_id, provider_id, priority, model_override FROM pool_members
-             WHERE pool_id = ? ORDER BY priority ASC",
+             WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
         )
         .bind(&pool.id)
         .fetch_all(db)
@@ -154,7 +154,7 @@ pub async fn ensure_direct_pools_for_unassigned_providers(db: &SqlitePool) -> Re
          WHERE NOT EXISTS (
              SELECT 1 FROM pool_members m WHERE m.provider_id = p.id
          )
-         ON CONFLICT(pool_id, provider_id) DO NOTHING",
+         ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO NOTHING",
     )
     .execute(&mut *tx)
     .await?;

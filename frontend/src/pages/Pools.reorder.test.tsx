@@ -82,7 +82,7 @@ describe("Pools", () => {
         if (url === "/admin/pools/openai/members" && init?.method === "PUT") {
           return new Response("{}", { status: 200 });
         }
-        if (url === "/admin/pools/openai/members/b" && init?.method === "DELETE") {
+        if (url === "/admin/pools/openai/members/b?model=gpt-5.6-sol" && init?.method === "DELETE") {
           return new Response("{}", { status: 200 });
         }
         return new Response("{}", { status: 404 });
@@ -231,10 +231,10 @@ describe("Pools", () => {
 
     const dialog = await openPool("openai");
     await userEvent.click(within(dialog).getByRole("button", { name: "Remove beta from openai" }));
-    expect(fetch).not.toHaveBeenCalledWith("/admin/pools/openai/members/b", expect.objectContaining({ method: "DELETE" }));
+    expect(fetch).not.toHaveBeenCalledWith("/admin/pools/openai/members/b?model=gpt-5.6-sol", expect.objectContaining({ method: "DELETE" }));
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Keep beta in openai" }));
-    expect(fetch).not.toHaveBeenCalledWith("/admin/pools/openai/members/b", expect.objectContaining({ method: "DELETE" }));
+    expect(fetch).not.toHaveBeenCalledWith("/admin/pools/openai/members/b?model=gpt-5.6-sol", expect.objectContaining({ method: "DELETE" }));
     expect(within(dialog).getByRole("button", { name: "Remove beta from openai" })).toBeInTheDocument();
   });
 
@@ -246,7 +246,7 @@ describe("Pools", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Confirm removing beta from openai" }));
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/admin/pools/openai/members/b", expect.objectContaining({ method: "DELETE" }));
+      expect(fetch).toHaveBeenCalledWith("/admin/pools/openai/members/b?model=gpt-5.6-sol", expect.objectContaining({ method: "DELETE" }));
     });
   });
 
@@ -536,7 +536,7 @@ describe("Pools", () => {
         if (url === "/admin/providers" && (!init || init.method === "GET")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
-        if (url === "/admin/pools/openai/members/team%2Fgpt" && init?.method === "DELETE") {
+        if (url === "/admin/pools/openai/members/team%2Fgpt?model=" && init?.method === "DELETE") {
           return new Response("{}", { status: 200 });
         }
         return new Response("{}", { status: 404 });
@@ -551,10 +551,105 @@ describe("Pools", () => {
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/admin/pools/openai/members/team%2Fgpt",
+        "/admin/pools/openai/members/team%2Fgpt?model=",
         expect.objectContaining({ method: "DELETE" })
       );
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // Regression test for the pool-member-model-identity fix: a provider can
+  // now occupy two slots in the same pool with different model_overrides
+  // (migrations/0005_pool_member_model_identity.sql). Every member action
+  // used to be keyed by bare provider_id; this proves reorder and delete
+  // both target the CORRECT row once two rows share a provider_id.
+  //
+  // Uses the up/down buttons, not a simulated drag - there is no
+  // useSortable/useDraggable anywhere in this app, so DndContext/
+  // SortableContext are currently inert and onDragEnd never fires. The
+  // buttons (moveMember) are the only reorder path that actually works.
+  it("reorders_and_deletes_the_correct_row_when_one_provider_backs_two_models", async () => {
+    let members = [
+      { pool_id: "openai", provider_id: "shared", provider_name: "shared", priority: 1, model_override: "model-a" },
+      { pool_id: "openai", provider_id: "shared", provider_name: "shared", priority: 2, model_override: "model-b" }
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/pools" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([{ id: "openai", wire_format: "openai" }]), { status: 200 });
+        }
+        if (url === "/admin/pools/openai/members" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify(members), { status: 200 });
+        }
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([{ id: "shared", name: "shared", wire_format: "openai", upstream_model: "m" }]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/pools/openai/members" && init?.method === "PUT") {
+          // Mirrors persistMembers' reorder PUTs by updating the local
+          // fixture in place, so a follow-up GET reflects the new order -
+          // the real regression only shows up if reorder targets the
+          // wrong row's model_override.
+          const body = JSON.parse(String(init.body));
+          const idx = members.findIndex((m) => m.model_override === body.model_override);
+          if (idx !== -1) {
+            members[idx] = { ...members[idx], priority: body.priority };
+          }
+          return new Response("{}", { status: 200 });
+        }
+        if (url === "/admin/pools/openai/members/shared?model=model-a" && init?.method === "DELETE") {
+          members = members.filter((m) => m.model_override !== "model-a");
+          return new Response("{}", { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Pools />);
+    let dialog = await openPool("openai");
+    let rows = within(dialog).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("model-a");
+    expect(rows[1]).toHaveTextContent("model-b");
+
+    // Move model-b (the second row) up - must not be confused with
+    // model-a just because they share a provider_id.
+    await userEvent.click(within(rows[1]).getByRole("button", { name: "Move shared up" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ provider_id: "shared", priority: 1, model_override: "model-b" })
+        })
+      );
+    });
+
+    // The reorder is applied optimistically to local state before the PUT
+    // resolves, so the still-open dialog already reflects the swap.
+    rows = within(dialog).getAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("model-b");
+    expect(rows[1]).toHaveTextContent("model-a");
+
+    // Delete model-a specifically - model-b (same provider_id) must survive.
+    const modelARow = rows.find((row) => row.textContent?.includes("model-a"))!;
+    await userEvent.click(within(modelARow).getByRole("button", { name: "Remove shared from openai" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Confirm removing shared from openai" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members/shared?model=model-a",
+        expect.objectContaining({ method: "DELETE" })
+      );
+    });
+    await waitFor(() => {
+      const remaining = within(dialog).getAllByRole("listitem");
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]).toHaveTextContent("model-b");
+    });
   });
 });

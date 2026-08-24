@@ -6,6 +6,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 const DEFAULT_MAX_TOKENS: i64 = 64_000;
+const DEFAULT_TEMPERATURE: f64 = 0.3;
 
 fn environment_info() -> String {
     format!(
@@ -199,12 +200,19 @@ pub fn transform_request(client_json: &Value, thread_id: &str, working_dir: &str
         .as_i64()
         .unwrap_or(DEFAULT_MAX_TOKENS)
         .clamp(1, DEFAULT_MAX_TOKENS);
+    // Honor the client's own `temperature` when present; only fall back to
+    // the default when they didn't send one (e.g. the admin UI's
+    // validate-model probe). Previously this was hardcoded to 0.3
+    // regardless of what the client asked for - see BL-05 in BACKLOG.md.
+    let temperature = client_json["temperature"]
+        .as_f64()
+        .unwrap_or(DEFAULT_TEMPERATURE);
     let mut params = json!({
         "model": model,
         "messages": convert_messages(&messages),
         "tools": convert_tools(client_json["tools"].as_array()),
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": temperature,
         "stream": true
     });
     // commandcode.ai's API validates `params.system` as a string, not
@@ -590,6 +598,23 @@ mod tests {
         assert!(out["taste"].is_null());
         assert!(out["skills"].is_null());
         assert_eq!(out["threadId"], "thread-1");
+    }
+
+    #[test]
+    fn transform_request_honors_the_clients_temperature() {
+        // Regression for BL-05: this used to hardcode 0.3 regardless of what
+        // the client asked for, silently defeating callers that pin
+        // temperature for determinism (evals, agents).
+        let input = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":0.0});
+        let out = transform_request(&input, "t", "/p");
+        assert_eq!(out["params"]["temperature"], 0.0);
+    }
+
+    #[test]
+    fn transform_request_defaults_temperature_when_the_client_omits_it() {
+        let input = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
+        let out = transform_request(&input, "t", "/p");
+        assert_eq!(out["params"]["temperature"], 0.3);
     }
 
     #[test]

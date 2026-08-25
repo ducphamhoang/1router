@@ -350,7 +350,7 @@ fn derive_models_url(base_url: &str) -> String {
 /// Pure network+parse - no ProviderKind/base_url checks (those produce
 /// user-facing messages specific to the admin endpoint below) and no
 /// caching (callers decide whether/where to cache).
-async fn fetch_live_models(
+pub(crate) async fn fetch_live_models(
     http: &reqwest::Client,
     provider: &Provider,
 ) -> Result<Vec<String>, String> {

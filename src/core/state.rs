@@ -37,6 +37,21 @@ pub struct AttemptState {
 /// direct `<provider_id>/<model>` addressing itself doesn't depend on it.
 pub type DiscoveredModelsMap = Arc<dashmap::DashMap<String, Vec<String>>>;
 
+/// In-memory rotation cursor for round-robin pools, keyed by pool id.
+/// Process-local and lost on restart, same as `RuntimeStateMap` -
+/// `pools::select::select` reads and advances it; `pools/routes.rs` clears
+/// an entry when a pool's strategy changes or the pool is deleted, so a
+/// stale cursor can't accumulate forever. A missing entry (fresh pool, or
+/// one that's never been selected under `RoundRobin`) behaves as
+/// `RotationState::default()`.
+pub type PoolRotationMap = Arc<DashMap<String, RotationState>>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RotationState {
+    pub index: usize,
+    pub consecutive_uses: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretOrigin {
@@ -77,6 +92,7 @@ pub struct AppState {
     pub refresh_locks: RefreshLocks,
     pub login_attempts: LoginAttemptMap,
     pub discovered_models: DiscoveredModelsMap,
+    pub pool_rotation: PoolRotationMap,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {
@@ -93,7 +109,7 @@ pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> 
     for pool in pools {
         let members: Vec<PoolMember> = sqlx::query_as::<_, PoolMember>(
             "SELECT pool_id, provider_id, priority, model_override FROM pool_members
-             WHERE pool_id = ? ORDER BY priority ASC",
+             WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
         )
         .bind(&pool.id)
         .fetch_all(db)
@@ -138,7 +154,7 @@ pub async fn ensure_direct_pools_for_unassigned_providers(db: &SqlitePool) -> Re
          WHERE NOT EXISTS (
              SELECT 1 FROM pool_members m WHERE m.provider_id = p.id
          )
-         ON CONFLICT(pool_id, provider_id) DO NOTHING",
+         ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO NOTHING",
     )
     .execute(&mut *tx)
     .await?;

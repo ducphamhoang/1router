@@ -83,6 +83,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         refresh_locks: std::sync::Arc::new(dashmap::DashMap::new()),
         login_attempts: std::sync::Arc::new(dashmap::DashMap::new()),
         discovered_models: std::sync::Arc::new(dashmap::DashMap::new()),
+        pool_rotation: std::sync::Arc::new(dashmap::DashMap::new()),
     };
 
     let router = router::app::build_router(state);

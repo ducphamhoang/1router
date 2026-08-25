@@ -103,14 +103,20 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .await?;
     }
     for m in &dump.members {
+        // Same identity widening as `pools::queries::upsert_member` (see
+        // migrations/0005_pool_member_model_identity.sql) - normalize ""
+        // to NULL before binding so an imported dump can't create a row
+        // that collides with a real no-override member under the new
+        // unique index.
+        let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
         sqlx::query(
             "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?,?,?,?)
-             ON CONFLICT(pool_id, provider_id) DO UPDATE SET priority=excluded.priority, model_override=excluded.model_override",
+             ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET priority=excluded.priority",
         )
         .bind(&m.pool_id)
         .bind(&m.provider_id)
         .bind(m.priority)
-        .bind(&m.model_override)
+        .bind(model_override)
         .execute(&mut *tx)
         .await?;
     }
@@ -155,6 +161,8 @@ mod tests {
                 id: "gpt-4o".into(),
                 wire_format: WireFormat::OpenAi,
                 created_at: Utc::now(),
+                strategy: Default::default(),
+                sticky_limit: None,
             }],
             // references a provider that was never inserted - FK violation
             members: vec![PoolMember {

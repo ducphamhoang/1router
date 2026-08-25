@@ -119,6 +119,8 @@ pub async fn assign_to_pool(
                     // provider so the two can't disagree.
                     wire_format: provider.wire_format,
                     created_at: chrono::Utc::now(),
+                    strategy: Default::default(),
+                    sticky_limit: None,
                 },
             )
             .await
@@ -303,7 +305,10 @@ pub(crate) fn build_passthrough_row(
 }
 
 /// Prompt for a passthrough provider and insert it.
-pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<Provider> {
+pub async fn add_passthrough_provider(
+    db: &sqlx::SqlitePool,
+    http: &reqwest::Client,
+) -> anyhow::Result<Provider> {
     // dialoguer blocks the calling thread. That is fine here and NOT worth
     // wrapping in spawn_blocking: the wizard runs either before the axum
     // listener exists (first boot) or in a process that never starts one
@@ -397,18 +402,171 @@ pub async fn add_passthrough_provider(db: &sqlx::SqlitePool) -> anyhow::Result<P
     }
     let upstream_model: String = model_prompt.interact_text()?;
 
-    let p = build_passthrough_row(
+    let mut p = build_passthrough_row(
         &name,
         wire_format,
         base_url.trim(),
         api_key.trim(),
         upstream_model.trim(),
     );
+    confirm_upstream_model(http, &mut p).await?;
     provider_queries::insert_provider(db, &p)
         .await
         .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", p.id))?;
     println!("  created provider '{}'", p.id);
     Ok(p)
+}
+
+async fn probe_one(
+    model: String,
+    base: &Provider,
+    creds: &crate::providers::adapter::Credentials,
+    http: &reqwest::Client,
+    body: &bytes::Bytes,
+) -> Result<(u16, String), String> {
+    let mut candidate = base.clone();
+    candidate.upstream_model = model;
+    let adapter = adapter_for(&candidate, http.clone());
+    let req = adapter
+        .build_request(body, creds)
+        .await
+        .map_err(|e| format!("request build failed: {e}"))?;
+    let resp = http
+        .execute(req)
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    Ok((status, text))
+}
+
+/// Known-free model ids drawn from the templates above whose `api_key` is a
+/// public, non-secret default (currently just OpenCode Free's
+/// "deepseek-v4-flash-free") - the only templates that actually promise a
+/// live model works with no real credentials, so those ids are the safest
+/// bet among live catalog candidates.
+fn known_free_model_ids() -> Vec<&'static str> {
+    PROVIDER_TEMPLATES
+        .iter()
+        .filter(|t| t.api_key.is_some())
+        .map(|t| t.upstream_model)
+        .collect()
+}
+
+/// Live catalogs (e.g. OpenCode Zen's `/v1/models`) commonly list paid
+/// models before free ones, so blindly taking the first few candidates
+/// tends to grab exactly the ones the current (possibly public/free)
+/// api_key can't use - see the OpenCode Zen smoke test where the first 5
+/// catalog entries were all paid Claude models and all 401'd. Reorders so
+/// the candidates most likely to work with the api_key already on hand
+/// come first: 1) ids matching a known free template's own model id, 2)
+/// ids whose name contains "free" (OpenCode Zen's own naming convention for
+/// its free lineup, e.g. "x-preview-f-free"), 3) everything else - each
+/// group keeping its original relative (catalog) order.
+fn free_first(models: Vec<String>) -> Vec<String> {
+    let known_free = known_free_model_ids();
+    let mut known = Vec::new();
+    let mut named_free = Vec::new();
+    let mut rest = Vec::new();
+    for m in models {
+        if known_free.contains(&m.as_str()) {
+            known.push(m);
+        } else if m.to_ascii_lowercase().contains("free") {
+            named_free.push(m);
+        } else {
+            rest.push(m);
+        }
+    }
+    known.into_iter().chain(named_free).chain(rest).collect()
+}
+
+/// Verifies the (template-prefilled or hand-typed) upstream_model actually
+/// works before inserting, instead of trusting it blindly. A template
+/// default can go stale - the upstream side renames or retires a model -
+/// with nothing in 1router noticing until a real proxied request fails
+/// later. On failure, falls back to the provider's own live `/models` list
+/// (the same one "Fetch models" surfaces in the admin UI) and tries a
+/// handful of those; if nothing validates, asks the operator to type a
+/// replacement, defaulting to what they had so declining just keeps the old
+/// (known-unverified) behavior.
+///
+/// Mirrors `probe_and_set_model`'s probe-first-success shape, but that one
+/// exists because a Codex/ChatGPT OAuth account's accepted model name isn't
+/// knowable up front - here there is normally exactly one candidate (the
+/// template default or what the operator typed), so failure is the
+/// exceptional path, not the expected one.
+async fn confirm_upstream_model(http: &reqwest::Client, p: &mut Provider) -> anyhow::Result<()> {
+    let creds = crate::providers::adapter::Credentials {
+        api_key: p.api_key.clone(),
+        ..Default::default()
+    };
+    let body = probe_body();
+    let base = p.clone();
+    let typed = p.upstream_model.clone();
+
+    println!("  validating upstream_model \"{typed}\"...");
+    let outcome = probe_first_success(&[typed.as_str()], |model| {
+        probe_one(model, &base, &creds, http, &body)
+    })
+    .await;
+
+    if let ProbeOutcome::Found(_) = outcome {
+        println!("  -> \"{typed}\" works");
+        return Ok(());
+    }
+    let ProbeOutcome::AllFailed(failures) = outcome else {
+        unreachable!("probe_first_success only returns Found or AllFailed")
+    };
+    let (_, status, text) = &failures[0];
+    let snippet: String = text.chars().take(300).collect();
+    eprintln!(
+        "  \"{typed}\" did not work ({status}: {snippet}); checking this provider's own \
+         live model list..."
+    );
+
+    let candidates: Vec<String> = match crate::providers::routes::fetch_live_models(http, p).await
+    {
+        Ok(models) => free_first(models.into_iter().filter(|m| m != &typed).collect())
+            .into_iter()
+            .take(5)
+            .collect(),
+        Err(e) => {
+            eprintln!("  could not fetch a live model list either ({e})");
+            Vec::new()
+        }
+    };
+
+    if !candidates.is_empty() {
+        println!(
+            "  trying {} live candidate(s) from this provider's own /models...",
+            candidates.len()
+        );
+        let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+        let outcome = probe_first_success(&refs, |model| {
+            probe_one(model, &base, &creds, http, &body)
+        })
+        .await;
+        if let ProbeOutcome::Found(model) = outcome {
+            println!("  -> using \"{model}\" instead (validated live)");
+            p.upstream_model = model;
+            return Ok(());
+        }
+    }
+
+    eprintln!(
+        "  no candidate model could be validated for this provider right now - you can save \
+         it anyway and fix it later via \"Fetch models\" in the admin UI, or:\n    \
+         curl -X PATCH .../admin/providers/{} \\\n      \
+         -H 'Authorization: Bearer $ROUTER_SHARED_SECRET' \\\n      \
+         -d '{{\"upstream_model\":\"<model>\"}}'",
+        p.id
+    );
+    let replacement: String = Input::<String>::with_theme(&theme())
+        .with_prompt("Upstream model (nothing validated - keep this or type another)")
+        .default(typed)
+        .interact_text()?;
+    p.upstream_model = replacement.trim().to_string();
+    Ok(())
 }
 
 pub async fn store_commandcode_key(
@@ -1093,7 +1251,7 @@ pub async fn run_first_boot_wizard(
             .interact()?;
 
         let provider = match kind {
-            0 => add_passthrough_provider(db).await?,
+            0 => add_passthrough_provider(db, http).await?,
             1 => add_codex_provider(db, http).await?,
             _ => add_commandcode_provider(db, http).await?,
         };
@@ -1138,7 +1296,7 @@ async fn run_provider_menu(db: &sqlx::SqlitePool, http: &reqwest::Client) -> any
             return Ok(());
         };
         let provider = match kind {
-            0 => add_passthrough_provider(db).await?,
+            0 => add_passthrough_provider(db, http).await?,
             1 => add_codex_provider(db, http).await?,
             _ => add_commandcode_provider(db, http).await?,
         };
@@ -1481,6 +1639,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn free_first_orders_known_free_then_named_free_then_the_rest() {
+        // Mirrors the real OpenCode Zen catalog shape: paid Claude models
+        // first, the known-free template default and a differently-named
+        // free model further down.
+        let ranked = free_first(vec![
+            "claude-fable-5".into(),
+            "claude-opus-5".into(),
+            "deepseek-v4-flash-free".into(), // known-free (OpenCode Free template)
+            "gpt-5.4".into(),
+            "x-preview-f-free".into(), // named "*free*" but not a known template id
+        ]);
+        assert_eq!(
+            ranked,
+            vec![
+                "deepseek-v4-flash-free",
+                "x-preview-f-free",
+                "claude-fable-5",
+                "claude-opus-5",
+                "gpt-5.4",
+            ]
+        );
+    }
+
+    #[test]
+    fn free_first_is_a_no_op_when_nothing_matches() {
+        let ranked = free_first(vec!["gpt-5.4".into(), "claude-sonnet-5".into()]);
+        assert_eq!(ranked, vec!["gpt-5.4", "claude-sonnet-5"]);
+    }
+
+    // confirm_upstream_model's final branch (nothing validates) blocks on an
+    // interactive `Input::interact_text()` prompt, which needs a real TTY -
+    // not exercisable here. These two cover the non-interactive branches:
+    // typed model works immediately, and typed model fails but the
+    // provider's own live catalog turns up a working replacement. See
+    // docs/superpowers/plans/2026-07-26-onboarding-wizard-smoke.md for the
+    // manual pass covering the reprompt branch.
+
+    #[tokio::test]
+    async fn confirm_upstream_model_accepts_a_typed_model_that_probes_clean() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&upstream)
+            .await;
+
+        let mut p = provider("p1", WireFormat::OpenAi);
+        p.base_url = Some(format!("{}/v1/chat/completions", upstream.uri()));
+        p.upstream_model = "gpt-5.4".into();
+        let http = reqwest::Client::new();
+
+        confirm_upstream_model(&http, &mut p).await.unwrap();
+
+        assert_eq!(p.upstream_model, "gpt-5.4");
+    }
+
+    #[tokio::test]
+    async fn confirm_upstream_model_falls_back_to_a_live_catalog_model_when_typed_one_fails() {
+        let upstream = wiremock::MockServer::start().await;
+        // The typed model 404s on every chat-completion probe...
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(404).set_body_string("model not found"))
+            .mount(&upstream)
+            .await;
+        // ...but GET /v1/models (derived from the /v1/chat/completions
+        // base_url) lists a real replacement.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/models"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "live-model-a"}, {"id": "live-model-b"}]
+            })))
+            .mount(&upstream)
+            .await;
+        // The live candidates also 404 on chat-completions except one -
+        // override with a targeted mock so the second candidate succeeds.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains("live-model-b"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .with_priority(1) // must outrank the blanket 404 POST mock above
+            .mount(&upstream)
+            .await;
+
+        let mut p = provider("p1", WireFormat::OpenAi);
+        p.base_url = Some(format!("{}/v1/chat/completions", upstream.uri()));
+        p.upstream_model = "stale-model".into();
+        let http = reqwest::Client::new();
+
+        confirm_upstream_model(&http, &mut p).await.unwrap();
+
+        assert_eq!(p.upstream_model, "live-model-b");
+    }
+
+
     #[tokio::test]
     async fn probe_treats_transport_error_as_a_failed_attempt_and_continues() {
         let out = probe_first_success(&["a", "b"], |m| async move {
@@ -1636,6 +1887,8 @@ mod tests {
                 id: "pre".into(),
                 wire_format: WireFormat::OpenAi,
                 created_at: created,
+                strategy: Default::default(),
+                sticky_limit: None,
             },
         )
         .await

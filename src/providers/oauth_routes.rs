@@ -153,10 +153,11 @@ async fn set_commandcode_key(
     reload_snapshot(&s).await?;
     // A fresh key can fix whatever previously flagged the provider
     // misconfigured (e.g. a 401) - clear the stale runtime flag so the proxy
-    // path tries it again without a restart.
-    if let Some(mut st) = s.runtime.get_mut(&id) {
-        st.reset_to_healthy();
-    }
+    // path tries it again without a restart. A provider can back several
+    // models (each its own runtime_key), so reset every entry belonging
+    // to it - this is exactly the scenario a Command Code provider backing
+    // several pool-member models via model_override hits.
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -14,7 +14,14 @@ type PoolMember = {
 type Pool = {
   id: string;
   wire_format: string;
+  strategy: string;
+  sticky_limit?: number | null;
 };
+
+const STRATEGY_OPTIONS = [
+  { value: "priority", label: "Priority (fallback)" },
+  { value: "round_robin", label: "Round Robin (rotate)" }
+];
 
 type Provider = {
   id: string;
@@ -22,6 +29,17 @@ type Provider = {
   wire_format: string;
   upstream_model: string;
 };
+
+// A member's real identity is (provider_id, model_override), not just
+// provider_id - one provider can now occupy several slots in the same
+// pool with different models (see
+// migrations/0005_pool_member_model_identity.sql). JSON-encoding the pair
+// sidesteps picking a separator character that might collide with either
+// half (provider ids are path-id-like strings; model names are free-form
+// upstream identifiers with no format guarantee).
+function memberKey(member: PoolMember): string {
+  return JSON.stringify([member.provider_id, member.model_override ?? null]);
+}
 
 export function recomputeMemberPriorities(members: PoolMember[]) {
   return members.map((member, index) => ({
@@ -104,6 +122,8 @@ export function Pools() {
   const [membersByPool, setMembersByPool] = useState<Record<string, PoolMember[]>>({});
   const [poolId, setPoolId] = useState("");
   const [wireFormat, setWireFormat] = useState("openai");
+  const [strategy, setStrategy] = useState("priority");
+  const [stickyLimit, setStickyLimit] = useState("");
   const [addMemberDraft, setAddMemberDraft] = useState<Record<string, { providerId: string; modelOverride: string }>>({});
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
@@ -161,16 +181,40 @@ export function Pools() {
   async function createPool(event: FormEvent) {
     event.preventDefault();
     try {
+      const parsedStickyLimit = Number.parseInt(stickyLimit, 10);
       await apiJson("/admin/pools", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: poolId, wire_format: wireFormat })
+        body: JSON.stringify({
+          id: poolId,
+          wire_format: wireFormat,
+          strategy,
+          sticky_limit: Number.isFinite(parsedStickyLimit) ? parsedStickyLimit : undefined
+        })
       });
       setPoolId("");
+      setStrategy("priority");
+      setStickyLimit("");
       setCreateOpen(false);
       await loadPools();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Creating pool failed.");
+    }
+  }
+
+  // Round Robin only - Priority pools ignore sticky_limit entirely. Refetches
+  // the pool list afterward so the header badge reflects what's persisted,
+  // not just what was requested.
+  async function updateStrategy(pool: Pool, patch: { strategy?: string; sticky_limit?: number }) {
+    try {
+      await apiJson(`/admin/pools/${encodeURIComponent(pool.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      await loadPools();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Updating pool strategy failed.");
     }
   }
 
@@ -311,20 +355,31 @@ export function Pools() {
           model_override: draft.modelOverride.trim() || undefined
         })
       });
-      setDraftFor(pool.id, { providerId: "", modelOverride: "" });
+      // Only the model field clears - the provider stays selected, so
+      // adding several models from the same provider (the whole point of
+      // this pool's model_override support) is pick-provider-once,
+      // pick-model-per-add instead of re-selecting the provider every time.
+      setDraftFor(pool.id, { modelOverride: "" });
       await loadMembers([pool.id]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adding pool member failed.");
     }
   }
 
-  async function removeMember(pool: Pool, providerId: string) {
+  async function removeMember(pool: Pool, providerId: string, modelOverride: string | undefined) {
     setPendingDelete(null);
+    const targetKey = memberKey({ provider_id: providerId, priority: 0, model_override: modelOverride });
     try {
-      await apiJson(`/admin/pools/${encodeURIComponent(pool.id)}/members/${encodeURIComponent(providerId)}`, { method: "DELETE" });
+      // Always target this exact member by (provider, model) - never the
+      // bulk "delete every member for this provider" form, since the
+      // per-row button is removing one specific row.
+      await apiJson(
+        `/admin/pools/${encodeURIComponent(pool.id)}/members/${encodeURIComponent(providerId)}?model=${encodeURIComponent(modelOverride ?? "")}`,
+        { method: "DELETE" }
+      );
       setMembersByPool((current) => ({
         ...current,
-        [pool.id]: (current[pool.id] ?? []).filter((m) => m.provider_id !== providerId)
+        [pool.id]: (current[pool.id] ?? []).filter((m) => memberKey(m) !== targetKey)
       }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Removing pool member failed.");
@@ -345,9 +400,9 @@ export function Pools() {
     }
   }
 
-  async function moveMember(pool: Pool, providerId: string, direction: -1 | 1) {
+  async function moveMember(pool: Pool, key: string, direction: -1 | 1) {
     const poolMembers = membersByPool[pool.id] ?? [];
-    const oldIndex = poolMembers.findIndex((member) => member.provider_id === providerId);
+    const oldIndex = poolMembers.findIndex((member) => memberKey(member) === key);
     await reorder(pool, oldIndex, oldIndex + direction);
   }
 
@@ -358,8 +413,8 @@ export function Pools() {
     const poolMembers = membersByPool[pool.id] ?? [];
     await reorder(
       pool,
-      poolMembers.findIndex((member) => member.provider_id === event.active.id),
-      poolMembers.findIndex((member) => member.provider_id === event.over?.id)
+      poolMembers.findIndex((member) => memberKey(member) === event.active.id),
+      poolMembers.findIndex((member) => memberKey(member) === event.over?.id)
     );
   }
 
@@ -375,6 +430,39 @@ export function Pools() {
             <h2>{pool.id}</h2>
             <span className="badge">{pool.wire_format}</span>
             <span className="pool-meta">{describeCount(members.length)}</span>
+          </div>
+          <div className="pool-strategy">
+            <label>
+              Strategy
+              <select
+                aria-label={`Strategy for ${pool.id}`}
+                value={pool.strategy ?? "priority"}
+                onChange={(event) => void updateStrategy(pool, { strategy: event.target.value })}
+              >
+                {STRATEGY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {pool.strategy === "round_robin" ? (
+              <label>
+                Sticky limit
+                <input
+                  aria-label={`Sticky limit for ${pool.id}`}
+                  type="number"
+                  min={1}
+                  defaultValue={pool.sticky_limit ?? 1}
+                  onBlur={(event) => {
+                    const parsed = Number.parseInt(event.target.value, 10);
+                    if (Number.isFinite(parsed) && parsed > 0) {
+                      void updateStrategy(pool, { sticky_limit: parsed });
+                    }
+                  }}
+                />
+              </label>
+            ) : null}
           </div>
         </header>
 
@@ -402,14 +490,19 @@ export function Pools() {
         {members.length === 0 ? (
           <p className="empty-state">This pool has no providers yet, so it can't serve traffic. Add one below.</p>
         ) : (
+          // This ordering still matters for a Round Robin pool: it's the
+          // base rotation order (which member the cursor starts pointing at
+          // after a rotation), not just the fallback order used by Priority
+          // pools - reordering isn't hidden for round-robin strategies.
           <DndContext onDragEnd={(event) => void onDragEnd(pool, event)}>
-            <SortableContext items={members.map((member) => member.provider_id)}>
+            <SortableContext items={members.map((member) => memberKey(member))}>
               <ol className="member-list">
                 {members.map((member, index) => {
                   const name = member.provider_name ?? member.provider_id;
-                  const memberDeleteKey = `member:${pool.id}:${member.provider_id}`;
+                  const key = memberKey(member);
+                  const memberDeleteKey = `member:${pool.id}:${key}`;
                   return (
-                    <li key={member.provider_id} className="member-row">
+                    <li key={key} className="member-row">
                       <span className="member-rank" aria-hidden="true">
                         {index + 1}
                       </span>
@@ -435,7 +528,7 @@ export function Pools() {
                           <button
                             type="button"
                             className="btn-danger"
-                            onClick={() => void removeMember(pool, member.provider_id)}
+                            onClick={() => void removeMember(pool, member.provider_id, member.model_override)}
                             aria-label={`Confirm removing ${name} from ${pool.id}`}
                           >
                             Yes, remove
@@ -447,7 +540,7 @@ export function Pools() {
                             <button
                               type="button"
                               className="btn-reorder"
-                              onClick={() => void moveMember(pool, member.provider_id, -1)}
+                              onClick={() => void moveMember(pool, key, -1)}
                               aria-label={`Move ${name} up`}
                               title="Move up (higher priority)"
                               disabled={index === 0}
@@ -457,7 +550,7 @@ export function Pools() {
                             <button
                               type="button"
                               className="btn-reorder"
-                              onClick={() => void moveMember(pool, member.provider_id, 1)}
+                              onClick={() => void moveMember(pool, key, 1)}
                               aria-label={`Move ${name} down`}
                               title="Move down (lower priority)"
                               disabled={index === members.length - 1}
@@ -648,6 +741,28 @@ export function Pools() {
                 <option value="anthropic">anthropic</option>
               </select>
             </label>
+            <label>
+              Strategy
+              <select aria-label="Strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)}>
+                {STRATEGY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {strategy === "round_robin" ? (
+              <label>
+                Sticky limit <span className="optional">requests per provider before rotating, default 1</span>
+                <input
+                  aria-label="Sticky limit"
+                  type="number"
+                  min={1}
+                  value={stickyLimit}
+                  onChange={(event) => setStickyLimit(event.target.value)}
+                />
+              </label>
+            ) : null}
             <div className="modal-actions">
               <button type="button" className="btn-ghost" onClick={() => setCreateOpen(false)} aria-label="Cancel creating pool">
                 Cancel

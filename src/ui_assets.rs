@@ -93,6 +93,7 @@ mod tests {
             refresh_locks: Arc::new(dashmap::DashMap::new()),
             login_attempts: Arc::new(dashmap::DashMap::new()),
             discovered_models: Arc::new(dashmap::DashMap::new()),
+            pool_rotation: Arc::new(dashmap::DashMap::new()),
         }
     }
 

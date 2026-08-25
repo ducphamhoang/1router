@@ -27,6 +27,17 @@ BIN="$PWD/target/debug/1router"
 - [ ] Enter name `smoke-openai`; wire format `openai`; base_url
       `https://api.openai.com/v1/chat/completions`; a real API key —
       **confirm the key is masked as you type**; upstream model `gpt-4o-mini`.
+- [ ] `validating upstream_model "gpt-4o-mini"...` is printed, followed by
+      `-> "gpt-4o-mini" works` — the provider is only inserted after this
+      passes (`confirm_upstream_model` in `src/onboarding.rs`).
+- [ ] Repeat with a deliberately wrong upstream model (e.g. `gpt-not-real`):
+      the probe reports the failure, then `checking this provider's own live
+      model list...`, tries a handful of live candidates, and either
+      reports `-> using "<model>" instead (validated live)` (accept it) or,
+      if nothing validates, re-prompts "Upstream model (nothing validated -
+      keep this or type another)" defaulting to what you typed — confirm
+      declining (Enter) keeps the original value and the wizard still
+      proceeds (it does not abort).
 - [ ] Prompt: "Pool id" → accept the default (`smoke-openai`).
 - [ ] Output confirms `added 'smoke-openai' to pool 'smoke-openai' at priority 1`.
 - [ ] Prompt: "Add another provider?" → **no**. The example `curl` is printed

@@ -270,6 +270,7 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             api_key: Some("sk-abc".into()),
             upstream_model: "gpt-4o".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

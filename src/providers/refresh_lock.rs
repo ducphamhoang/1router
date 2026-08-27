@@ -181,6 +181,7 @@ mod tests {
             base_url: None,
             api_key: None,
             upstream_model: "m".into(),
+            dataset_logging: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

@@ -141,6 +141,7 @@ mod tests {
             base_url: Some("https://x".into()),
             api_key: Some("k".into()),
             upstream_model: "m".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -170,6 +171,7 @@ mod tests {
                 provider_id: "does-not-exist".into(),
                 priority: 1,
                 model_override: None,
+                dataset_logging_override: None,
             }],
         };
 

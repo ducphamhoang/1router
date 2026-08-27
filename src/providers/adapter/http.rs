@@ -170,6 +170,7 @@ mod tests {
             base_url: Some("https://api.example.com/v1/chat/completions".into()),
             api_key: Some("sk-xyz".into()),
             upstream_model: "real-model".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

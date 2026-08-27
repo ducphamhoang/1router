@@ -141,6 +141,7 @@ pub async fn assign_to_pool(
             provider_id: provider.id.clone(),
             priority,
             model_override,
+            dataset_logging_override: None,
         },
     )
     .await
@@ -299,6 +300,7 @@ pub(crate) fn build_passthrough_row(
         base_url: Some(base_url.to_string()),
         api_key: Some(api_key.to_string()),
         upstream_model: upstream_model.to_string(),
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     }
@@ -667,6 +669,7 @@ pub async fn add_commandcode_provider(
         base_url: None,
         api_key: None,
         upstream_model: PENDING_MODEL.to_string(),
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };
@@ -879,6 +882,7 @@ pub async fn add_codex_provider(
         api_key: None,
         // Replaced by the probe below; kept if every candidate fails.
         upstream_model: PENDING_MODEL.to_string(),
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };
@@ -1449,6 +1453,7 @@ mod tests {
             provider_id: "x".into(),
             priority,
             model_override: None,
+            dataset_logging_override: None,
         }
     }
 
@@ -1775,6 +1780,7 @@ mod tests {
             base_url: Some("https://x/v1/chat/completions".into()),
             api_key: Some("k".into()),
             upstream_model: "m".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1833,6 +1839,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 10,
                 model_override: None,
+                dataset_logging_override: None,
             },
         )
         .await

@@ -132,6 +132,7 @@ async fn create(
         base_url: b.base_url,
         api_key: b.api_key,
         upstream_model: b.upstream_model,
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };
@@ -286,6 +287,7 @@ async fn validate_model_preview(
         base_url: Some(body.base_url),
         api_key: body.api_key,
         upstream_model: body.model,
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };
@@ -513,6 +515,7 @@ async fn list_models_preview(
         base_url: Some(body.base_url),
         api_key: body.api_key,
         upstream_model: String::new(),
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };

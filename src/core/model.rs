@@ -27,6 +27,16 @@ pub struct Provider {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub upstream_model: String,
+    /// Opt-in: capture raw request/response bytes for every successful
+    /// exchange served by this provider, as JSONL (`telemetry::dataset_log`).
+    /// The base setting — also the only one consulted for
+    /// `<provider_id>/<model>` direct addressing, which has no `PoolMember`
+    /// row to override it. `#[serde(default)]` because `Provider` is
+    /// deserialized directly by config export/import and seed loading,
+    /// neither of which has this key in a pre-existing file. See
+    /// docs/superpowers/specs/2026-08-27-dataset-logging-design.md.
+    #[serde(default)]
+    pub dataset_logging: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -72,6 +82,13 @@ pub struct PoolMember {
     /// shared across several pools that each target a different upstream
     /// model.
     pub model_override: Option<String>,
+    /// Overrides `Provider.dataset_logging` for requests routed through
+    /// this specific pool membership. `None` inherits the provider's own
+    /// setting (`pools::select::dataset_logging_enabled`). `#[serde(default)]`
+    /// for the same reason as `Provider.dataset_logging` — see its doc
+    /// comment.
+    #[serde(default)]
+    pub dataset_logging_override: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,5 +173,31 @@ mod tests {
     #[test]
     fn pool_strategy_defaults_to_priority() {
         assert_eq!(PoolStrategy::default(), PoolStrategy::Priority);
+    }
+
+    #[test]
+    fn provider_and_pool_member_carry_dataset_logging_fields() {
+        let p = Provider {
+            id: "p1".into(),
+            name: "P1".into(),
+            wire_format: WireFormat::OpenAi,
+            kind: ProviderKind::Passthrough,
+            base_url: Some("u".into()),
+            api_key: Some("k".into()),
+            upstream_model: "m".into(),
+            dataset_logging: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert!(p.dataset_logging);
+
+        let m = PoolMember {
+            pool_id: "pool1".into(),
+            provider_id: "p1".into(),
+            priority: 1,
+            model_override: None,
+            dataset_logging_override: Some(false),
+        };
+        assert_eq!(m.dataset_logging_override, Some(false));
     }
 }

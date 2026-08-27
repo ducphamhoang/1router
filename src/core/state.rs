@@ -108,7 +108,7 @@ pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> 
     let mut with_members = Vec::with_capacity(pools.len());
     for pool in pools {
         let members: Vec<PoolMember> = sqlx::query_as::<_, PoolMember>(
-            "SELECT pool_id, provider_id, priority, model_override FROM pool_members
+            "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override FROM pool_members
              WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
         )
         .bind(&pool.id)

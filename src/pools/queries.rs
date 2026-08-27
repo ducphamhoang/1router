@@ -78,7 +78,7 @@ pub async fn delete_pool(db: &SqlitePool, id: &str) -> Result<(), AppError> {
 
 pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMember>, AppError> {
     Ok(sqlx::query_as::<_, PoolMember>(
-        "SELECT pool_id, provider_id, priority, model_override FROM pool_members
+        "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override FROM pool_members
          WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
     )
     .bind(pool_id)
@@ -212,6 +212,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 5,
                 model_override: None,
+                dataset_logging_override: None,
             },
         )
         .await
@@ -230,6 +231,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 9,
                 model_override: None,
+                dataset_logging_override: None,
             },
         )
         .await
@@ -248,6 +250,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 1,
                 model_override: Some("gpt-5.6-sol".into()),
+                dataset_logging_override: None,
             },
         )
         .await

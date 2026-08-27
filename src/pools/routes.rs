@@ -137,6 +137,7 @@ async fn put_member(
             provider_id: b.provider_id.clone(),
             priority: b.priority,
             model_override: model_override.clone(),
+            dataset_logging_override: None,
         },
     )
     .await?;

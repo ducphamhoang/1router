@@ -144,6 +144,7 @@ mod tests {
             id: id.into(), name: id.into(), wire_format: WireFormat::OpenAi,
             kind: ProviderKind::Passthrough, base_url: Some("u".into()),
             api_key: Some("k".into()), upstream_model: "m".into(),
+            dataset_logging: false,
             created_at: Utc::now(), updated_at: Utc::now(),
         }
     }
@@ -165,8 +166,8 @@ mod tests {
                     strategy, sticky_limit,
                 },
                 members: vec![
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None },
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None, dataset_logging_override: None },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None, dataset_logging_override: None },
                 ],
             }],
         }
@@ -188,6 +189,7 @@ mod tests {
             provider_id: "a".into(),
             priority: 10,
             model_override: Some("gpt-5.6-sol".into()),
+            dataset_logging_override: None,
         });
         // dedupe: replace the "a" member from `snap()` with the overridden one
         s.pools[0].members.retain(|m| m.provider_id != "a" || m.model_override.is_some());

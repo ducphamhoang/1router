@@ -310,6 +310,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn provider_patch_deserializes_from_an_empty_or_partial_json_object() {
+        // The admin PATCH endpoint passes the request body straight through
+        // to `serde_json` as a `ProviderPatch` - every field must tolerate
+        // being entirely absent from the JSON (a partial patch is the
+        // normal case, e.g. `{"name": "x"}` alone), not just `null`.
+        let empty: ProviderPatch = serde_json::from_str("{}").unwrap();
+        assert!(empty.name.is_none());
+        assert!(empty.dataset_logging.is_none());
+
+        let partial: ProviderPatch = serde_json::from_str(r#"{"dataset_logging": true}"#).unwrap();
+        assert_eq!(partial.dataset_logging, Some(true));
+        assert!(partial.name.is_none());
+    }
+
     #[tokio::test]
     async fn insert_and_update_provider_round_trip_dataset_logging() {
         let db = init_pool(":memory:").await.unwrap();

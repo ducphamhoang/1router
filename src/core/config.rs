@@ -13,6 +13,7 @@ pub struct Config {
     pub idle_timeout: Duration,
     pub max_body_bytes: usize,
     pub drain_timeout: Duration,
+    pub dataset_log_dir: PathBuf,
 }
 
 fn env_secs(key: &str, default: u64) -> Duration {
@@ -86,6 +87,24 @@ pub fn resolve_auth_mode(
         SecretSource::Env(_) | SecretSource::SidecarFile(_)
     );
     Ok(AuthModeSource::Default(value))
+}
+
+/// Where dataset-logging JSONL files land: `ROUTER_DATASET_LOG_DIR` if
+/// set, else a `dataset-logs` directory sibling to the sqlite file -
+/// mirrors `secret_file_path`'s convention (the `.router_secret` sidecar
+/// already lives next to the sqlite path for the same reason), rather
+/// than inventing a new fixed top-level `data/` component. See
+/// docs/superpowers/specs/2026-08-27-dataset-logging-design.md.
+pub fn dataset_log_dir_from_env(sqlite_path: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("ROUTER_DATASET_LOG_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    match std::path::Path::new(sqlite_path).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("dataset-logs"),
+        _ => PathBuf::from("dataset-logs"),
+    }
 }
 
 pub fn listen_addr_is_loopback(addr: &SocketAddr) -> bool {
@@ -204,9 +223,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10 * 1024 * 1024);
 
+        let sqlite_path = sqlite_path_from_env();
+        let dataset_log_dir = dataset_log_dir_from_env(&sqlite_path);
         Ok(Config {
             listen_addr,
-            sqlite_path: sqlite_path_from_env(),
+            sqlite_path,
             shared_secret,
             seed_path,
             connect_timeout: env_secs("ROUTER_CONNECT_TIMEOUT", 10),
@@ -214,6 +235,7 @@ impl Config {
             idle_timeout: env_secs("ROUTER_IDLE_TIMEOUT", 120),
             max_body_bytes,
             drain_timeout: env_secs("ROUTER_DRAIN_TIMEOUT", 30),
+            dataset_log_dir,
         })
     }
 }
@@ -384,6 +406,27 @@ mod tests {
         std::env::set_var("ROUTER_REQUIRE_SHARED_SECRET", "maybe");
         assert!(parse_require_shared_secret_env().is_err());
         std::env::remove_var("ROUTER_REQUIRE_SHARED_SECRET");
+    }
+
+    #[test]
+    fn dataset_log_dir_prefers_env_over_sqlite_sibling() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ROUTER_DATASET_LOG_DIR");
+        assert_eq!(
+            dataset_log_dir_from_env("/data/1router.db"),
+            std::path::Path::new("/data").join("dataset-logs")
+        );
+        assert_eq!(
+            dataset_log_dir_from_env("1router.db"),
+            std::path::PathBuf::from("dataset-logs")
+        );
+
+        std::env::set_var("ROUTER_DATASET_LOG_DIR", "/custom/logs");
+        assert_eq!(
+            dataset_log_dir_from_env("/data/1router.db"),
+            std::path::PathBuf::from("/custom/logs")
+        );
+        std::env::remove_var("ROUTER_DATASET_LOG_DIR");
     }
 
     #[test]

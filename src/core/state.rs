@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 
 use crate::core::config::Config;
 use crate::core::error::AppError;
-use crate::core::model::{LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
+use crate::core::model::{DatasetLogEntry, LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
 use crate::core::runtime::RuntimeStateMap;
 
 #[derive(Clone, Debug)]
@@ -19,6 +19,7 @@ pub struct ConfigSnapshot {
 }
 
 pub type RequestLogSender = tokio::sync::mpsc::Sender<LogEntry>;
+pub type DatasetLogSender = tokio::sync::mpsc::Sender<DatasetLogEntry>;
 pub type RefreshLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 pub type LoginAttemptMap = Arc<DashMap<IpAddr, AttemptState>>;
 
@@ -89,6 +90,7 @@ pub struct AppState {
     pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
+    pub dataset_log_tx: DatasetLogSender,
     pub refresh_locks: RefreshLocks,
     pub login_attempts: LoginAttemptMap,
     pub discovered_models: DiscoveredModelsMap,

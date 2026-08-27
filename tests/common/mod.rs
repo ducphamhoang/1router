@@ -5,6 +5,7 @@ pub struct TestApp {
     pub secret: String,
     pub admin_password: String,
     pub db: SqlitePool,
+    pub dataset_log_dir: std::path::PathBuf,
 }
 
 pub async fn spawn_app() -> TestApp {
@@ -34,6 +35,12 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         }
     };
 
+    // Per-test tempdir, not a fixed path - parallel test runs (the default
+    // for `cargo test`) must not collide writing dataset-log JSONL files.
+    let dataset_log_dir_holder = tempfile::tempdir().unwrap();
+    let dataset_log_dir = dataset_log_dir_holder.path().to_path_buf();
+    std::mem::forget(dataset_log_dir_holder); // keep it alive for the test process
+
     let cfg = router::core::config::Config {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path,
@@ -44,6 +51,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         idle_timeout: std::time::Duration::from_secs(120),
         max_body_bytes: 10 * 1024 * 1024,
         drain_timeout: std::time::Duration::from_secs(30),
+        dataset_log_dir: dataset_log_dir.clone(),
     };
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
     let admin_password = "test-admin-password".to_string();
@@ -66,6 +74,8 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     let http = router::core::http_client::build_client(&cfg);
     let snapshot = router::core::state::load_snapshot(&db).await.unwrap();
     let log_tx = router::telemetry::request_log::spawn_writer(db.clone(), 1024, 50);
+    let dataset_log_tx =
+        router::telemetry::dataset_log::spawn_writer(dataset_log_dir.clone(), 1024);
 
     let state = router::core::state::AppState {
         db: db.clone(),
@@ -80,6 +90,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         runtime: std::sync::Arc::new(dashmap::DashMap::new()),
         log_tx,
+        dataset_log_tx,
         refresh_locks: std::sync::Arc::new(dashmap::DashMap::new()),
         login_attempts: std::sync::Arc::new(dashmap::DashMap::new()),
         discovered_models: std::sync::Arc::new(dashmap::DashMap::new()),
@@ -103,6 +114,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         secret,
         admin_password,
         db,
+        dataset_log_dir,
     }
 }
 

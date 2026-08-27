@@ -69,8 +69,10 @@ mod tests {
             idle_timeout: Duration::from_secs(1),
             max_body_bytes: 1024,
             drain_timeout: Duration::from_secs(1),
+            dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (dataset_tx, _dataset_rx) = tokio::sync::mpsc::channel(8);
         AppState {
             http: build_client(&cfg),
             shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
@@ -84,6 +86,7 @@ mod tests {
             })),
             runtime: Arc::new(dashmap::DashMap::new()),
             log_tx: tx,
+            dataset_log_tx: dataset_tx,
             refresh_locks: Arc::new(dashmap::DashMap::new()),
             login_attempts: Arc::new(dashmap::DashMap::new()),
             discovered_models: Arc::new(dashmap::DashMap::new()),

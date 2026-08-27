@@ -11,6 +11,7 @@ use router::core::state::{
 use router::onboarding;
 use router::providers::refresh_task::spawn_background_refresh;
 use router::seed::seed_if_configured;
+use router::telemetry::dataset_log;
 use router::telemetry::logging::init_tracing;
 use router::telemetry::request_log::spawn_writer;
 
@@ -171,6 +172,7 @@ async fn main() -> Result<()> {
     let http = build_client(&cfg);
     let snapshot = load_snapshot(&db).await?;
     let log_tx = spawn_writer(db.clone(), 4096, 100);
+    let dataset_log_tx = dataset_log::spawn_writer(cfg.dataset_log_dir.clone(), 4096);
 
     let state = AppState {
         db,
@@ -183,6 +185,7 @@ async fn main() -> Result<()> {
         snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
+        dataset_log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),

@@ -120,6 +120,47 @@ pub struct LogEntry {
     pub success: bool,
 }
 
+/// Time-to-first-byte and total wall-clock duration for one dataset-logged
+/// exchange. A nested struct (not two flat fields on `DatasetLogEntry`) so
+/// it serializes as the nested `"latency_ms": {"ttfb_ms": ..., "total_ms":
+/// ...}` on-disk shape the design spec commits to. `ttfb_ms` is the
+/// existing duration already computed around `state.http.execute` in
+/// `handle_proxy`; `total_ms` requires a separate timer read when the
+/// response stream actually ends (see `proxy::dataset_tee`), since it
+/// isn't derivable from the upstream-request timer alone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LatencyMs {
+    pub ttfb_ms: Option<i64>,
+    pub total_ms: i64,
+}
+
+/// One JSONL record written by `telemetry::dataset_log` for a successful
+/// proxy exchange whose pool/provider opted into dataset logging. See
+/// docs/superpowers/specs/2026-08-27-dataset-logging-design.md for the
+/// full field-by-field rationale.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DatasetLogEntry {
+    pub request_id: String,
+    pub timestamp: DateTime<Utc>,
+    /// `None` for a direct-provider-addressed call (no `PoolMember` row).
+    pub pool_id: Option<String>,
+    pub provider_id: String,
+    pub model: String,
+    /// Reserved for a future "User credential" feature - always `None`
+    /// until that exists.
+    pub user_id: Option<String>,
+    pub wire_format: WireFormat,
+    pub stream: bool,
+    pub input_body: String,
+    pub output_body: String,
+    /// `false` when the response ended before finishing cleanly (client
+    /// disconnect, or an upstream error mid-stream) - `output_body` then
+    /// holds only whatever bytes were accumulated up to that point.
+    /// Curation should discard `complete: false` records by default.
+    pub complete: bool,
+    pub latency_ms: LatencyMs,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

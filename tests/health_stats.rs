@@ -34,8 +34,10 @@ async fn spawn_app() -> TestApp {
         idle_timeout: Duration::from_secs(1),
         max_body_bytes: 1024,
         drain_timeout: Duration::from_secs(1),
+        dataset_log_dir: dir.path().join("dataset-logs"),
     };
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
+    let (dataset_log_tx, _dataset_log_rx) = tokio::sync::mpsc::channel(8);
     let state = AppState {
         http: build_client(&cfg),
         shared_secret: Arc::new(ArcSwap::from_pointee(cfg.shared_secret.clone())),
@@ -49,6 +51,7 @@ async fn spawn_app() -> TestApp {
         })),
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
+        dataset_log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),

@@ -71,7 +71,7 @@ pub async fn handle_proxy(
     let mut last_error_body = String::from("no provider produced a response");
     let mut last_provider = String::new();
 
-    for (provider, effective_model) in &selection.providers {
+    for (provider, effective_model, _dataset_logging_member_override) in &selection.providers {
         let now = Instant::now();
         {
             let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();

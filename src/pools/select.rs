@@ -5,12 +5,25 @@ pub struct Selection<'a> {
     /// `None` for a direct `<provider_id>/<model>` selection (see
     /// `select_direct_provider` below) - there's no real pool row behind it.
     pub pool: Option<&'a Pool>,
-    /// (provider, effective upstream model) pairs, in priority order. The
-    /// effective model is the member's `model_override` if set, else the
-    /// provider's own `upstream_model` - this is what lets one provider
-    /// (one credential set) be shared across pools that each call a
-    /// different model.
-    pub providers: Vec<(&'a Provider, String)>,
+    /// (provider, effective upstream model, resolved dataset-logging
+    /// member override) triples, in priority order. The effective model is
+    /// the member's `model_override` if set, else the provider's own
+    /// `upstream_model` - this is what lets one provider (one credential
+    /// set) be shared across pools that each call a different model. The
+    /// third element is `PoolMember.dataset_logging_override` for a
+    /// pool-routed entry, or `None` for a direct-provider-addressed one
+    /// (which has no `PoolMember` row at all) - either way, pass it to
+    /// `dataset_logging_enabled` alongside the provider to resolve the
+    /// effective setting.
+    pub providers: Vec<(&'a Provider, String, Option<bool>)>,
+}
+
+/// `member_override` is `PoolMember.dataset_logging_override` for a
+/// pool-routed call, or `None` for direct-provider addressing (which has
+/// no `PoolMember` row at all) - either way, `None` means "inherit the
+/// provider's own setting".
+pub fn dataset_logging_enabled(provider: &Provider, member_override: Option<bool>) -> bool {
+    member_override.unwrap_or(provider.dataset_logging)
 }
 
 /// Resolve a client-requested `model` to what to actually call.
@@ -59,7 +72,7 @@ pub fn select<'a>(
                     .model_override
                     .clone()
                     .unwrap_or_else(|| provider.upstream_model.clone());
-                Some((provider, model))
+                Some((provider, model, m.dataset_logging_override))
             })
             .collect();
 
@@ -127,7 +140,7 @@ fn select_direct_provider<'a>(
     let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
     Some(Selection {
         pool: None,
-        providers: vec![(provider, model.to_string())],
+        providers: vec![(provider, model.to_string(), None)],
     })
 }
 
@@ -177,7 +190,7 @@ mod tests {
     fn orders_by_priority_ascending() {
         let s = snap();
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let ids: Vec<&str> = sel.providers.iter().map(|(p, _)| p.id.as_str()).collect();
+        let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
     }
 
@@ -195,10 +208,10 @@ mod tests {
         s.pools[0].members.retain(|m| m.provider_id != "a" || m.model_override.is_some());
 
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let (_, model) = sel.providers.iter().find(|(p, _)| p.id == "a").unwrap();
+        let (_, model, _) = sel.providers.iter().find(|(p, _, _)| p.id == "a").unwrap();
         assert_eq!(model, "gpt-5.6-sol");
 
-        let (_, model_b) = sel.providers.iter().find(|(p, _)| p.id == "b").unwrap();
+        let (_, model_b, _) = sel.providers.iter().find(|(p, _, _)| p.id == "b").unwrap();
         assert_eq!(model_b, "m", "falls back to the provider's own upstream_model when unset");
     }
 
@@ -218,7 +231,7 @@ mod tests {
         let sel = select(&s, "a/some-other-model", WireFormat::OpenAi, &empty_rotation()).unwrap();
         assert!(sel.pool.is_none());
         assert_eq!(sel.providers.len(), 1);
-        let (provider, model) = &sel.providers[0];
+        let (provider, model, _) = &sel.providers[0];
         assert_eq!(provider.id, "a");
         assert_eq!(model, "some-other-model");
     }
@@ -227,7 +240,7 @@ mod tests {
     fn direct_provider_addressing_only_splits_on_the_first_slash() {
         let s = snap();
         let sel = select(&s, "a/meta-llama/Llama-3-70b", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let (provider, model) = &sel.providers[0];
+        let (provider, model, _) = &sel.providers[0];
         assert_eq!(provider.id, "a");
         assert_eq!(model, "meta-llama/Llama-3-70b");
     }
@@ -276,7 +289,7 @@ mod tests {
         let rotation = empty_rotation();
         for _ in 0..5 {
             let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
-            let ids: Vec<&str> = sel.providers.iter().map(|(p, _)| p.id.as_str()).collect();
+            let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
             assert_eq!(ids, vec!["a", "b"]);
         }
     }
@@ -288,7 +301,7 @@ mod tests {
         let rotation = empty_rotation();
 
         let ids = |sel: &Selection| -> Vec<String> {
-            sel.providers.iter().map(|(p, _)| p.id.clone()).collect()
+            sel.providers.iter().map(|(p, _, _)| p.id.clone()).collect()
         };
 
         let sel1 = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
@@ -307,7 +320,7 @@ mod tests {
         let rotation = empty_rotation();
 
         let ids = |sel: &Selection| -> Vec<String> {
-            sel.providers.iter().map(|(p, _)| p.id.clone()).collect()
+            sel.providers.iter().map(|(p, _, _)| p.id.clone()).collect()
         };
 
         let sel1 = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
@@ -336,7 +349,7 @@ mod tests {
 
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
         assert_eq!(sel.providers.len(), 2, "full member list still returned");
-        let ids: Vec<&str> = sel.providers.iter().map(|(p, _)| p.id.as_str()).collect();
+        let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
         assert!(ids.contains(&"a") && ids.contains(&"b"));
     }
 
@@ -351,5 +364,35 @@ mod tests {
             assert_eq!(sel.providers.len(), 1);
             assert_eq!(sel.providers[0].0.id, "a");
         }
+    }
+
+    #[test]
+    fn dataset_logging_enabled_prefers_member_override_over_provider_default() {
+        let mut p = prov("x");
+        p.dataset_logging = false;
+        assert!(dataset_logging_enabled(&p, Some(true)));
+        p.dataset_logging = true;
+        assert!(!dataset_logging_enabled(&p, Some(false)));
+        p.dataset_logging = true;
+        assert!(dataset_logging_enabled(&p, None));
+    }
+
+    #[test]
+    fn select_carries_the_member_override_for_a_pool_routed_call() {
+        let mut s = snap();
+        s.pools[0].members[0].dataset_logging_override = Some(true);
+        // s.pools[0].members[0] is "b" (priority 20) per snap()'s member
+        // order; find "b" explicitly rather than relying on array order.
+        let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
+        let (_, _, member_override) = sel.providers.iter().find(|(p, _, _)| p.id == "b").unwrap();
+        assert_eq!(*member_override, Some(true));
+    }
+
+    #[test]
+    fn select_direct_provider_always_yields_no_override() {
+        let mut s = snap();
+        s.providers[0].dataset_logging = true; // "a"
+        let sel = select(&s, "a/some-model", WireFormat::OpenAi, &empty_rotation()).unwrap();
+        assert_eq!(sel.providers[0].2, None);
     }
 }

@@ -208,13 +208,17 @@ exempt from the CSRF check.
 pre-fills a suggested id/name (deduped against providers you already have,
 so a second same-template provider suggests `-2`, `-3`, ...) plus the wire
 format, base URL, and a starting model, so you don't need to look up API
-details yourself. "Custom" is last in the template list.
+details yourself. "Custom" is last in the template list. Each provider also
+has an opt-in "Log requests/responses" checkbox (off by default) for
+[dataset logging](docs/ARCHITECTURE.md#dataset-logging) — captures raw
+request/response bodies as JSONL for later fine-tuning/distillation work.
 
 ![Providers page](docs/screenshots/providers.png)
 ![New provider dialog](docs/screenshots/new-provider.png)
 
 **Pools** — group providers under one name for round-robin/failover, or
-serve several models from one credential.
+serve several models from one credential. Each pool membership can
+individually override its provider's dataset-logging setting.
 
 ![Pools page](docs/screenshots/pools.png)
 

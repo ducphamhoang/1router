@@ -62,6 +62,36 @@ at the next boot) and a provider whose fetch fails (dead upstream, no
 `/models` support) is simply absent from the list rather than causing an
 error.
 
+## Dataset logging
+
+Opt-in, off by default: a provider or a specific pool membership can be
+flagged to capture the raw request/response bytes of every successful
+exchange it serves, as JSONL files on disk — a corpus usable later for
+fine-tuning/distillation curation. Two-layer toggle, same
+nullable-falls-back idiom as `model_override`:
+
+- `Provider.dataset_logging` (admin UI: the "Log requests/responses for
+  this provider" checkbox on the Providers page) is the base setting —
+  also the only one consulted for `<provider_id>/<model>` direct
+  addressing, which has no pool membership to override it.
+- `PoolMember.dataset_logging_override`, set per-membership on the Pools
+  page, overrides the provider's setting for that specific pool only —
+  lets one credential shared across several pools log some and not others.
+
+Records land at `<dataset_log_dir>/{provider_id}/{YYYY-MM-DD}.jsonl`
+(`dataset_log_dir` defaults to a `dataset-logs` folder next to the sqlite
+file, override with `ROUTER_DATASET_LOG_DIR`), one JSON line per
+successful exchange: raw client-facing request/response bytes exactly as
+sent (no parsing, no cross-wire normalization — that's left to whatever
+offline curation step consumes the corpus), `complete: false` when a
+response ended early (client disconnect or an upstream error mid-stream,
+still logged with whatever was captured so far), and no record at all for
+failed/errored exchanges. Bodies are captured raw and unredacted — this is
+deliberate, since enabling the toggle at all is the admin asserting they're
+fine capturing what actually flows through that provider/membership;
+there's no PII scrubbing pass to get subtly wrong. Full design rationale:
+[`docs/superpowers/specs/2026-08-27-dataset-logging-design.md`](superpowers/specs/2026-08-27-dataset-logging-design.md).
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
@@ -75,6 +105,7 @@ error.
 | `ROUTER_TTFB_TIMEOUT` | `60` (seconds) | Upstream time-to-first-byte timeout |
 | `ROUTER_IDLE_TIMEOUT` | `120` (seconds) | Upstream idle timeout |
 | `ROUTER_DRAIN_TIMEOUT` | `30` (seconds) | Graceful shutdown drain window |
+| `ROUTER_DATASET_LOG_DIR` | `<sqlite file's directory>/dataset-logs` | Where opt-in dataset-logging JSONL files are written — see [Dataset logging](#dataset-logging) |
 
 ## Request path end to end
 

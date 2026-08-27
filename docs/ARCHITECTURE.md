@@ -77,6 +77,8 @@ nullable-falls-back idiom as `model_override`:
 - `PoolMember.dataset_logging_override`, set per-membership on the Pools
   page, overrides the provider's setting for that specific pool only —
   lets one credential shared across several pools log some and not others.
+  v1's UI only sets this when a member is added, not afterward (remove and
+  re-add to change it).
 
 Records land at `<dataset_log_dir>/{provider_id}/{YYYY-MM-DD}.jsonl`
 (`dataset_log_dir` defaults to a `dataset-logs` folder next to the sqlite

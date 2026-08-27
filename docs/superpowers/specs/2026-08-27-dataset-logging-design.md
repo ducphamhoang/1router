@@ -146,7 +146,7 @@ write if absent, mirroring how `persist_secret` in `core/config.rs` already
   "input_body": "<raw bytes, as received from the client>",
   "output_body": "<raw bytes, as sent to the client, accumulated so far>",
   "complete": true,
-  "latency_ms": { "ttfb": 120, "total": 4300 }
+  "latency_ms": { "ttfb_ms": 120, "total_ms": 4300 }
 }
 ```
 
@@ -179,13 +179,25 @@ write if absent, mirroring how `persist_secret` in `core/config.rs` already
   clean training pair. A client disconnecting mid-stream (the single most
   common truncation in practice — a user hitting stop) must still produce
   a record with `complete: false`, not silence.
-- `latency_ms.ttfb` / `.total`: time-to-first-byte (the existing duration
-  already computed around `state.http.execute` in `handle_proxy`) and total
-  wall-clock duration of the whole exchange, which requires a *new* timer
-  started right before the response begins streaming back to the client and
-  read when the response ends (stream completion or single-chunk delivery)
-  — `total` is not derivable from the upstream-request timer alone, since
-  it doesn't cover time spent streaming the reply back.
+- `latency_ms.ttfb_ms` / `.total_ms`: `ttfb_ms` is the existing duration
+  already computed around `state.http.execute` for the *winning* attempt
+  (time-to-first-byte from that specific upstream call). `total_ms` is a
+  separate, wider timer — started once, unconditionally, before the
+  failover loop begins, and read when the response stream actually ends
+  (stream completion, an error, or an abandoned/dropped body — see
+  `complete` above). This means `total_ms` covers the **entire client-visible
+  wait**: any earlier attempts against other providers/members that failed
+  over before the winning one, plus the winning attempt's own upstream
+  round-trip and streaming time — not just the winning attempt's own
+  duration. That's a deliberate choice (a curator filtering by latency
+  wants to know what the client actually experienced, including failover
+  overhead), not an oversight; if a future consumer needs "the winning
+  attempt's own latency" isolated from failover time, that's `ttfb_ms` plus
+  a fresh per-attempt total the implementation does not currently track
+  separately. `total_ms` is not derivable from `ttfb_ms` alone in either
+  reading, since neither covers time spent streaming the reply back to the
+  client nor (in the current implementation) time spent on prior failed
+  attempts.
 
 ## Tap points: two, not one-per-adapter
 

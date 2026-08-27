@@ -217,8 +217,10 @@ request/response bodies as JSONL for later fine-tuning/distillation work.
 ![New provider dialog](docs/screenshots/new-provider.png)
 
 **Pools** — group providers under one name for round-robin/failover, or
-serve several models from one credential. Each pool membership can
-individually override its provider's dataset-logging setting.
+serve several models from one credential. A pool membership can opt into
+dataset logging independently of its provider's own setting when you add
+it (v1 has no UI to change an existing membership's override afterward —
+remove and re-add it to change the choice).
 
 ![Pools page](docs/screenshots/pools.png)
 

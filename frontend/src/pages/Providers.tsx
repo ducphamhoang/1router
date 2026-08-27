@@ -302,7 +302,8 @@ export function Providers() {
       kind: provider.kind,
       base_url: provider.base_url ?? "",
       api_key: "",
-      upstream_model: provider.upstream_model
+      upstream_model: provider.upstream_model,
+      dataset_logging: provider.dataset_logging ?? false
     });
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(Boolean(provider.credential_configured));

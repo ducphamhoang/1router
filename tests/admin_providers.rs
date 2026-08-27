@@ -36,6 +36,83 @@ async fn create_list_and_mask_api_key() {
 }
 
 #[tokio::test]
+async fn create_provider_accepts_dataset_logging() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+
+    let create = client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({
+            "id": "p1", "name": "P1", "wire_format": "openai",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1",
+            "api_key": "sk", "upstream_model": "gpt-4o", "dataset_logging": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 201);
+    let body: serde_json::Value = create.json().await.unwrap();
+    assert_eq!(body["dataset_logging"], true);
+
+    // Absent entirely -> defaults false, not rejected.
+    let create2 = client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({
+            "id": "p2", "name": "P2", "wire_format": "openai",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1",
+            "api_key": "sk", "upstream_model": "gpt-4o"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create2.status(), 201);
+    let body2: serde_json::Value = create2.json().await.unwrap();
+    assert_eq!(body2["dataset_logging"], false);
+}
+
+#[tokio::test]
+async fn patch_provider_updates_dataset_logging() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+
+    client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({
+            "id": "p1", "name": "P1", "wire_format": "openai",
+            "kind": "passthrough", "base_url": "http://127.0.0.1:1",
+            "api_key": "sk", "upstream_model": "gpt-4o"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let patch = client
+        .patch(format!("{}/admin/providers/p1", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "dataset_logging": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch.status(), 200);
+
+    let get: serde_json::Value = client
+        .get(format!("{}/admin/providers/p1", app.base_url))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(get["dataset_logging"], true);
+}
+
+#[tokio::test]
 async fn get_missing_provider_is_404() {
     let app = spawn_app().await;
     let client = reqwest::Client::new();

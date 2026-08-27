@@ -13,6 +13,7 @@ type Provider = {
   api_key?: string;
   upstream_model: string;
   credential_configured?: boolean;
+  dataset_logging?: boolean;
 };
 
 type ProviderForm = Provider;
@@ -38,7 +39,8 @@ const emptyForm: ProviderForm = {
   kind: "passthrough",
   base_url: "",
   api_key: "",
-  upstream_model: ""
+  upstream_model: "",
+  dataset_logging: false
 };
 
 // Picking a template sets `kind` (+ a default wire_format the provider
@@ -389,6 +391,7 @@ export function Providers() {
             name: form.name,
             base_url: form.base_url,
             upstream_model: form.upstream_model,
+            dataset_logging: form.dataset_logging,
             ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
           }
         : form;
@@ -525,6 +528,14 @@ export function Providers() {
                 <label>
                   Base URL
                   <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(form.dataset_logging)}
+                    onChange={(event) => setForm({ ...form, dataset_logging: event.target.checked })}
+                  />
+                  Log requests/responses for this provider (dataset logging)
                 </label>
                 <label>
                   API key

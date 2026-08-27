@@ -63,6 +63,7 @@ fn mask(p: &Provider, credential_configured: bool) -> Value {
         "api_key": masked,
         "upstream_model": &p.upstream_model,
         "credential_configured": credential_configured,
+        "dataset_logging": p.dataset_logging,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     })
@@ -112,6 +113,8 @@ struct CreateBody {
     base_url: Option<String>,
     api_key: Option<String>,
     upstream_model: String,
+    #[serde(default)]
+    dataset_logging: bool,
 }
 
 fn default_kind() -> ProviderKind {
@@ -132,7 +135,7 @@ async fn create(
         base_url: b.base_url,
         api_key: b.api_key,
         upstream_model: b.upstream_model,
-        dataset_logging: false,
+        dataset_logging: b.dataset_logging,
         created_at: now,
         updated_at: now,
     };

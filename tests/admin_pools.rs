@@ -154,6 +154,107 @@ async fn create_pool_add_member() {
 }
 
 #[tokio::test]
+async fn put_member_accepts_and_returns_dataset_logging_override() {
+    let state = test_state().await;
+    create_provider(&state.db, "p1", WireFormat::OpenAi).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+
+    let m = router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+            json!({ "provider_id": "p1", "priority": 1, "dataset_logging_override": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(m.status(), StatusCode::OK);
+    let bytes = to_bytes(m.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["dataset_logging_override"], true);
+
+    let list = router
+        .oneshot(empty_request(
+            Method::GET,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+        ))
+        .await
+        .unwrap();
+    let bytes = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(arr[0]["dataset_logging_override"], true);
+}
+
+#[tokio::test]
+async fn put_member_upsert_updates_dataset_logging_override_in_place() {
+    let state = test_state().await;
+    create_provider(&state.db, "p1", WireFormat::OpenAi).await;
+    let router = build_router(state.clone());
+    let secret = state.shared_secret.load();
+
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/admin/pools",
+            secret.as_str(),
+            json!({ "id": "gpt-4o", "wire_format": "openai" }),
+        ))
+        .await
+        .unwrap();
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+            json!({ "provider_id": "p1", "priority": 1, "dataset_logging_override": true }),
+        ))
+        .await
+        .unwrap();
+
+    // Same identity (provider p1, no model_override) - upserting again with
+    // a different override updates in place, doesn't insert a second member.
+    router
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+            json!({ "provider_id": "p1", "priority": 1, "dataset_logging_override": false }),
+        ))
+        .await
+        .unwrap();
+
+    let list = router
+        .oneshot(empty_request(
+            Method::GET,
+            "/admin/pools/gpt-4o/members",
+            secret.as_str(),
+        ))
+        .await
+        .unwrap();
+    let bytes = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(arr.as_array().unwrap().len(), 1, "must update in place, not insert a second member");
+    assert_eq!(arr[0]["dataset_logging_override"], false);
+}
+
+#[tokio::test]
 async fn passthrough_provider_can_join_a_pool_with_a_different_stored_wire_format() {
     // `PassthroughAdapter` now translates between wire formats (see the
     // universal passthrough translation design doc), so a provider whose

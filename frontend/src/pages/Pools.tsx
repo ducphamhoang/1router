@@ -9,6 +9,7 @@ type PoolMember = {
   provider_name?: string;
   priority: number;
   model_override?: string;
+  dataset_logging_override?: boolean | null;
 };
 
 type Pool = {
@@ -45,7 +46,8 @@ export function recomputeMemberPriorities(members: PoolMember[]) {
   return members.map((member, index) => ({
     provider_id: member.provider_id,
     priority: index + 1,
-    model_override: member.model_override
+    model_override: member.model_override,
+    dataset_logging_override: member.dataset_logging_override
   }));
 }
 
@@ -124,7 +126,9 @@ export function Pools() {
   const [wireFormat, setWireFormat] = useState("openai");
   const [strategy, setStrategy] = useState("priority");
   const [stickyLimit, setStickyLimit] = useState("");
-  const [addMemberDraft, setAddMemberDraft] = useState<Record<string, { providerId: string; modelOverride: string }>>({});
+  const [addMemberDraft, setAddMemberDraft] = useState<
+    Record<string, { providerId: string; modelOverride: string; datasetLoggingOverride: boolean }>
+  >({});
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
   const [error, setError] = useState<string | null>(null);
@@ -255,10 +259,13 @@ export function Pools() {
   }
 
   function draftFor(poolId: string) {
-    return addMemberDraft[poolId] ?? { providerId: "", modelOverride: "" };
+    return addMemberDraft[poolId] ?? { providerId: "", modelOverride: "", datasetLoggingOverride: false };
   }
 
-  function setDraftFor(poolId: string, patch: Partial<{ providerId: string; modelOverride: string }>) {
+  function setDraftFor(
+    poolId: string,
+    patch: Partial<{ providerId: string; modelOverride: string; datasetLoggingOverride: boolean }>
+  ) {
     setAddMemberDraft((current) => ({ ...current, [poolId]: { ...draftFor(poolId), ...patch } }));
     // Any edit to what's being added invalidates a prior "this model is
     // reachable" check, so it can't be mistaken for a check of the new value.
@@ -352,14 +359,20 @@ export function Pools() {
         body: JSON.stringify({
           provider_id: draft.providerId,
           priority,
-          model_override: draft.modelOverride.trim() || undefined
+          model_override: draft.modelOverride.trim() || undefined,
+          // Unchecked -> omitted entirely (inherit the provider's own
+          // setting), same "only sent when opted in" pattern as
+          // model_override above - v1 has no UI for explicitly forcing a
+          // member's logging *off* against a provider default of on, only
+          // "inherit" or "on".
+          ...(draft.datasetLoggingOverride ? { dataset_logging_override: true } : {})
         })
       });
       // Only the model field clears - the provider stays selected, so
       // adding several models from the same provider (the whole point of
       // this pool's model_override support) is pick-provider-once,
       // pick-model-per-add instead of re-selecting the provider every time.
-      setDraftFor(pool.id, { modelOverride: "" });
+      setDraftFor(pool.id, { modelOverride: "", datasetLoggingOverride: false });
       await loadMembers([pool.id]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adding pool member failed.");
@@ -665,6 +678,15 @@ export function Pools() {
                     : `✗ ${validation[pool.id].message}`}
               </span>
             ) : null}
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              aria-label={`Log requests/responses for this membership in ${pool.id}`}
+              checked={draftFor(pool.id).datasetLoggingOverride}
+              onChange={(event) => setDraftFor(pool.id, { datasetLoggingOverride: event.target.checked })}
+            />
+            Log requests/responses for this membership (overrides the provider default)
           </label>
           <button type="submit" disabled={!draftFor(pool.id).providerId}>
             Add to pool

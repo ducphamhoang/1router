@@ -17,6 +17,25 @@ describe("recomputeMemberPriorities", () => {
       { provider_id: "c", priority: 3 }
     ]);
   });
+
+  // Regression test: `recomputeMemberPriorities` used to rebuild each
+  // member from a field whitelist that dropped `dataset_logging_override`
+  // entirely - since `persistMembers` PUTs this rebuilt object for every
+  // member on every reorder, the very next drag after that feature shipped
+  // would have silently reset every member's override back to "inherit".
+  it("priority_recompute_preserves_dataset_logging_override", () => {
+    const result = recomputeMemberPriorities([
+      { provider_id: "b", priority: 20, dataset_logging_override: true },
+      { provider_id: "a", priority: 10, dataset_logging_override: false },
+      { provider_id: "c", priority: 40 }
+    ]);
+
+    expect(result).toEqual([
+      { provider_id: "b", priority: 1, model_override: undefined, dataset_logging_override: true },
+      { provider_id: "a", priority: 2, model_override: undefined, dataset_logging_override: false },
+      { provider_id: "c", priority: 3, model_override: undefined, dataset_logging_override: undefined }
+    ]);
+  });
 });
 
 /** Opens the detail dialog for `poolId` and returns it. */
@@ -290,6 +309,84 @@ describe("Pools", () => {
         expect.objectContaining({
           method: "PUT",
           body: JSON.stringify({ provider_id: "a", priority: 3, model_override: "gpt-5.6-terra" })
+        })
+      );
+    });
+  });
+
+  it("adds_a_provider_with_dataset_logging_enabled_when_the_checkbox_is_checked", async () => {
+    render(<Pools />);
+
+    const dialog = await openPool("openai");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "a");
+    await userEvent.click(
+      within(dialog).getByLabelText("Log requests/responses for this membership in openai")
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add to pool" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ provider_id: "a", priority: 3, dataset_logging_override: true })
+        })
+      );
+    });
+  });
+
+  // Full-component regression test for the reorder-wipe bug: member "b"
+  // starts with dataset_logging_override: true; reordering must PUT that
+  // value back unchanged, not silently drop it.
+  it("reordering_a_pool_preserves_each_members_dataset_logging_override", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/pools" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([{ id: "openai", wire_format: "openai" }]), { status: 200 });
+        }
+        if (url === "/admin/pools/openai/members" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([
+              { pool_id: "openai", provider_id: "a", provider_name: "alpha", priority: 1 },
+              {
+                pool_id: "openai",
+                provider_id: "b",
+                provider_name: "beta",
+                priority: 2,
+                dataset_logging_override: true
+              }
+            ]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(
+            JSON.stringify([
+              { id: "a", name: "alpha", wire_format: "openai", upstream_model: "gpt-4o" },
+              { id: "b", name: "beta", wire_format: "openai", upstream_model: "gpt-5-codex" }
+            ]),
+            { status: 200 }
+          );
+        }
+        if (url === "/admin/pools/openai/members" && init?.method === "PUT") {
+          return new Response("{}", { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Pools />);
+    const dialog = await openPool("openai");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move beta up" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ provider_id: "b", priority: 1, dataset_logging_override: true })
         })
       );
     });

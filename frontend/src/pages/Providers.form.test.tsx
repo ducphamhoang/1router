@@ -340,6 +340,38 @@ describe("Providers", () => {
     expect(await screen.findByText("✗ model not found")).toBeInTheDocument();
   });
 
+  it("ticking_the_dataset_logging_checkbox_sends_it_on_create_and_edit", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
+    await userEvent.type(screen.getByLabelText("Name"), "anthropic");
+    await userEvent.selectOptions(screen.getByLabelText("API format"), "anthropic");
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com");
+    await userEvent.type(screen.getByLabelText("API key"), "secret");
+    await userEvent.type(screen.getByLabelText("Upstream model"), "claude-sonnet-4");
+    await userEvent.click(screen.getByLabelText(/Log requests\/responses for this provider/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining("\"dataset_logging\":true") })
+      )
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+    expect(screen.getByLabelText(/Log requests\/responses for this provider/)).not.toBeChecked();
+    await userEvent.click(screen.getByLabelText(/Log requests\/responses for this provider/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers/prov_1",
+        expect.objectContaining({ method: "PATCH", body: expect.stringContaining("\"dataset_logging\":true") })
+      )
+    );
+  });
+
   it("does_not_offer_validate_for_a_brand_new_unsaved_provider", async () => {
     render(<Providers />);
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));

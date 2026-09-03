@@ -20,9 +20,13 @@ fn set_commandcode_env(upstream: &MockServer) {
 }
 
 async fn create_cc(app: &TestApp, pool_id: &str, wire: &str) {
+    create_cc_with_model(app, pool_id, wire, "cc-model").await;
+}
+
+async fn create_cc_with_model(app: &TestApp, pool_id: &str, wire: &str, upstream_model: &str) {
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
-    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":wire,"kind":"oauth_command_code","upstream_model":"cc-model"})).send().await.unwrap();
+    client.post(format!("{}/admin/providers", app.base_url)).header(&k, &v).json(&json!({"id":"cc","name":"cc","wire_format":wire,"kind":"oauth_command_code","upstream_model":upstream_model})).send().await.unwrap();
     client
         .post(format!(
             "{}/admin/providers/cc/commandcode/key",
@@ -259,4 +263,56 @@ async fn a_401_marks_the_provider_misconfigured_rather_than_attempting_a_refresh
         .await
         .unwrap();
     assert_eq!(state["status"], "misconfigured");
+}
+
+/// Regression: Command Code's Provider API splits by model family - Claude
+/// models 400 on `/provider/v1/chat/completions` and must go to
+/// `/provider/v1/messages` instead. Assert the real proxy path for a
+/// Claude-family model never even touches `/provider/v1/chat/completions`,
+/// so a future change accidentally routing it there is caught immediately
+/// instead of surfacing as a live 400.
+#[tokio::test]
+async fn claude_family_model_routes_to_the_messages_endpoint_not_chat_completions() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let upstream = MockServer::start().await;
+    set_commandcode_env(&upstream);
+    Mock::given(method("GET"))
+        .and(path("/provider/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"claude-sonnet-5"}]})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/provider/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error":{"message":"Model \"claude-sonnet-5\" must be called via /provider/v1/messages (Anthropic Messages shape).","code":"unsupported_model"}
+        })))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/provider/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"msg_1","model":"claude-sonnet-5","stop_reason":"end_turn",
+            "content":[{"type":"text","text":"hi"}],
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let app = spawn_app().await;
+    create_cc_with_model(&app, "cc-claude", "openai", "claude-sonnet-5").await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    let response = client
+        .post(format!("{}/v1/chat/completions", app.base_url))
+        .header(k, v)
+        .json(&json!({"model":"cc-claude","messages":[{"role":"user","content":"hi"}],"stream":false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "hi");
 }

@@ -37,6 +37,11 @@ new work should branch directly off `master`. See:
   GHCR checklist: `docs/superpowers/plans/2026-07-26-release-publishing-ghcr-checklist.md`
   (one manual step — confirming the GHCR package is public/linked — is
   unverified from the repo alone; check via browser or a `packages:read`-scoped token)
+- Dataset logging — opt-in capture of raw request/response bytes (JSONL) for
+  successful proxy exchanges, for later fine-tuning/distillation curation —
+  design: `docs/superpowers/specs/2026-08-27-dataset-logging-design.md`,
+  plan (7 tasks, done): `docs/superpowers/plans/2026-08-27-dataset-logging-implementation.md`,
+  feature overview: `docs/ARCHITECTURE.md#dataset-logging`
 - Progress ledger (historical, git-ignored scratch, may not exist in a fresh
   checkout): `.superpowers/sdd/progress.md`
 

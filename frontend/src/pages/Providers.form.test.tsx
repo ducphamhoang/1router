@@ -314,7 +314,13 @@ describe("Providers", () => {
     expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
       name: "openai",
       base_url: "https://api.openai.com/v1",
-      upstream_model: "gpt-4.1-mini"
+      upstream_model: "gpt-4.1-mini",
+      // The shared `providers` fixture at the top of this file doesn't set
+      // dataset_logging - openEdit correctly defaults an unknown value to
+      // false rather than dropping the key (see
+      // editing_a_provider_reflects_its_stored_dataset_logging_value for
+      // the case where the fixture *does* set it).
+      dataset_logging: false
     });
 
     await userEvent.click(screen.getByRole("button", { name: "Delete openai" }));
@@ -338,6 +344,67 @@ describe("Providers", () => {
     await userEvent.click(screen.getByRole("button", { name: "Validate" }));
 
     expect(await screen.findByText("✗ model not found")).toBeInTheDocument();
+  });
+
+  it("ticking_the_dataset_logging_checkbox_on_create_sends_it", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Provider ID"), "prov_2");
+    await userEvent.type(screen.getByLabelText("Name"), "anthropic");
+    await userEvent.selectOptions(screen.getByLabelText("API format"), "anthropic");
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com");
+    await userEvent.type(screen.getByLabelText("API key"), "secret");
+    await userEvent.type(screen.getByLabelText("Upstream model"), "claude-sonnet-4");
+    await userEvent.click(screen.getByLabelText(/Log requests\/responses for this provider/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining("\"dataset_logging\":true") })
+      )
+    );
+  });
+
+  // Regression test: `openEdit` used to rebuild the form from a field
+  // whitelist that dropped `dataset_logging` entirely, so the checkbox
+  // rendered unchecked for every provider on Edit regardless of its real
+  // stored value - this fixture (dataset_logging: true) is what makes that
+  // bug observable; the shared `providers` fixture above doesn't set the
+  // field at all, so a test using it can't tell "correctly false" apart
+  // from "wrongly dropped".
+  it("editing_a_provider_reflects_its_stored_dataset_logging_value", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([{ ...providers[0], dataset_logging: true }]), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/state") {
+          return new Response(JSON.stringify({ provider_id: "prov_1", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1" && init?.method === "PATCH") {
+          const sent = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ ...providers[0], dataset_logging: false, ...sent }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+    expect(screen.getByLabelText(/Log requests\/responses for this provider/)).toBeChecked();
+
+    await userEvent.click(screen.getByLabelText(/Log requests\/responses for this provider/));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers/prov_1",
+        expect.objectContaining({ method: "PATCH", body: expect.stringContaining("\"dataset_logging\":false") })
+      )
+    );
   });
 
   it("does_not_offer_validate_for_a_brand_new_unsaved_provider", async () => {

@@ -26,6 +26,7 @@ async fn state_for(source: &SecretSource) -> AppState {
         idle_timeout: Duration::from_secs(1),
         max_body_bytes: 1024,
         drain_timeout: Duration::from_secs(1),
+        dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
     };
     let mode = config::resolve_auth_mode(source, None).unwrap();
     let (require, origin) = match mode {
@@ -34,6 +35,7 @@ async fn state_for(source: &SecretSource) -> AppState {
         config::AuthModeSource::Default(value) => (value, AuthModeOrigin::Default),
     };
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
+    let (dataset_log_tx, _dataset_log_rx) = tokio::sync::mpsc::channel(8);
     AppState {
         db,
         http: build_client(&cfg),
@@ -48,6 +50,7 @@ async fn state_for(source: &SecretSource) -> AppState {
         })),
         runtime: Arc::new(dashmap::DashMap::new()),
         log_tx,
+        dataset_log_tx,
         refresh_locks: Arc::new(dashmap::DashMap::new()),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),

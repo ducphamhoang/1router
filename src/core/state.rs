@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 
 use crate::core::config::Config;
 use crate::core::error::AppError;
-use crate::core::model::{LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
+use crate::core::model::{DatasetLogEntry, LogEntry, Pool, PoolMember, PoolWithMembers, Provider};
 use crate::core::runtime::RuntimeStateMap;
 
 #[derive(Clone, Debug)]
@@ -19,6 +19,7 @@ pub struct ConfigSnapshot {
 }
 
 pub type RequestLogSender = tokio::sync::mpsc::Sender<LogEntry>;
+pub type DatasetLogSender = tokio::sync::mpsc::Sender<DatasetLogEntry>;
 pub type RefreshLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 pub type LoginAttemptMap = Arc<DashMap<IpAddr, AttemptState>>;
 
@@ -89,6 +90,7 @@ pub struct AppState {
     pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     pub runtime: RuntimeStateMap,
     pub log_tx: RequestLogSender,
+    pub dataset_log_tx: DatasetLogSender,
     pub refresh_locks: RefreshLocks,
     pub login_attempts: LoginAttemptMap,
     pub discovered_models: DiscoveredModelsMap,
@@ -108,7 +110,7 @@ pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> 
     let mut with_members = Vec::with_capacity(pools.len());
     for pool in pools {
         let members: Vec<PoolMember> = sqlx::query_as::<_, PoolMember>(
-            "SELECT pool_id, provider_id, priority, model_override FROM pool_members
+            "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override FROM pool_members
              WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
         )
         .bind(&pool.id)

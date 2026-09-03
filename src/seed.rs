@@ -50,6 +50,7 @@ mod tests {
             idle_timeout: Duration::from_secs(1),
             max_body_bytes: 1024,
             drain_timeout: Duration::from_secs(1),
+            dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
         }
     }
 

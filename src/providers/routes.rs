@@ -63,6 +63,7 @@ fn mask(p: &Provider, credential_configured: bool) -> Value {
         "api_key": masked,
         "upstream_model": &p.upstream_model,
         "credential_configured": credential_configured,
+        "dataset_logging": p.dataset_logging,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     })
@@ -112,6 +113,8 @@ struct CreateBody {
     base_url: Option<String>,
     api_key: Option<String>,
     upstream_model: String,
+    #[serde(default)]
+    dataset_logging: bool,
 }
 
 fn default_kind() -> ProviderKind {
@@ -132,6 +135,7 @@ async fn create(
         base_url: b.base_url,
         api_key: b.api_key,
         upstream_model: b.upstream_model,
+        dataset_logging: b.dataset_logging,
         created_at: now,
         updated_at: now,
     };
@@ -236,28 +240,74 @@ async fn validate_model(
     let adapter = adapter_for(&probe, s.http.clone());
     let req = adapter.build_request(&body_bytes, &creds).await?;
 
-    match s.http.execute(req).await {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
-                // A successful probe proves this provider's credentials and
-                // request shape work right now - clear any stale
-                // Misconfigured/Cooling runtime flag so the proxy path stops
-                // skipping it without requiring a restart. A provider can
-                // back several models (each its own runtime_key), so reset
-                // every entry belonging to it.
-                crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
-                Ok(Json(json!({ "ok": true, "status": status.as_u16() })))
-            } else {
-                let text = resp.text().await.unwrap_or_default();
-                let snippet: String = text.chars().take(300).collect();
-                Ok(Json(
-                    json!({ "ok": false, "status": status.as_u16(), "message": snippet }),
-                ))
-            }
+    match probe_response(&s, &probe, &creds, &adapter, &body_bytes, req).await {
+        Ok(status) => {
+            // A successful probe proves this provider's credentials and
+            // request shape work right now - clear any stale
+            // Misconfigured/Cooling runtime flag so the proxy path stops
+            // skipping it without requiring a restart. A provider can
+            // back several models (each its own runtime_key), so reset
+            // every entry belonging to it.
+            crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
+            Ok(Json(json!({ "ok": true, "status": status })))
         }
-        Err(e) => Ok(Json(json!({ "ok": false, "message": e.to_string() }))),
+        Err(outcome) => Ok(Json(outcome)),
     }
+}
+
+/// Runs a validate-model probe request and, for Command Code Go-plan
+/// accounts, retries once through the `generate` transport on a 403
+/// `upgrade_required` - the same fallback `proxy::flow` applies to live
+/// traffic (see `commandcode::is_upgrade_required`). Without this, a
+/// perfectly usable Go-plan key looks "invalid" on the validate button
+/// because the probe only ever tries the `provider` transport, which Go-plan
+/// accounts can never use.
+async fn probe_response(
+    s: &AppState,
+    probe: &Provider,
+    creds: &Credentials,
+    adapter: &Box<dyn crate::providers::adapter::ProviderAdapter>,
+    body_bytes: &Bytes,
+    req: reqwest::Request,
+) -> Result<u16, Value> {
+    let resp = s
+        .http
+        .execute(req)
+        .await
+        .map_err(|e| json!({ "ok": false, "message": e.to_string() }))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(status.as_u16());
+    }
+    let text = resp.text().await.unwrap_or_default();
+
+    if probe.kind == ProviderKind::OauthCommandCode
+        && commandcode::current_transport(&probe.id) == commandcode::Transport::Provider
+        && commandcode::is_upgrade_required(status, &text)
+    {
+        commandcode::remember_transport(&probe.id, commandcode::Transport::Generate);
+        let retry_req = adapter
+            .build_request(body_bytes, creds)
+            .await
+            .map_err(|e| json!({ "ok": false, "message": format!("retry request build failed: {e}") }))?;
+        let retry_resp = s
+            .http
+            .execute(retry_req)
+            .await
+            .map_err(|e| json!({ "ok": false, "message": e.to_string() }))?;
+        let retry_status = retry_resp.status();
+        if retry_status.is_success() {
+            return Ok(retry_status.as_u16());
+        }
+        let retry_text = retry_resp.text().await.unwrap_or_default();
+        let snippet: String = retry_text.chars().take(300).collect();
+        return Err(
+            json!({ "ok": false, "status": retry_status.as_u16(), "message": snippet }),
+        );
+    }
+
+    let snippet: String = text.chars().take(300).collect();
+    Err(json!({ "ok": false, "status": status.as_u16(), "message": snippet }))
 }
 
 #[derive(Deserialize)]
@@ -286,6 +336,7 @@ async fn validate_model_preview(
         base_url: Some(body.base_url),
         api_key: body.api_key,
         upstream_model: body.model,
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };
@@ -513,6 +564,7 @@ async fn list_models_preview(
         base_url: Some(body.base_url),
         api_key: body.api_key,
         upstream_model: String::new(),
+        dataset_logging: false,
         created_at: now,
         updated_at: now,
     };

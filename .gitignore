@@ -10,3 +10,4 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 *.log
 .commandcode/
+dataset-logs/

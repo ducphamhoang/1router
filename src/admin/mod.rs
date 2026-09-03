@@ -72,12 +72,13 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
 
     for p in &dump.providers {
         sqlx::query(
-            "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,created_at,updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?)
+            "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, wire_format=excluded.wire_format, kind=excluded.kind,
                base_url=excluded.base_url, api_key=excluded.api_key,
-               upstream_model=excluded.upstream_model, updated_at=excluded.updated_at",
+               upstream_model=excluded.upstream_model, dataset_logging=excluded.dataset_logging,
+               updated_at=excluded.updated_at",
         )
         .bind(&p.id)
         .bind(&p.name)
@@ -86,6 +87,7 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .bind(&p.base_url)
         .bind(&p.api_key)
         .bind(&p.upstream_model)
+        .bind(p.dataset_logging)
         .bind(p.created_at)
         .bind(p.updated_at)
         .execute(&mut *tx)
@@ -110,13 +112,15 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         // unique index.
         let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
         sqlx::query(
-            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?,?,?,?)
-             ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET priority=excluded.priority",
+            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override) VALUES (?,?,?,?,?)
+             ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET
+               priority=excluded.priority, dataset_logging_override=excluded.dataset_logging_override",
         )
         .bind(&m.pool_id)
         .bind(&m.provider_id)
         .bind(m.priority)
         .bind(model_override)
+        .bind(m.dataset_logging_override)
         .execute(&mut *tx)
         .await?;
     }
@@ -141,6 +145,7 @@ mod tests {
             base_url: Some("https://x".into()),
             api_key: Some("k".into()),
             upstream_model: "m".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -170,6 +175,7 @@ mod tests {
                 provider_id: "does-not-exist".into(),
                 priority: 1,
                 model_override: None,
+                dataset_logging_override: None,
             }],
         };
 

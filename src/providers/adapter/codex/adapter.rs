@@ -191,6 +191,7 @@ mod tests {
             base_url: None,
             api_key: None,
             upstream_model: "gpt-5-codex".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

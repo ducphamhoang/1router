@@ -78,7 +78,7 @@ pub async fn delete_pool(db: &SqlitePool, id: &str) -> Result<(), AppError> {
 
 pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMember>, AppError> {
     Ok(sqlx::query_as::<_, PoolMember>(
-        "SELECT pool_id, provider_id, priority, model_override FROM pool_members
+        "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override FROM pool_members
          WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
     )
     .bind(pool_id)
@@ -98,13 +98,15 @@ pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMemb
 pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppError> {
     let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
     let res = sqlx::query(
-        "INSERT INTO pool_members (pool_id, provider_id, priority, model_override) VALUES (?, ?, ?, ?)
-         ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET priority = excluded.priority",
+        "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET
+           priority = excluded.priority, dataset_logging_override = excluded.dataset_logging_override",
     )
     .bind(&m.pool_id)
     .bind(&m.provider_id)
     .bind(m.priority)
     .bind(model_override)
+    .bind(m.dataset_logging_override)
     .execute(db)
     .await;
 
@@ -187,6 +189,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_member_persists_and_updates_dataset_logging_override_in_place() {
+        let db = init_pool(":memory:").await.unwrap();
+        seed_provider(&db, "p1").await;
+        insert_pool(
+            &db,
+            &Pool {
+                id: "gpt-4o".into(),
+                wire_format: WireFormat::OpenAi,
+                created_at: Utc::now(),
+                strategy: Default::default(),
+                sticky_limit: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 1,
+                model_override: None,
+                dataset_logging_override: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        let members = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].dataset_logging_override, Some(true));
+
+        // Same identity (provider p1, no model_override) - upserting again
+        // with a different dataset_logging_override updates in place.
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 1,
+                model_override: None,
+                dataset_logging_override: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let updated = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(updated.len(), 1, "same identity upsert must update in place, not insert");
+        assert_eq!(updated[0].dataset_logging_override, Some(false));
+    }
+
+    #[tokio::test]
     async fn pool_and_member_crud() {
         let db = init_pool(":memory:").await.unwrap();
         seed_provider(&db, "p1").await;
@@ -212,6 +266,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 5,
                 model_override: None,
+                dataset_logging_override: None,
             },
         )
         .await
@@ -230,6 +285,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 9,
                 model_override: None,
+                dataset_logging_override: None,
             },
         )
         .await
@@ -248,6 +304,7 @@ mod tests {
                 provider_id: "p1".into(),
                 priority: 1,
                 model_override: Some("gpt-5.6-sol".into()),
+                dataset_logging_override: None,
             },
         )
         .await

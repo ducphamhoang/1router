@@ -117,6 +117,8 @@ struct PutMember {
     priority: i64,
     #[serde(default)]
     model_override: Option<String>,
+    #[serde(default)]
+    dataset_logging_override: Option<bool>,
 }
 
 async fn put_member(
@@ -137,6 +139,7 @@ async fn put_member(
             provider_id: b.provider_id.clone(),
             priority: b.priority,
             model_override: model_override.clone(),
+            dataset_logging_override: b.dataset_logging_override,
         },
     )
     .await?;
@@ -146,6 +149,7 @@ async fn put_member(
         "provider_id": b.provider_id,
         "priority": b.priority,
         "model_override": model_override,
+        "dataset_logging_override": b.dataset_logging_override,
     })))
 }
 

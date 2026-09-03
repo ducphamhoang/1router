@@ -5,10 +5,10 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
-use crate::core::model::{LogEntry, Provider, ProviderKind, WireFormat};
+use crate::core::model::{DatasetLogEntry, LatencyMs, LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::runtime::runtime_key;
 use crate::core::state::AppState;
-use crate::pools::select::select;
+use crate::pools::select::{dataset_logging_enabled, select};
 use crate::providers::adapter::commandcode::{
     current_transport, is_upgrade_required, remember_transport, Transport,
 };
@@ -16,6 +16,7 @@ use crate::providers::adapter::{adapter_for_wire, Credentials};
 use crate::providers::queries::get_oauth_state;
 use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
 use crate::proxy::backoff;
+use crate::proxy::dataset_tee;
 use crate::proxy::error_response::wire_error;
 
 pub(crate) async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
@@ -43,6 +44,61 @@ fn log(
     });
 }
 
+/// The dataset-logging tap. When `enabled` is `false` (the common case),
+/// this is a no-op: `resp` is returned untouched, no accumulator is
+/// allocated, no body clone happens. When `enabled`, wraps `resp`'s body
+/// with `dataset_tee::tee` so the client still sees every byte unchanged
+/// while a full copy is accumulated and, once the response ends (cleanly,
+/// on an upstream error mid-stream, or on a client disconnect - see
+/// `dataset_tee`'s `FireOnDrop` guard), written via
+/// `state.dataset_log_tx.try_send` - never blocking, dropped on a full
+/// channel, exactly like `log()` above.
+#[allow(clippy::too_many_arguments)]
+fn maybe_log_dataset(
+    state: &AppState,
+    enabled: bool,
+    resp: Response,
+    pool_id: Option<String>,
+    provider_id: String,
+    model: String,
+    wire: WireFormat,
+    stream: bool,
+    body: &Bytes,
+    total_start: Instant,
+    ttfb_ms: Option<i64>,
+) -> Response {
+    if !enabled {
+        return resp;
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = chrono::Utc::now();
+    let input_body = String::from_utf8_lossy(body).into_owned();
+    let dataset_log_tx = state.dataset_log_tx.clone();
+
+    let (parts, resp_body) = resp.into_parts();
+    let wrapped = dataset_tee::tee(resp_body, move |output_bytes, complete| {
+        let entry = DatasetLogEntry {
+            request_id,
+            timestamp,
+            pool_id,
+            provider_id,
+            model,
+            user_id: None,
+            wire_format: wire,
+            stream,
+            input_body,
+            output_body: String::from_utf8_lossy(&output_bytes).into_owned(),
+            complete,
+            latency_ms: LatencyMs {
+                ttfb_ms,
+                total_ms: total_start.elapsed().as_millis() as i64,
+            },
+        };
+        let _ = dataset_log_tx.try_send(entry);
+    });
+    Response::from_parts(parts, wrapped)
+}
+
 pub async fn handle_proxy(
     state: AppState,
     wire: WireFormat,
@@ -67,11 +123,16 @@ pub async fn handle_proxy(
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
+    // For dataset logging's `latency_ms.total_ms` (see `maybe_log_dataset`)
+    // - captured once, unconditionally, before the failover loop, since it
+    // needs to cover every attempt's time, not just the winning one's.
+    let total_start = Instant::now();
+
     let mut tried: Vec<String> = Vec::new();
     let mut last_error_body = String::from("no provider produced a response");
     let mut last_provider = String::new();
 
-    for (provider, effective_model) in &selection.providers {
+    for (provider, effective_model, member_override) in &selection.providers {
         let now = Instant::now();
         {
             let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
@@ -143,7 +204,20 @@ pub async fn handle_proxy(
                             latency_ms,
                             true,
                         );
-                        return resp;
+                        let dataset_enabled = dataset_logging_enabled(provider, *member_override);
+                        return maybe_log_dataset(
+                            &state,
+                            dataset_enabled,
+                            resp,
+                            selection.pool.map(|p| p.id.clone()),
+                            provider.id.clone(),
+                            effective_model.clone(),
+                            wire,
+                            client_wanted_stream,
+                            &body,
+                            total_start,
+                            Some(latency_ms),
+                        );
                     }
                     Err(e) => {
                         // The upstream HTTP status was a success, but the
@@ -273,7 +347,21 @@ pub async fn handle_proxy(
                                             lat2,
                                             true,
                                         );
-                                        return response;
+                                        let dataset_enabled =
+                                            dataset_logging_enabled(provider, *member_override);
+                                        return maybe_log_dataset(
+                                            &state,
+                                            dataset_enabled,
+                                            response,
+                                            selection.pool.map(|p| p.id.clone()),
+                                            provider.id.clone(),
+                                            effective_model.clone(),
+                                            wire,
+                                            client_wanted_stream,
+                                            &body,
+                                            total_start,
+                                            Some(lat2),
+                                        );
                                     }
                                     Err(e) => {
                                         log(
@@ -451,7 +539,21 @@ pub async fn handle_proxy(
                                         lat2,
                                         true,
                                     );
-                                    return response;
+                                    let dataset_enabled =
+                                        dataset_logging_enabled(provider, *member_override);
+                                    return maybe_log_dataset(
+                                        &state,
+                                        dataset_enabled,
+                                        response,
+                                        selection.pool.map(|p| p.id.clone()),
+                                        provider.id.clone(),
+                                        effective_model.clone(),
+                                        wire,
+                                        client_wanted_stream,
+                                        &body,
+                                        total_start,
+                                        Some(lat2),
+                                    );
                                 }
                                 Err(e) => {
                                     log(

@@ -172,6 +172,7 @@ mod tests {
         let db = init_pool(path.to_str().unwrap()).await.unwrap();
         std::mem::forget(dir);
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(16);
+        let (dataset_log_tx, _dataset_log_rx) = tokio::sync::mpsc::channel(16);
 
         AppState {
             db,
@@ -186,6 +187,7 @@ mod tests {
                 idle_timeout: Duration::from_secs(30),
                 max_body_bytes: 1024 * 1024,
                 drain_timeout: Duration::from_secs(30),
+                dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
             }),
             snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
                 providers: Vec::new(),
@@ -193,6 +195,7 @@ mod tests {
             })),
             runtime: Arc::new(DashMap::new()),
             log_tx,
+            dataset_log_tx,
             refresh_locks: Arc::new(DashMap::new()),
             shared_secret: Arc::new(ArcSwap::from_pointee("test-secret".to_string())),
             secret_origin: SecretOrigin::SidecarFile,

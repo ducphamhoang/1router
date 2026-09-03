@@ -15,6 +15,7 @@ pub struct ProviderPatch {
     // it serves (openai <-> anthropic) without redoing the OAuth flow - the
     // credentials in `oauth_state` are keyed by provider id, not wire_format.
     pub wire_format: Option<WireFormat>,
+    pub dataset_logging: Option<bool>,
 }
 
 pub async fn list_providers(db: &SqlitePool) -> Result<Vec<Provider>, AppError> {
@@ -35,8 +36,8 @@ pub async fn get_provider(db: &SqlitePool, id: &str) -> Result<Provider, AppErro
 
 pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppError> {
     let res = sqlx::query(
-        "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&p.id)
     .bind(&p.name)
@@ -45,6 +46,7 @@ pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppErr
     .bind(&p.base_url)
     .bind(&p.api_key)
     .bind(&p.upstream_model)
+    .bind(p.dataset_logging)
     .bind(p.created_at)
     .bind(p.updated_at)
     .execute(db)
@@ -76,6 +78,9 @@ pub async fn update_provider(
     }
     if let Some(m) = &patch.upstream_model {
         p.upstream_model = m.clone();
+    }
+    if let Some(v) = patch.dataset_logging {
+        p.dataset_logging = v;
     }
     if let Some(w) = patch.wire_format {
         if w != p.wire_format
@@ -114,13 +119,14 @@ pub async fn update_provider(
     p.updated_at = Utc::now();
 
     let res = sqlx::query(
-        "UPDATE providers SET name=?, base_url=?, api_key=?, upstream_model=?, wire_format=?, updated_at=? WHERE id=?",
+        "UPDATE providers SET name=?, base_url=?, api_key=?, upstream_model=?, wire_format=?, dataset_logging=?, updated_at=? WHERE id=?",
     )
     .bind(&p.name)
     .bind(&p.base_url)
     .bind(&p.api_key)
     .bind(&p.upstream_model)
     .bind(p.wire_format)
+    .bind(p.dataset_logging)
     .bind(p.updated_at)
     .bind(id)
     .execute(db)
@@ -270,6 +276,7 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             api_key: Some("sk-abc".into()),
             upstream_model: "gpt-4o".into(),
+            dataset_logging: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -289,6 +296,7 @@ mod tests {
             api_key: Some(Some("sk-new".into())),
             upstream_model: Some("gpt-4o-mini".into()),
             wire_format: None,
+            dataset_logging: None,
         };
         let up = update_provider(&db, "p1", &patch).await.unwrap();
         assert_eq!(up.name, "P1b");
@@ -300,6 +308,45 @@ mod tests {
             get_provider(&db, "p1").await,
             Err(crate::core::error::AppError::NotFound)
         ));
+    }
+
+    #[test]
+    fn provider_patch_deserializes_from_an_empty_or_partial_json_object() {
+        // The admin PATCH endpoint passes the request body straight through
+        // to `serde_json` as a `ProviderPatch` - every field must tolerate
+        // being entirely absent from the JSON (a partial patch is the
+        // normal case, e.g. `{"name": "x"}` alone), not just `null`.
+        let empty: ProviderPatch = serde_json::from_str("{}").unwrap();
+        assert!(empty.name.is_none());
+        assert!(empty.dataset_logging.is_none());
+
+        let partial: ProviderPatch = serde_json::from_str(r#"{"dataset_logging": true}"#).unwrap();
+        assert_eq!(partial.dataset_logging, Some(true));
+        assert!(partial.name.is_none());
+    }
+
+    #[tokio::test]
+    async fn insert_and_update_provider_round_trip_dataset_logging() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample();
+        p.dataset_logging = true;
+        insert_provider(&db, &p).await.unwrap();
+        assert!(get_provider(&db, "p1").await.unwrap().dataset_logging);
+
+        let patch = ProviderPatch {
+            dataset_logging: Some(false),
+            ..Default::default()
+        };
+        let up = update_provider(&db, "p1", &patch).await.unwrap();
+        assert!(!up.dataset_logging);
+
+        // A patch that doesn't mention dataset_logging leaves it unchanged.
+        let patch2 = ProviderPatch {
+            name: Some("P1c".into()),
+            ..Default::default()
+        };
+        let up2 = update_provider(&db, "p1", &patch2).await.unwrap();
+        assert!(!up2.dataset_logging);
     }
 
     #[tokio::test]

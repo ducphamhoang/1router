@@ -5,7 +5,7 @@ use futures::Stream;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-const DEFAULT_MAX_TOKENS: i64 = 64_000;
+pub const DEFAULT_MAX_TOKENS: i64 = 64_000;
 const DEFAULT_TEMPERATURE: f64 = 0.3;
 
 fn environment_info() -> String {
@@ -538,6 +538,72 @@ pub fn embedded_error_status(message: &str) -> Option<StatusCode> {
         return None;
     }
     StatusCode::from_u16(digits.parse().ok()?).ok()
+}
+
+/// Command Code's Provider API is itself split by model family: most models
+/// take an OpenAI chat-completions-shaped body at
+/// `/provider/v1/chat/completions`, but Claude-family models 400 there and
+/// must go to the Anthropic-Messages-shaped `/provider/v1/messages` instead
+/// (discovered empirically: "Model \"claude-sonnet-5\" must be called via
+/// /provider/v1/messages (Anthropic Messages shape)."). This is independent
+/// of the account's plan tier (Go/GOAT/Provider) and independent of what
+/// wire format the 1router *client* is using - it's purely about which real
+/// backend model Command Code is routing to.
+pub fn wants_messages_shape(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("claude")
+}
+
+/// Merge consecutive `{"role":"user","content":[{"type":"tool_result",...}]}`
+/// messages produced by `claude_bridge::openai_to_claude_request` (one per
+/// OpenAI `tool` message) into a single user message per Anthropic's
+/// requirement that all `tool_result` blocks for one turn live in one
+/// message and roles strictly alternate. Without this, parallel tool calls
+/// (the most common agentic shape) produce back-to-back `user` messages that
+/// Command Code's Anthropic-Messages endpoint rejects.
+fn merge_consecutive_tool_result_messages(messages: Vec<Value>) -> Vec<Value> {
+    fn is_tool_result_only(message: &Value) -> bool {
+        message["role"] == "user"
+            && message["content"]
+                .as_array()
+                .is_some_and(|blocks| !blocks.is_empty() && blocks.iter().all(|b| b["type"] == "tool_result"))
+    }
+
+    let mut out: Vec<Value> = Vec::new();
+    for message in messages {
+        if is_tool_result_only(&message) {
+            if let Some(last) = out.last_mut() {
+                if is_tool_result_only(last) {
+                    let mut merged = last["content"].as_array().cloned().unwrap_or_default();
+                    merged.extend(message["content"].as_array().cloned().unwrap_or_default());
+                    last["content"] = json!(merged);
+                    continue;
+                }
+            }
+        }
+        out.push(message);
+    }
+    out
+}
+
+/// Build an Anthropic-Messages-shaped body for Command Code's
+/// `/provider/v1/messages` endpoint from an OpenAI-shaped client request.
+/// Reuses `claude_bridge::openai_to_claude_request` (the same translator
+/// `HttpAdapter` uses for ordinary Anthropic-wire passthrough providers) and
+/// then applies two Command-Code-specific corrections on top, so the shared
+/// translator itself stays untouched:
+/// - merges consecutive tool-result-only user messages (see above)
+/// - uses this provider's own `DEFAULT_MAX_TOKENS` when the client didn't
+///   send one, instead of `claude_bridge`'s generic 4096 default, so
+///   behavior is consistent with the `/alpha/generate` transport's default
+pub fn openai_to_commandcode_messages(client_json: &Value) -> Value {
+    let mut out = crate::providers::adapter::codex::claude_bridge::openai_to_claude_request(client_json);
+    if let Some(messages) = out.get("messages").and_then(Value::as_array).cloned() {
+        out["messages"] = json!(merge_consecutive_tool_result_messages(messages));
+    }
+    if client_json.get("max_tokens").is_none() {
+        out["max_tokens"] = json!(DEFAULT_MAX_TOKENS);
+    }
+    out
 }
 
 pub fn project_slug_from_path(path: &str) -> String {

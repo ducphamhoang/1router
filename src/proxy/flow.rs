@@ -113,6 +113,30 @@ pub async fn handle_proxy(
     caller: Caller,
     body: Bytes,
 ) -> Response {
+    let is_admin = caller.is_admin();
+    let mut resp = handle_proxy_inner(state, wire, pool_id, caller, body).await;
+    if !is_admin {
+        strip_debug_headers(resp.headers_mut());
+    }
+    resp
+}
+
+/// `x-1router-tried` / `-provider` / `-error` expose provider ids and
+/// internal error text - routing topology is the admin's business, not every
+/// caller's (SEC-11). Only the shared-secret admin gets them.
+fn strip_debug_headers(headers: &mut HeaderMap) {
+    for name in ["x-1router-tried", "x-1router-provider", "x-1router-error"] {
+        headers.remove(name);
+    }
+}
+
+async fn handle_proxy_inner(
+    state: AppState,
+    wire: WireFormat,
+    pool_id: String,
+    caller: Caller,
+    body: Bytes,
+) -> Response {
     let snapshot = state.snapshot.load();
     let selection = match select(&snapshot, &pool_id, wire, &state.pool_rotation) {
         Some(s) => s,
@@ -209,7 +233,8 @@ pub async fn handle_proxy(
                     st.record_retryable(cooldown, Instant::now());
                 }
                 log(&state, &caller, &pool_id, &provider.id, None, latency_ms, false);
-                last_error_body = format!("upstream request error: {e}");
+                tracing::warn!(provider = %provider.id, error = %e, "upstream request error");
+                last_error_body = format!("upstream request error: {}", e.without_url());
                 continue;
             }
         };
@@ -283,7 +308,7 @@ pub async fn handle_proxy(
             ErrorClass::NonRetryable => {
                 // Client-caused rejection: no runtime-state change (SEC-01).
                 let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
-                let text = upstream.text().await.unwrap_or_default();
+                let text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
                 log(
                     &state,
                     &caller,
@@ -305,7 +330,7 @@ pub async fn handle_proxy(
                         st.mark_misconfigured(Instant::now());
                     }
                     let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
-                    let text = upstream.text().await.unwrap_or_default();
+                    let text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
                     log(
                         &state,
                         &caller,
@@ -351,7 +376,8 @@ pub async fn handle_proxy(
                                     st.record_retryable(cooldown, Instant::now());
                                 }
                                 log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
-                                last_error_body = format!("retry upstream request error: {e}");
+                                tracing::warn!(provider = %provider.id, error = %e, "retry upstream request error");
+                last_error_body = format!("retry upstream request error: {}", e.without_url());
                                 continue;
                             }
                         };
@@ -427,7 +453,7 @@ pub async fn handle_proxy(
                             }
                             ErrorClass::NonRetryable => {
                                 // Client-caused rejection: no runtime-state change (SEC-01).
-                                let text = resp2.text().await.unwrap_or_default();
+                                let text = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -445,7 +471,7 @@ pub async fn handle_proxy(
                                         state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.mark_misconfigured(Instant::now());
                                 }
-                                let text = resp2.text().await.unwrap_or_default();
+                                let text = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -475,7 +501,7 @@ pub async fn handle_proxy(
                                         state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.record_retryable(cooldown, Instant::now());
                                 }
-                                last_error_body = resp2.text().await.unwrap_or_default();
+                                last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -513,7 +539,7 @@ pub async fn handle_proxy(
                 }
             }
             ErrorClass::Retryable { retry_after } => {
-                let error_text = upstream.text().await.unwrap_or_default();
+                let error_text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
 
                 // Command Code transport fallback: a 403 with
                 // `upgrade_required` from the provider transport means this
@@ -546,7 +572,8 @@ pub async fn handle_proxy(
                                 st.record_retryable(cooldown, Instant::now());
                             }
                             log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
-                            last_error_body = format!("retry upstream request error: {e}");
+                            tracing::warn!(provider = %provider.id, error = %e, "retry upstream request error");
+                last_error_body = format!("retry upstream request error: {}", e.without_url());
                             continue;
                         }
                     };
@@ -620,7 +647,7 @@ pub async fn handle_proxy(
                         }
                         ErrorClass::NonRetryable => {
                             // Client-caused rejection: no runtime-state change (SEC-01).
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,
@@ -637,7 +664,7 @@ pub async fn handle_proxy(
                                     state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.mark_misconfigured(Instant::now());
                             }
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,
@@ -659,7 +686,7 @@ pub async fn handle_proxy(
                                     state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.record_retryable(cooldown, Instant::now());
                             }
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,

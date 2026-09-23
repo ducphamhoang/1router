@@ -83,7 +83,7 @@ pub async fn exchange_code(
         .map_err(|e| RefreshError::Transient(format!("token request failed: {e}")))?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
         if body.contains("invalid_grant") {
             return Err(RefreshError::InvalidGrant);
         }

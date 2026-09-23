@@ -1075,7 +1075,7 @@ pub fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
             println!(
                 "Admin secret: no secret file yet - using the default '{secret}' \
                  (documented in README.md) so you can get straight to provider setup. \
-                 Written to {path:?} (mode 0600)."
+                 Written to {path:?} (owner-only)."
             );
             println!(
                 "  This is the ADMIN credential (`Authorization: Bearer {secret}` on \

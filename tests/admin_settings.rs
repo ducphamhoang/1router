@@ -129,18 +129,18 @@ async fn shared_secret_patch_persists_and_rotates_live_bearer_secret() {
             Method::PATCH,
             "/admin/settings/shared-secret",
             "initial",
-            Some(json!({ "shared_secret": "rotated-secret" })),
+            Some(json!({ "shared_secret": "rotated-secret-0123456789abcdef0123" })),
         ))
         .await
         .unwrap();
     assert_eq!(patched.status(), StatusCode::OK);
     let body = json_body(patched).await;
-    assert_eq!(body["shared_secret"], "***cret");
+    assert_eq!(body["shared_secret"], "***0123");
     assert_eq!(body["masked"], true);
     assert_eq!(body["origin"], "sidecar_file");
     assert_eq!(
         std::fs::read_to_string(secret_path).unwrap(),
-        "rotated-secret"
+        "rotated-secret-0123456789abcdef0123"
     );
 
     let old_secret = router
@@ -159,14 +159,14 @@ async fn shared_secret_patch_persists_and_rotates_live_bearer_secret() {
         .oneshot(request(
             Method::GET,
             "/admin/settings/shared-secret?reveal=true",
-            "rotated-secret",
+            "rotated-secret-0123456789abcdef0123",
             None,
         ))
         .await
         .unwrap();
     assert_eq!(new_secret.status(), StatusCode::OK);
     let body = json_body(new_secret).await;
-    assert_eq!(body["shared_secret"], "rotated-secret");
+    assert_eq!(body["shared_secret"], "rotated-secret-0123456789abcdef0123");
 }
 
 #[tokio::test]
@@ -204,7 +204,7 @@ async fn security_status_flags_the_default_secret_and_clears_once_rotated() {
             Method::PATCH,
             "/admin/settings/shared-secret",
             router::core::config::DEFAULT_SHARED_SECRET,
-            Some(json!({ "shared_secret": "a-real-rotated-secret" })),
+            Some(json!({ "shared_secret": "a-real-rotated-secret-0123456789abcdef" })),
         ))
         .await
         .unwrap();
@@ -214,7 +214,7 @@ async fn security_status_flags_the_default_secret_and_clears_once_rotated() {
         .oneshot(request(
             Method::GET,
             "/admin/settings/security-status",
-            "a-real-rotated-secret",
+            "a-real-rotated-secret-0123456789abcdef",
             None,
         ))
         .await
@@ -235,7 +235,7 @@ async fn shared_secret_patch_conflicts_when_secret_origin_is_env() {
             Method::PATCH,
             "/admin/settings/shared-secret",
             "initial",
-            Some(json!({ "shared_secret": "rotated-secret" })),
+            Some(json!({ "shared_secret": "rotated-secret-0123456789abcdef0123" })),
         ))
         .await
         .unwrap();
@@ -263,7 +263,7 @@ async fn shared_secret_patch_conflicts_when_secret_origin_is_env() {
         .oneshot(request(
             Method::GET,
             "/admin/settings/shared-secret?reveal=true",
-            "rotated-secret",
+            "rotated-secret-0123456789abcdef0123",
             None,
         ))
         .await
@@ -368,4 +368,55 @@ async fn security_status_reports_require_shared_secret_and_loopback() {
     let body = json_body(response).await;
     assert_eq!(body["require_shared_secret"], true);
     assert_eq!(body["listen_addr_is_loopback"], true);
+}
+
+#[tokio::test]
+async fn shared_secret_patch_rejects_short_secrets() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    let router = build_router(state);
+    let patched = router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/admin/settings/shared-secret",
+            "initial",
+            Some(json!({ "shared_secret": "short-but-not-empty" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(patched).await;
+    assert!(body["error"]["message"].as_str().unwrap().contains("at least 32"));
+}
+
+/// SEC-18: "use the key from this machine" pulls the host OS user's own
+/// Command Code credential, so it is refused unless the admin request comes
+/// from loopback (no peer address at all counts as not local).
+#[tokio::test]
+async fn commandcode_key_from_disk_is_refused_for_a_non_local_admin() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    let router = build_router(state);
+    let created = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/admin/providers",
+            "initial",
+            Some(json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})),
+        ))
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "{}", created.status());
+    let resp = router
+        .oneshot(request(
+            Method::POST,
+            "/admin/providers/cc/commandcode/key",
+            "initial",
+            Some(json!({ "api_key": "" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().contains("only allowed from the machine itself"));
 }

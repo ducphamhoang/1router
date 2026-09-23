@@ -283,7 +283,7 @@ async fn probe_response(
     if status.is_success() {
         return Ok(status.as_u16());
     }
-    let text = resp.text().await.unwrap_or_default();
+    let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
 
     if probe.kind == ProviderKind::OauthCommandCode
         && commandcode::current_transport(&probe.id) == commandcode::Transport::Provider
@@ -303,7 +303,7 @@ async fn probe_response(
         if retry_status.is_success() {
             return Ok(retry_status.as_u16());
         }
-        let retry_text = retry_resp.text().await.unwrap_or_default();
+        let retry_text = crate::core::http_client::read_text_truncated(retry_resp, crate::core::http_client::MAX_ERROR_BODY).await;
         let snippet: String = retry_text.chars().take(300).collect();
         return Err(
             json!({ "ok": false, "status": retry_status.as_u16(), "message": snippet }),
@@ -366,7 +366,7 @@ async fn validate_model_preview(
             if status.is_success() {
                 Ok(Json(json!({ "ok": true, "status": status.as_u16() })))
             } else {
-                let text = resp.text().await.unwrap_or_default();
+                let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
                 let snippet: String = text.chars().take(300).collect();
                 Ok(Json(
                     json!({ "ok": false, "status": status.as_u16(), "message": snippet }),
@@ -428,7 +428,7 @@ pub(crate) async fn fetch_live_models(
     let resp = builder.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
         let snippet: String = text.chars().take(300).collect();
         return Err(format!("HTTP {}: {snippet}", status.as_u16()));
     }
@@ -466,7 +466,7 @@ pub(crate) async fn fetch_commandcode_models(
     let resp = http.get(url).send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
         let snippet: String = text.chars().take(300).collect();
         return Err(format!("HTTP {}: {snippet}", status.as_u16()));
     }

@@ -1,11 +1,14 @@
-use axum::extract::{Request, State};
+use std::net::SocketAddr;
+use std::time::Instant;
+
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-use crate::admin::auth::session;
+use crate::admin::auth::{rate_limit, session};
 use crate::users::{self, Caller};
 use crate::core::state::AppState;
 
@@ -22,7 +25,9 @@ pub async fn require_bearer(State(state): State<AppState>, mut req: Request, nex
 
     let caller = match users::presented_key(req.headers()) {
         None => None,
-        Some(token) if token == state.shared_secret.load().as_str() => Some(Caller::admin()),
+        Some(token) if secret_matches(token, state.shared_secret.load().as_str()) => {
+            Some(Caller::admin())
+        }
         Some(token) => users::queries::authenticate(&state.db, token)
             .await
             .unwrap_or_else(|e| {
@@ -76,17 +81,35 @@ pub async fn require_admin_session(
         }
     }
 
-    let current_secret = state.shared_secret.load();
-    let bearer_ok = req
+    let bearer = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == current_secret.as_str())
-        .unwrap_or(false);
+        .and_then(|v| v.strip_prefix("Bearer "));
 
-    if bearer_ok {
-        return next.run(req).await;
+    if let Some(token) = bearer {
+        // Failed admin Bearer attempts share the login limiter's per-IP
+        // bucket (SEC-14): guessing the secret here is the same attack as
+        // guessing the password at /admin/auth/login.
+        let ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        if let Some(ip) = ip {
+            if rate_limit::is_locked_out(&state.login_attempts, ip, Instant::now()) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({ "error": { "message": "too many failed attempts" } })),
+                )
+                    .into_response();
+            }
+        }
+        if secret_matches(token, state.shared_secret.load().as_str()) {
+            return next.run(req).await;
+        }
+        if let Some(ip) = ip {
+            rate_limit::record_failure(&state.login_attempts, ip, Instant::now());
+        }
     }
 
     (
@@ -94,6 +117,15 @@ pub async fn require_admin_session(
         Json(json!({ "error": { "message": "unauthorized" } })),
     )
         .into_response()
+}
+
+/// Constant-time secret comparison (SEC-14): compare SHA-256 digests so
+/// neither the content nor the length of the secret leaks through timing.
+pub fn secret_matches(presented: &str, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let a = Sha256::digest(presented.as_bytes());
+    let b = Sha256::digest(expected.as_bytes());
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub async fn require_csrf_header(req: Request, next: Next) -> Response {

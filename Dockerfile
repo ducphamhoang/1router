@@ -33,9 +33,16 @@ RUN set -eux; \
     cp "target/${RUST_TARGET}/release/1router" /app/1router
 
 # ---- runtime stage ----
-FROM gcr.io/distroless/static-debian12
+# nonroot (uid 65532): a gateway holding provider credentials has no need
+# for root (SEC-09). State lives under /data, which must be writable by that
+# uid when bind-mounted (see README).
+FROM gcr.io/distroless/static-debian12:nonroot
 LABEL org.opencontainers.image.source="https://github.com/ducphamhoang/1router"
 COPY --from=builder /app/1router /1router
 ENV ROUTER_LISTEN_ADDR=0.0.0.0:8080
+ENV ROUTER_SQLITE_PATH=/data/1router.db
+WORKDIR /data
+VOLUME ["/data"]
+USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/1router"]

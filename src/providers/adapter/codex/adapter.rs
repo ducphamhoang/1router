@@ -149,10 +149,13 @@ impl ProviderAdapter for CodexAdapter {
             return Ok(response);
         }
         // aggregate: client did not ask to stream, but Codex is forced to stream upstream
-        let text = upstream
-            .text()
-            .await
-            .map_err(|e| AppError::Upstream(format!("codex sse read: {e}")))?;
+        let bytes = crate::core::http_client::read_body_limited(
+            upstream,
+            crate::core::http_client::MAX_BUFFERED_BODY,
+        )
+        .await
+        .map_err(|e| AppError::Upstream(format!("codex sse read: {e}")))?;
+        let text = String::from_utf8_lossy(&bytes);
         if let Some(err_type) = transform::sse_embedded_error(&text) {
             return Err(AppError::Upstream(format!(
                 "codex embedded error: {err_type}"

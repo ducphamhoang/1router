@@ -282,3 +282,8 @@ SEC-02 lets any `/v1` caller exhaust memory with one oversized body.
 **Suggested order:** SEC-01 + BL-01 together, SEC-02, SEC-03, SEC-05,
 SEC-04 (onboarding/README now that per-user keys exist), SEC-07/SEC-08/SEC-10
 (small, mechanical), then the Lows. BL-06 last.
+
+**Status (2026-09-23):** all SEC items are fixed or mitigated on `master`.
+See the audit's "Remediation status" table for each item and for the
+deliberate non-fixes: `/v1` Bearer is not throttled, and there is no total
+request deadline. Only BL-06, the deployment config, remains.

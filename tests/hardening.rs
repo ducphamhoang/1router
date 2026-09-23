@@ -131,3 +131,66 @@ async fn security_headers_on_every_response_and_no_store_on_admin() {
     assert_eq!(denied.status(), 401);
     assert_eq!(denied.headers()["x-frame-options"], "DENY");
 }
+
+async fn create_user_key(app: &common::TestApp, id: &str) -> String {
+    let (k, v) = auth_header(&app.secret);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/users", app.base_url))
+        .header(k, v)
+        .json(&json!({ "id": id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["api_key"].as_str().unwrap().to_string()
+}
+
+/// SEC-11: routing internals (provider ids, error text) only go to the admin.
+#[tokio::test]
+async fn debug_headers_and_upstream_urls_are_hidden_from_user_keys() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&upstream)
+        .await;
+    let app = spawn_app().await;
+    setup(&app, "openai", &upstream.uri()).await;
+    let key = create_user_key(&app, "alice").await;
+    let client = reqwest::Client::new();
+    let send = |auth: String| {
+        client
+            .post(format!("{}/v1/chat/completions", app.base_url))
+            .header("authorization", auth)
+            .json(&json!({ "model": "pool", "messages": [] }))
+            .send()
+    };
+
+    let user = send(format!("Bearer {key}")).await.unwrap();
+    assert!(!user.status().is_success());
+    for h in ["x-1router-tried", "x-1router-provider", "x-1router-error"] {
+        assert!(user.headers().get(h).is_none(), "{h} leaked to a user key");
+    }
+
+    let admin = send(format!("Bearer {}", app.secret)).await.unwrap();
+    assert!(admin.headers().contains_key("x-1router-tried"));
+}
+
+/// SEC-14: guessing the shared secret on /admin is throttled like login.
+#[tokio::test]
+async fn failed_admin_bearer_attempts_lock_out_the_ip() {
+    let app = spawn_app().await;
+    let client = reqwest::Client::new();
+    let get = |auth: String| {
+        client
+            .get(format!("{}/admin/users", app.base_url))
+            .header("authorization", auth)
+            .send()
+    };
+    for _ in 0..5 {
+        assert_eq!(get("Bearer wrong".into()).await.unwrap().status(), 401);
+    }
+    assert_eq!(get("Bearer wrong".into()).await.unwrap().status(), 429);
+    // Locked out even with the right secret until the cooldown ends.
+    assert_eq!(get(format!("Bearer {}", app.secret)).await.unwrap().status(), 429);
+}

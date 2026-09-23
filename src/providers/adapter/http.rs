@@ -148,10 +148,12 @@ impl ProviderAdapter for HttpAdapter {
             return Ok(response);
         }
 
-        let bytes = upstream
-            .bytes()
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to read upstream body: {e}")))?;
+        let bytes = crate::core::http_client::read_body_limited(
+            upstream,
+            crate::core::http_client::MAX_BUFFERED_BODY,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read upstream body: {e}")))?;
         let upstream_json: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| AppError::Internal(format!("invalid upstream JSON: {e}")))?;
         let translated = match self.client_wire {

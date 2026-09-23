@@ -1,6 +1,7 @@
 pub mod codex;
 pub mod commandcode;
 pub mod http;
+pub mod sse;
 
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;

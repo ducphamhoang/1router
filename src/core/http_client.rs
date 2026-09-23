@@ -27,6 +27,40 @@ pub fn build_client(cfg: &Config) -> reqwest::Client {
         .expect("failed to build reqwest client")
 }
 
+/// Error bodies are relayed to the caller / logged: 1 MiB is plenty (SEC-16).
+pub const MAX_ERROR_BODY: usize = 1024 * 1024;
+/// Whole-body reads of a successful non-streaming response (aggregation).
+pub const MAX_BUFFERED_BODY: usize = 64 * 1024 * 1024;
+
+/// Read at most `cap` bytes of an upstream body as (lossy) text; the rest is
+/// dropped. A read error ends the body early, like the
+/// `.text().await.unwrap_or_default()` it replaces - an upstream can no
+/// longer make the gateway buffer an unbounded error body.
+pub async fn read_text_truncated(mut resp: reqwest::Response, cap: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let room = cap - buf.len();
+        if chunk.len() >= room {
+            buf.extend_from_slice(&chunk[..room]);
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Read a whole upstream body, failing once it exceeds `cap` bytes.
+pub async fn read_body_limited(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.without_url().to_string())? {
+        if buf.len() + chunk.len() > cap {
+            return Err(format!("upstream body exceeds {} MiB", cap / (1024 * 1024)));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

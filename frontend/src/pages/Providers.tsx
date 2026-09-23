@@ -630,6 +630,8 @@ export function Providers() {
                   API key
                   <div className="model-override-row">
                     <input
+                      type="password"
+                      autoComplete="off"
                       value={form.api_key}
                       onChange={(event) => setForm({ ...form, api_key: event.target.value })}
                     />

@@ -50,7 +50,11 @@ impl IntoResponse for AppError {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
-            AppError::Db(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")),
+            AppError::Db(e) => {
+                // Raw sqlx text names tables/constraints; keep it in the log.
+                tracing::error!(error = %e, "database error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal database error".to_string())
+            }
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
             AppError::UpstreamWithStatus(s, m) => (s, m),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),

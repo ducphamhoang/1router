@@ -23,12 +23,17 @@ is the version shown on the Releases page (e.g. `v0.3.4`).
 **Docker**:
 
 ```
-mkdir -p data
+mkdir -p data && sudo chown 65532:65532 data
 docker run -it --rm -p 8080:8080 -v "$PWD/data:/data" \
-  -e ROUTER_SQLITE_PATH=/data/1router.db ghcr.io/ducphamhoang/1router:latest setup
+  ghcr.io/ducphamhoang/1router:latest setup
 docker run -d --name 1router -p 8080:8080 -v "$PWD/data:/data" \
-  -e ROUTER_SQLITE_PATH=/data/1router.db ghcr.io/ducphamhoang/1router:latest
+  ghcr.io/ducphamhoang/1router:latest
 ```
+
+The image runs as the unprivileged user `65532` and keeps its database,
+secret file and dataset logs in `/data`, so the mounted directory must be
+writable by that uid (the `chown` above). A directory created by an older,
+root-running image needs the same `chown` once.
 
 **From source** (needs Rust + Node.js):
 

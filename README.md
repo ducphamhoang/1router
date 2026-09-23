@@ -49,8 +49,11 @@ brand-new install uses fixed, published defaults so you land on provider
 setup immediately:
 
 - Admin UI password: **`password`** (username: `admin`)
-- Shared secret (for `Authorization: Bearer <secret>` on `/v1/*` and
-  `/admin/*`): **`1router-api-key`**
+- Shared secret: **`1router-api-key`**. This is the **admin** credential
+  (`Authorization: Bearer <secret>` gives full `/admin/*` access, including
+  exporting every stored provider key). It also works on `/v1/*` for your
+  own testing, but don't hand it to clients or SDKs; issue each one its
+  own key instead (see [Client keys](#client-keys-users)).
 
 These are meant to get you to "make a real request" in under a minute on a
 local/dev box — they are **not** meant to be exposed beyond localhost as-is.
@@ -147,6 +150,19 @@ boot in that case; bind to `127.0.0.1:8080` or set
 `ROUTER_REQUIRE_SHARED_SECRET=true` to remove the exposure. Open access does
 not add rate limiting or any other protection against request volume; it only
 removes the client API-key requirement.
+
+### Client keys (users)
+
+Give every person or app that calls `/v1/*` its own key: **Users** page in
+the admin UI, or `POST /admin/users` with `{"id":"alice"}`. The raw key
+(`1r_...`) is shown once; only its hash is stored. Requests made with it
+are logged under that user id (request log, `GET /admin/stats/users`,
+dataset logs). A user key works only on `/v1/*`. It can't reach `/admin/*`,
+and it can't direct-address a `<provider-id>/<model>` the admin hasn't
+exposed (the provider's default model, a pool member's model, or a model
+from the provider's fetched model list). Revoke or rotate a key from the
+same page. Calls to upstream providers still use the provider's own
+credentials, whatever key the client presented.
 
 ## Try it
 

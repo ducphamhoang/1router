@@ -247,6 +247,11 @@ honors and which it cannot.
 
 **Status:** known issue — deliberately deferred; fix **last**, after the
 BL-07 code fixes land (decision 2026-09-23).
+The 2026-09-23 audit run-1 (finding v07) says the same thing again. The fix
+**must land before the gateway is released to the LAN**. When it is picked
+up, also replace the TTY-onboarding shared secret `1router-api-key`, which
+grants full `/admin/*` via Bearer, and turn `require_shared_secret` on.
+Changing the admin password on its own does not close this.
 
 **Where:** the local deployment at `E:\1router` (`1router.exe`, started with
 no env), not the code.
@@ -287,3 +292,49 @@ SEC-04 (onboarding/README now that per-user keys exist), SEC-07/SEC-08/SEC-10
 See the audit's "Remediation status" table for each item and for the
 deliberate non-fixes: `/v1` Bearer is not throttled, and there is no total
 request deadline. Only BL-06, the deployment config, remains.
+
+---
+
+## BL-08: SQLite DB, `-wal` and `-shm` are not owner-only on a normal boot (SEC-13 gap)
+
+**Status:** known issue, deliberately deferred with no fix planned for now
+(decision 2026-09-23). Found by audit run-1 (`~/security-audit-skill/1router/run-1`,
+finding v06, needs_validation).
+
+**Where:** `src/main.rs`, `src/core/fsperm.rs`. The only
+`restrict_sqlite_files` call is in the `setup` subcommand path.
+
+**What:** SEC-13 meant to make the DB owner-only. A normal
+`1router.exe` start never calls `restrict_sqlite_files`, and SQLite
+recreates `-wal`/`-shm` with the directory's inherited ACL. The live files
+at `E:router` currently carry only inherited ACEs, including
+`Authenticated Users:(M)` and `Users:(RX)`. The `*.bak` copies next to them
+and `dataset-logs/` inherit the same ACEs.
+
+**Why it matters:** the DB holds plaintext provider API keys, Codex OAuth
+tokens, user key hashes, the admin password hash and sessions. Any other
+account on the host can read it. With Modify access it can also write to it,
+for example to add a user key or repoint a provider `base_url`. The threat is
+another local account (a second Windows user, a service running under another
+account, a sync or backup tool), not the network. Restricting the gateway to
+internal-only connections does not change it. Risk is low on a single-user
+machine and rises on a shared or remotely accessible host.
+
+**Interim mitigation:** a one-off `icacls` on the deployment directory, done
+by the operator. It also covers `*.bak` and `dataset-logs/`.
+
+**Proposed fix (when picked up):**
+1. Call `restrict_sqlite_files` on every boot, after the pool is opened.
+2. Resolve the grantee from the process token's SID instead of
+   `USERDOMAIN`/`USERNAME`. Today `/inheritance:r /grant:r <env user>:F` can
+   lock the gateway out of its own DB on the next boot when the two differ,
+   for example when running as a service under `SYSTEM`, where `USERNAME` is
+   `MACHINE$`. That makes this step a prerequisite for running 1router as a
+   service.
+3. Re-open the file after restricting it and log a clear error if that
+   fails.
+
+**Acceptance sketch:** after a normal boot, the DB, `-wal` and `-shm` carry
+no inherited ACEs and grant only the running account. The gateway still
+restarts cleanly, including when it runs under a different account than the
+env vars name.

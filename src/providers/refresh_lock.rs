@@ -19,6 +19,31 @@ where
     f().await
 }
 
+/// [`refresh_and_persist`] under the provider's refresh lock, on its own task.
+///
+/// A refresh spends the single-use refresh token upstream before the new one
+/// is written to the DB. Run inline in a request future, a client disconnect
+/// (or timeout) in between drops the persist step: the rotated token is lost,
+/// the DB keeps the spent one, and the next refresh gets invalid_grant, taking
+/// the provider down until an admin re-authenticates. The spawned task is not
+/// cancelled with the caller, so the rotation always reaches the DB.
+pub async fn refresh_and_persist_detached(
+    state: &AppState,
+    provider: &Provider,
+    adapter: Arc<dyn ProviderAdapter>,
+    creds: &Credentials,
+) -> Result<Credentials, RefreshError> {
+    let (state, provider, creds) = (state.clone(), provider.clone(), creds.clone());
+    tokio::spawn(async move {
+        with_refresh_lock(&state.refresh_locks, &provider.id, || async {
+            refresh_and_persist(&state, &provider, adapter.as_ref(), &creds).await
+        })
+        .await
+    })
+    .await
+    .unwrap_or_else(|e| Err(RefreshError::Transient(format!("refresh task failed: {e}"))))
+}
+
 pub async fn refresh_and_persist(
     state: &AppState,
     provider: &Provider,
@@ -40,19 +65,36 @@ pub async fn refresh_and_persist(
     }
 
     let new_creds = adapter.refresh_credentials(creds).await?;
-    upsert_oauth_tokens(
-        &state.db,
-        &provider.id,
-        new_creds.access_token.as_deref(),
-        new_creds.refresh_token.as_deref(),
-        new_creds.id_token.as_deref(),
-        new_creds.access_expires_at,
-        &new_creds.provider_data,
-    )
-    .await
-    .map_err(|e| RefreshError::Transient(format!("persist refreshed tokens: {e}")))?;
-    Ok(new_creds)
+    // The old refresh token is already spent upstream, so a failed write here
+    // loses the only valid one: retry a transient DB error before giving up.
+    let mut attempt = 0;
+    loop {
+        let persisted = upsert_oauth_tokens(
+            &state.db,
+            &provider.id,
+            new_creds.access_token.as_deref(),
+            new_creds.refresh_token.as_deref(),
+            new_creds.id_token.as_deref(),
+            new_creds.access_expires_at,
+            &new_creds.provider_data,
+        )
+        .await;
+        match persisted {
+            Ok(_) => return Ok(new_creds),
+            Err(e) if attempt < PERSIST_RETRIES => {
+                attempt += 1;
+                tracing::warn!(provider = %provider.id, error = %e, attempt, "persist refreshed tokens failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
+            }
+            Err(e) => {
+                tracing::error!(provider = %provider.id, error = %e, "persist refreshed tokens failed; provider will need re-auth");
+                return Err(RefreshError::Transient(format!("persist refreshed tokens: {e}")));
+            }
+        }
+    }
 }
+
+const PERSIST_RETRIES: u32 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -227,5 +269,96 @@ mod tests {
             "second waiter must not re-refresh"
         );
         assert_eq!(second.access_token, first.access_token);
+    }
+
+    // v12 regression: the caller's future is dropped while the upstream
+    // refresh is in flight (client disconnect). The rotated token must still
+    // be persisted rather than lost with the request.
+    struct GatedAdapter {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderAdapter for GatedAdapter {
+        async fn build_request(
+            &self,
+            _client_body: &bytes::Bytes,
+            _creds: &Credentials,
+        ) -> Result<reqwest::Request, crate::core::error::AppError> {
+            unimplemented!()
+        }
+        async fn transform_response(
+            &self,
+            _upstream: reqwest::Response,
+            _client_wanted_stream: bool,
+        ) -> Result<axum::response::Response, crate::core::error::AppError> {
+            unimplemented!()
+        }
+        async fn classify_error(
+            &self,
+            _status: axum::http::StatusCode,
+            _headers: &axum::http::HeaderMap,
+        ) -> crate::core::error::ErrorClass {
+            unimplemented!()
+        }
+        fn needs_refresh(&self, _creds: &Credentials) -> bool {
+            true
+        }
+        async fn refresh_credentials(
+            &self,
+            _creds: &Credentials,
+        ) -> Result<Credentials, RefreshError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Credentials {
+                access_token: Some("at-rotated".into()),
+                refresh_token: Some("rt-rotated".into()),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rotated_token_is_persisted_even_if_caller_is_dropped() {
+        let state = test_app_state().await;
+        let provider = test_provider();
+        crate::providers::queries::insert_provider(&state.db, &provider)
+            .await
+            .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let adapter: Arc<dyn ProviderAdapter> = Arc::new(GatedAdapter {
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let creds = Credentials {
+            access_token: Some("at-old".into()),
+            refresh_token: Some("rt-old".into()),
+            ..Default::default()
+        };
+
+        // Drop the caller once the upstream refresh has started.
+        tokio::select! {
+            _ = refresh_and_persist_detached(&state, &provider, adapter, &creds) => {
+                panic!("refresh should still be blocked upstream")
+            }
+            _ = started.notified() => {}
+        }
+        release.notify_one();
+
+        let persisted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(Some(os)) = get_oauth_state(&state.db, &provider.id).await {
+                    if os.refresh_token.as_deref() == Some("rt-rotated") {
+                        return os;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rotated refresh token was lost with the dropped caller");
+        assert_eq!(persisted.access_token.as_deref(), Some("at-rotated"));
     }
 }

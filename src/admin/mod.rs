@@ -138,13 +138,19 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .await?;
     }
 
+    // An existing user keeps its live credential and revocation state: a dump
+    // is a snapshot, so letting it overwrite them would silently un-revoke a
+    // leaked key or bring back a key that was rotated out after the export
+    // (revocation is one-way, see migrations/0008_users.sql). An import can
+    // still revoke (COALESCE keeps whichever revocation happened) and still
+    // creates users the instance doesn't have.
     for u in &dump.users {
         sqlx::query(
             "INSERT INTO users (id, name, key_prefix, key_hash, created_at, last_used_at, revoked_at)
              VALUES (?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, key_prefix=excluded.key_prefix, key_hash=excluded.key_hash,
-               revoked_at=excluded.revoked_at",
+               name=excluded.name,
+               revoked_at=COALESCE(users.revoked_at, excluded.revoked_at)",
         )
         .bind(&u.id)
         .bind(&u.name)
@@ -251,5 +257,58 @@ mod tests {
                 .unwrap(),
             Some(false)
         );
+    }
+
+    fn empty_dump_with(users: Vec<UserExport>) -> ExportDump {
+        ExportDump {
+            providers: vec![],
+            pools: vec![],
+            members: vec![],
+            users,
+        }
+    }
+
+    // Restoring an older snapshot must not un-revoke a key revoked since.
+    #[tokio::test]
+    async fn import_does_not_unrevoke_a_revoked_user() {
+        let db = init_pool(":memory:").await.unwrap();
+        let k1 = users_q::create_user(&db, "ivy", None).await.unwrap().api_key;
+        let snapshot = users_q::export_users(&db).await.unwrap();
+        users_q::revoke_user(&db, "ivy").await.unwrap();
+
+        import_config(&db, &empty_dump_with(snapshot)).await.unwrap();
+
+        assert!(users_q::authenticate(&db, &k1).await.unwrap().is_none());
+        assert!(users_q::get_user(&db, "ivy").await.unwrap().revoked_at.is_some());
+    }
+
+    // Restoring an older snapshot must not bring back a rotated-out key.
+    #[tokio::test]
+    async fn import_does_not_restore_a_rotated_out_key() {
+        let db = init_pool(":memory:").await.unwrap();
+        let k1 = users_q::create_user(&db, "ivy", None).await.unwrap().api_key;
+        let snapshot = users_q::export_users(&db).await.unwrap();
+        let k2 = users_q::rotate_user_key(&db, "ivy").await.unwrap().api_key;
+
+        import_config(&db, &empty_dump_with(snapshot)).await.unwrap();
+
+        assert!(users_q::authenticate(&db, &k1).await.unwrap().is_none());
+        assert!(users_q::authenticate(&db, &k2).await.unwrap().is_some());
+    }
+
+    // A dump can still carry a revocation onto a live, active user.
+    #[tokio::test]
+    async fn import_can_still_revoke() {
+        let src = init_pool(":memory:").await.unwrap();
+        let k1 = users_q::create_user(&src, "ivy", None).await.unwrap().api_key;
+        let active = users_q::export_users(&src).await.unwrap();
+        users_q::revoke_user(&src, "ivy").await.unwrap();
+        let revoked = users_q::export_users(&src).await.unwrap();
+
+        let dst = init_pool(":memory:").await.unwrap();
+        import_config(&dst, &empty_dump_with(active)).await.unwrap();
+        assert!(users_q::authenticate(&dst, &k1).await.unwrap().is_some());
+        import_config(&dst, &empty_dump_with(revoked)).await.unwrap();
+        assert!(users_q::authenticate(&dst, &k1).await.unwrap().is_none());
     }
 }

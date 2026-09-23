@@ -44,7 +44,7 @@ pub async fn refresh_tokens(
         .map_err(|e| RefreshError::Transient(format!("refresh request failed: {e}")))?;
 
     if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
         if text.contains("invalid_grant") {
             return Err(RefreshError::InvalidGrant);
         }

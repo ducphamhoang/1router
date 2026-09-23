@@ -225,6 +225,11 @@ pub fn transform_request(
             .unwrap_or_else(|| "medium".to_string())
     });
     let reasoning = obj.entry("reasoning").or_insert_with(|| json!({}));
+    // A client-sent non-object (`"reasoning": "x"`) would make the index
+    // below panic (SEC-15); replace it rather than trust its shape.
+    if !reasoning.is_object() {
+        *reasoning = json!({});
+    }
     reasoning["effort"] = json!(effort);
     obj.insert("include".into(), json!(["reasoning.encrypted_content"]));
 
@@ -449,7 +454,7 @@ where
 {
     struct State<S> {
         upstream: S,
-        buf: String,
+        framer: crate::providers::adapter::sse::SseFramer,
         chunk_state: SseChunkState,
         model: String,
         finished: bool,
@@ -457,7 +462,7 @@ where
 
     let state = State {
         upstream,
-        buf: String::new(),
+        framer: Default::default(),
         chunk_state: SseChunkState::new(),
         model,
         finished: false,
@@ -469,8 +474,7 @@ where
             if st.finished {
                 return None;
             }
-            if let Some(pos) = st.buf.find("\n\n") {
-                let block: String = st.buf.drain(..pos + 2).collect();
+            if let Some(block) = st.framer.next_block() {
                 let block = block.trim_end_matches("\n\n").to_string();
                 let Some((event, data)) = parse_sse_block(&block) else {
                     continue;
@@ -483,7 +487,10 @@ where
             }
             match st.upstream.next().await {
                 Some(Ok(bytes)) => {
-                    st.buf.push_str(&String::from_utf8_lossy(&bytes));
+                    if !st.framer.push(&bytes) {
+                        tracing::warn!("codex SSE: no event separator within the buffer cap, ending stream");
+                        st.finished = true;
+                    }
                     continue;
                 }
                 Some(Err(e)) => {
@@ -715,6 +722,14 @@ mod tests {
         );
         assert_eq!(out["reasoning"]["summary"], "auto");
         assert_eq!(out["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn a_non_object_reasoning_is_replaced_not_panicked_on() {
+        for bad in [json!("x"), json!(1), json!(null), json!([1])] {
+            let out = transform_request(&json!({ "messages": [], "reasoning": bad }), "s", None);
+            assert_eq!(out["reasoning"]["effort"], "medium");
+        }
     }
 
     #[test]

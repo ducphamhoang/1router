@@ -10,8 +10,14 @@ use futures::StreamExt;
 /// "reached a real terminal stream item" cases (`None`/`Err`).
 struct FireOnDrop<F: FnOnce(Bytes, bool)> {
     acc: Vec<u8>,
+    /// Set once `acc` would pass [`MAX_CAPTURE`]; the entry is then
+    /// reported incomplete (SEC-16: a huge response can't balloon memory).
+    overflowed: bool,
     cb: Option<F>,
 }
+
+/// Largest response copy kept for the dataset log.
+pub const MAX_CAPTURE: usize = 64 * 1024 * 1024;
 
 impl<F: FnOnce(Bytes, bool)> FireOnDrop<F> {
     /// Explicit terminal firing (stream ended cleanly or errored) - disarms
@@ -19,7 +25,7 @@ impl<F: FnOnce(Bytes, bool)> FireOnDrop<F> {
     /// later dropped.
     fn fire_now(&mut self, complete: bool) {
         if let Some(cb) = self.cb.take() {
-            cb(Bytes::from(std::mem::take(&mut self.acc)), complete);
+            cb(Bytes::from(std::mem::take(&mut self.acc)), complete && !self.overflowed);
         }
     }
 }
@@ -51,12 +57,19 @@ pub fn tee(
     on_complete: impl FnOnce(Bytes, bool) + Send + 'static,
 ) -> Body {
     let inner = body.into_data_stream();
-    let guard = FireOnDrop { acc: Vec::new(), cb: Some(on_complete) };
+    let guard = FireOnDrop { acc: Vec::new(), overflowed: false, cb: Some(on_complete) };
     let stream = futures::stream::unfold(TeeState::Live(inner, guard), |state| async move {
         match state {
             TeeState::Live(mut inner, mut guard) => match inner.next().await {
                 Some(Ok(chunk)) => {
-                    guard.acc.extend_from_slice(&chunk);
+                    if !guard.overflowed {
+                        if guard.acc.len() + chunk.len() > MAX_CAPTURE {
+                            guard.overflowed = true;
+                            guard.acc = Vec::new();
+                        } else {
+                            guard.acc.extend_from_slice(&chunk);
+                        }
+                    }
                     Some((Ok(chunk), TeeState::Live(inner, guard)))
                 }
                 Some(Err(e)) => {

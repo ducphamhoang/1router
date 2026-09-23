@@ -763,35 +763,39 @@ where
 {
     struct St<S> {
         upstream: S,
-        buf: String,
+        framer: crate::providers::adapter::sse::SseFramer,
         upstream_done: bool,
     }
 
     let st = St {
         upstream,
-        buf: String::new(),
+        framer: Default::default(),
         upstream_done: false,
     };
 
     futures::stream::unfold(st, |mut st| async move {
         use futures::StreamExt;
         loop {
-            if let Some(pos) = st.buf.find("\n\n") {
-                let block: String = st.buf.drain(..pos + 2).collect();
+            if let Some(block) = st.framer.next_block() {
                 if block.trim().is_empty() {
                     continue;
                 }
                 return Some((Ok(Bytes::from(block)), st));
             }
             if st.upstream_done {
-                if st.buf.trim().is_empty() {
+                let rest = st.framer.finish();
+                if rest.trim().is_empty() {
                     return None;
                 }
-                let rest = std::mem::take(&mut st.buf);
                 return Some((Ok(Bytes::from(rest)), st));
             }
             match st.upstream.next().await {
-                Some(Ok(bytes)) => st.buf.push_str(&String::from_utf8_lossy(&bytes)),
+                Some(Ok(bytes)) => {
+                    if !st.framer.push(&bytes) {
+                        tracing::warn!("SSE: no event separator within the buffer cap, ending stream");
+                        return None;
+                    }
+                }
                 Some(Err(e)) => {
                     st.upstream_done = true;
                     return Some((Err(e), st));

@@ -308,7 +308,7 @@ async fn handle_proxy_inner(
             ErrorClass::NonRetryable => {
                 // Client-caused rejection: no runtime-state change (SEC-01).
                 let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
-                let text = upstream.text().await.unwrap_or_default();
+                let text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
                 log(
                     &state,
                     &caller,
@@ -330,7 +330,7 @@ async fn handle_proxy_inner(
                         st.mark_misconfigured(Instant::now());
                     }
                     let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
-                    let text = upstream.text().await.unwrap_or_default();
+                    let text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
                     log(
                         &state,
                         &caller,
@@ -453,7 +453,7 @@ async fn handle_proxy_inner(
                             }
                             ErrorClass::NonRetryable => {
                                 // Client-caused rejection: no runtime-state change (SEC-01).
-                                let text = resp2.text().await.unwrap_or_default();
+                                let text = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -471,7 +471,7 @@ async fn handle_proxy_inner(
                                         state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.mark_misconfigured(Instant::now());
                                 }
-                                let text = resp2.text().await.unwrap_or_default();
+                                let text = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -501,7 +501,7 @@ async fn handle_proxy_inner(
                                         state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                     st.record_retryable(cooldown, Instant::now());
                                 }
-                                last_error_body = resp2.text().await.unwrap_or_default();
+                                last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                                 log(
                                     &state,
                                     &caller,
@@ -539,7 +539,7 @@ async fn handle_proxy_inner(
                 }
             }
             ErrorClass::Retryable { retry_after } => {
-                let error_text = upstream.text().await.unwrap_or_default();
+                let error_text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
 
                 // Command Code transport fallback: a 403 with
                 // `upgrade_required` from the provider transport means this
@@ -647,7 +647,7 @@ async fn handle_proxy_inner(
                         }
                         ErrorClass::NonRetryable => {
                             // Client-caused rejection: no runtime-state change (SEC-01).
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,
@@ -664,7 +664,7 @@ async fn handle_proxy_inner(
                                     state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.mark_misconfigured(Instant::now());
                             }
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,
@@ -686,7 +686,7 @@ async fn handle_proxy_inner(
                                     state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
                                 st.record_retryable(cooldown, Instant::now());
                             }
-                            last_error_body = resp2.text().await.unwrap_or_default();
+                            last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
                             log(
                                 &state,
                                 &caller,

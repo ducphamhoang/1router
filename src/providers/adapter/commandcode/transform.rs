@@ -382,6 +382,7 @@ where
     struct State<S> {
         upstream: S,
         buffer: String,
+        decoder: crate::providers::adapter::sse::Utf8Decoder,
         chunks: ChunkState,
         model: String,
         done: bool,
@@ -390,6 +391,7 @@ where
         State {
             upstream,
             buffer: String::new(),
+            decoder: Default::default(),
             chunks: ChunkState::default(),
             model,
             done: false,
@@ -428,7 +430,13 @@ where
                     continue;
                 }
                 match state.upstream.next().await {
-                    Some(Ok(bytes)) => state.buffer.push_str(&String::from_utf8_lossy(&bytes)),
+                    Some(Ok(bytes)) => {
+                        state.buffer.push_str(&state.decoder.decode(&bytes));
+                        if state.buffer.len() > crate::providers::adapter::sse::MAX_SSE_BUFFER {
+                            tracing::warn!("command code stream: no line break within the buffer cap, ending stream");
+                            state.done = true;
+                        }
+                    }
                     Some(Err(error)) => {
                         state.done = true;
                         return Some((Err(error), state));

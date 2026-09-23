@@ -8,7 +8,9 @@ use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{DatasetLogEntry, LatencyMs, LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::runtime::runtime_key;
 use crate::core::state::AppState;
-use crate::pools::select::{dataset_logging_enabled, resolve_reasoning_effort, select};
+use crate::pools::select::{
+    dataset_logging_enabled, direct_model_allowed, resolve_reasoning_effort, select,
+};
 use crate::providers::adapter::commandcode::{
     current_transport, is_upgrade_required, remember_transport, Transport,
 };
@@ -123,6 +125,21 @@ pub async fn handle_proxy(
         }
     };
 
+    if selection.pool.is_none() && !caller.is_admin() {
+        if let Some(member) = selection.providers.first() {
+            if !direct_model_allowed(&snapshot, &state.discovered_models, member.provider, &member.effective_model) {
+                return wire_error(
+                    wire,
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "model '{}' is not enabled for direct addressing on provider '{}'",
+                        member.effective_model, member.provider.id
+                    ),
+                );
+            }
+        }
+    }
+
     let client_wanted_stream = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
@@ -142,8 +159,9 @@ pub async fn handle_proxy(
         let effective_model = &member.effective_model;
         let member_override = &member.dataset_logging_override;
         let now = Instant::now();
-        {
-            let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
+        // `get`, not `entry`: an untried (provider, model) has no state yet
+        // and mustn't gain an entry just for being looked up (SEC-03).
+        if let Some(st) = state.runtime.get(&runtime_key(&provider.id, effective_model)) {
             if !st.is_available(now) {
                 continue;
             }

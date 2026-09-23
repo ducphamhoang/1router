@@ -74,6 +74,24 @@ impl ProviderRuntimeState {
 
 pub type RuntimeStateMap = Arc<dashmap::DashMap<String, ProviderRuntimeState>>;
 
+/// How long past its `unavailable_until` an entry is kept (so repeated
+/// failures still escalate the backoff) before [`prune_idle`] drops it.
+pub const RUNTIME_IDLE_RETENTION: Duration = Duration::from_secs(15 * 60);
+
+/// Drop entries that carry no information any more: healthy ones (a missing
+/// entry *is* healthy) and ones whose cooldown ended more than
+/// `retention` ago. Keeps the map bounded by recent failures rather than by
+/// every `(provider, model)` string ever seen (SEC-03). Returns how many
+/// were removed.
+pub fn prune_idle(map: &RuntimeStateMap, now: Instant, retention: Duration) -> usize {
+    let before = map.len();
+    map.retain(|_, st| match st.unavailable_until {
+        Some(until) => now < until + retention,
+        None => false,
+    });
+    before - map.len()
+}
+
 /// Reset every runtime-state entry belonging to `provider_id`, across all
 /// of its models - used after a credential/config update proves the
 /// provider works again. Before pool members could carry their own model
@@ -218,6 +236,22 @@ mod tests {
         assert_eq!(s.backoff_level, 0);
         assert!(matches!(s.status, ProviderStatus::Healthy));
         assert!(s.is_available(now));
+    }
+
+    #[test]
+    fn prune_idle_keeps_only_recent_failures() {
+        let map: RuntimeStateMap = Arc::new(dashmap::DashMap::new());
+        let now = Instant::now();
+        map.insert("healthy".into(), ProviderRuntimeState::default());
+        let mut cooling = ProviderRuntimeState::default();
+        cooling.record_retryable(Duration::from_secs(30), now);
+        map.insert("cooling".into(), cooling);
+
+        assert_eq!(prune_idle(&map, now, RUNTIME_IDLE_RETENTION), 1);
+        assert!(map.contains_key("cooling"));
+        let later = now + Duration::from_secs(30) + RUNTIME_IDLE_RETENTION;
+        assert_eq!(prune_idle(&map, later, RUNTIME_IDLE_RETENTION), 1);
+        assert!(map.is_empty());
     }
 
     #[test]

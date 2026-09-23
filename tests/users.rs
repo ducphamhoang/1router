@@ -320,3 +320,33 @@ async fn export_import_round_trip_keeps_user_keys_working() {
     let jay = users.as_array().unwrap().iter().find(|u| u["id"] == "jay").unwrap();
     assert!(jay["revoked_at"].is_string());
 }
+
+/// SEC-06: a user key may direct-address only models the admin exposed
+/// (provider default, a pool member's model, or the discovered list);
+/// the shared secret stays unrestricted.
+#[tokio::test]
+async fn user_keys_can_only_direct_address_enabled_models() {
+    let app = spawn_app().await;
+    let _upstream = setup(&app).await;
+    let created = create_user(&app, "kim").await;
+    let user = format!("Bearer {}", created["api_key"].as_str().unwrap());
+    let admin = format!("Bearer {}", app.secret);
+
+    let direct = |auth: String, model: &'static str| {
+        let url = format!("{}/v1/chat/completions", app.base_url);
+        async move {
+            reqwest::Client::new()
+                .post(url)
+                .header("authorization", auth)
+                .json(&json!({ "model": model, "messages": [] }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(direct(user.clone(), "p1/real-model").await, 200, "provider default is enabled");
+    assert_eq!(direct(user.clone(), "p1/most-expensive").await, 400, "arbitrary model is not");
+    assert_eq!(direct(admin, "p1/most-expensive").await, 200, "admin is unrestricted");
+}

@@ -6,7 +6,7 @@ import { Pools } from "./pages/Pools";
 import { Providers } from "./pages/Providers";
 import { Settings } from "./pages/Settings";
 import { Integration } from "./pages/Integration";
-import { ClientKeys } from "./pages/ClientKeys";
+import { Users } from "./pages/Users";
 
 type SecurityStatus = {
   shared_secret_is_default: boolean;
@@ -93,7 +93,7 @@ export function App() {
         <NavLink to="/ui/providers">Providers</NavLink>
         <NavLink to="/ui/pools">Pools</NavLink>
         <NavLink to="/ui/integration">Integration</NavLink>
-        <NavLink to="/ui/api-keys">API Keys</NavLink>
+        <NavLink to="/ui/users">Users</NavLink>
         <NavLink to="/ui/settings">Settings</NavLink>
       </nav>
       <SecurityBanner />
@@ -102,7 +102,7 @@ export function App() {
         <Route path="/ui/providers" element={<Providers />} />
         <Route path="/ui/pools" element={<Pools />} />
         <Route path="/ui/integration" element={<Integration />} />
-        <Route path="/ui/api-keys" element={<ClientKeys />} />
+        <Route path="/ui/users" element={<Users />} />
         <Route path="/ui/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/ui/providers" replace />} />
       </Routes>

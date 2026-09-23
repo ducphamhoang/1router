@@ -94,32 +94,39 @@ fine capturing what actually flows through that provider/membership;
 there's no PII scrubbing pass to get subtly wrong. Full design rationale:
 [`docs/superpowers/specs/2026-08-27-dataset-logging-design.md`](superpowers/specs/2026-08-27-dataset-logging-design.md).
 
-## Client API keys (caller identity)
+## Users (per-caller credentials)
 
 `/v1/*` can be called by many users, each with their own key, so the
-request log shows **who** made each request. Keys are issued by the admin
-(UI: the **API Keys** page; API: `POST /admin/client-keys {"name": ...}`,
-`GET /admin/client-keys`, `DELETE /admin/client-keys/:id` to revoke) and are
-only used to authenticate the client to 1router — upstream provider calls
-still use each provider's own stored credential, and the client's key is
-never forwarded.
+request log shows **who** made each request. Users are named bearer
+credentials, not accounts: the admin creates one (UI: the **Users** page;
+API: `POST /admin/users {"id": "alice", "name": "..."}`, `GET /admin/users`,
+`POST /admin/users/:id/rotate`, `POST /admin/users/:id/revoke`) and hands
+the key to that person. Keys only authenticate the client to 1router —
+upstream provider calls still use each provider's own stored credential,
+and the user's key is never forwarded.
 
+- `id` is an admin-chosen slug (`validate_path_id`, plus `admin` /
+  `anonymous` reserved) that appears as-is in logs. Keys look like
+  `1r_<64 hex>`; only their SHA-256 is stored, and the raw key is returned
+  once, by create/rotate. Rotate replaces the key in place (the old one
+  stops working immediately); revoke is a one-way soft delete (a revoked
+  user can't be rotated back to life — 409).
 - Clients send the key as `Authorization: Bearer <key>` (OpenAI SDKs) or
-  `x-api-key: <key>` (Anthropic SDKs). Keys look like `1r_<64 hex>`; only
-  their SHA-256 is stored, and the raw key is returned once, by the create
-  call. Revocation is soft (the row stays so old log rows keep a name) and
-  takes effect on the next request.
-- `auth::middleware::require_bearer` resolves the credential to an
-  `auth::client_keys::Caller` and inserts it into the request extensions:
-  the shared admin secret → `admin`; an active client key → the key's
-  name; anything else → 401, or `anonymous` when open access is on (an
-  active client key is still recognised by name in open-access mode).
-- Every `request_log` row records `caller_key_id` + `caller_name` (a
-  snapshot of the name; `NULL` for anonymous), dataset-log JSONL records
-  carry it as `user_id`, and `GET /admin/stats/callers` aggregates by
-  caller. `last_used_at` on a key is refreshed at most once a minute.
-- Client keys grant `/v1/*` only — they are not accepted on `/admin/*`, and
-  they are not part of `/admin/export` / `/admin/import`.
+  `x-api-key: <key>` (Anthropic SDKs). `auth::middleware::require_bearer`
+  resolves it to a `users::Caller` in the request extensions: the shared
+  admin secret → `admin`; an active user key → the user's id; anything
+  else → 401, or anonymous (`NULL`) when open access is on (an active user
+  key is still attributed in open-access mode).
+- Every `request_log` row records `user_id`, dataset-log JSONL records carry
+  it as `user_id`, and `GET /admin/stats/users` aggregates by it. Requests
+  rejected before reaching a provider (401, unknown model) are not in
+  `request_log`, same as before. `last_used_at` is refreshed at most once a
+  minute.
+- User keys grant `/v1/*` only — they are not accepted on `/admin/*`.
+  `/admin/export` includes users with their `key_hash` (never the raw key)
+  so an import restores working keys; the export already carries provider
+  `api_key`s, so treat the file as a secret either way.
+- Design: [`superpowers/specs/2026-08-28-user-credentials-design.md`](superpowers/specs/2026-08-28-user-credentials-design.md).
 
 ## Configuration (environment variables)
 
@@ -142,7 +149,7 @@ never forwarded.
 client → /v1/chat/completions or /v1/messages
            │
            ▼
-       auth: shared secret / client key → Caller (logged per request)
+       auth: shared secret / user key → Caller (user_id logged per request)
            │
            ▼
        pool lookup (by `model`),         SQLite: providers, pools,

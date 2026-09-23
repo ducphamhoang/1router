@@ -56,12 +56,14 @@ new work should branch directly off `master`. See:
   is that every adapter re-runs `capability_for` at request-build time and
   silently skips injection rather than erroring, since config import and the
   onboarding wizard bypass the write path.
-- Client API keys (caller identity) — per-user keys for `/v1/*`
-  (migration `0008`, `src/auth/client_keys.rs`, UI `frontend/src/pages/ClientKeys.tsx`).
-  `require_bearer` resolves the credential to a `Caller` extension that
-  `proxy::flow` writes into `request_log.caller_*` and dataset-log `user_id`.
-  Only authenticates clients to 1router — never changes upstream credentials.
-  Overview: `docs/ARCHITECTURE.md#client-api-keys-caller-identity`
+- Users (per-caller credentials) — named bearer keys for `/v1/*`
+  (migration `0008`, `src/users/`, UI `frontend/src/pages/Users.tsx`).
+  `require_bearer` resolves the credential to a `users::Caller` extension
+  that `proxy::flow` writes into `request_log.user_id` and dataset-log
+  `user_id` (shared secret → `"admin"`). Only authenticates clients to
+  1router — never changes upstream credentials. Design:
+  `docs/superpowers/specs/2026-08-28-user-credentials-design.md`, overview:
+  `docs/ARCHITECTURE.md#users-per-caller-credentials`
 - Progress ledger (historical, git-ignored scratch, may not exist in a fresh
   checkout): `.superpowers/sdd/progress.md`
 

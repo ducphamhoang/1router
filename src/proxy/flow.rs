@@ -4,7 +4,6 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 
-use crate::auth::client_keys::Caller;
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{DatasetLogEntry, LatencyMs, LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::runtime::runtime_key;
@@ -19,6 +18,7 @@ use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
 use crate::proxy::backoff;
 use crate::proxy::dataset_tee;
 use crate::proxy::error_response::wire_error;
+use crate::users::Caller;
 
 pub(crate) async fn credentials_for(state: &AppState, provider: &Provider) -> Credentials {
     Credentials::from_provider_and_oauth(
@@ -43,8 +43,7 @@ fn log(
         status_code: status,
         latency_ms,
         success,
-        caller_key_id: caller.key_id.clone(),
-        caller_name: caller.name.clone(),
+        user_id: caller.user_id.clone(),
     });
 }
 
@@ -79,7 +78,7 @@ fn maybe_log_dataset(
     let timestamp = chrono::Utc::now();
     let input_body = String::from_utf8_lossy(body).into_owned();
     let dataset_log_tx = state.dataset_log_tx.clone();
-    let user_id = caller.name.clone();
+    let user_id = caller.user_id.clone();
 
     let (parts, resp_body) = resp.into_parts();
     let wrapped = dataset_tee::tee(resp_body, move |output_bytes, complete| {

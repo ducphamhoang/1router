@@ -27,6 +27,36 @@ Scope, per explicit decision (not re-litigated here):
   Scoping keys to specific providers/pools is a natural v2 if ever needed,
   but is out of scope here (see "Out of scope").
 
+## Implementation decisions (2026-09-23)
+
+Implemented on `feature/client-keys` (migration `0008_users.sql`,
+`src/users/`, `frontend/src/pages/Users.tsx`). Where the code differs from
+the sections below, **the code and this list win**:
+
+- **Shared secret is attributed as `"admin"`, not `None`.** Otherwise
+  shared-secret traffic is indistinguishable from anonymous open-access
+  traffic (and from pre-feature log rows) in `request_log`. `admin` (and
+  `anonymous`) are reserved and can't be used as a user id.
+- **Key format** is `1r_<32 random bytes, hex>` rather than `usr_<base64url>`
+  — the prefix marks it as a 1router credential; still no parsing
+  significance.
+- **`users` table** also has `key_prefix` (first 10 chars of the raw key,
+  for telling keys apart in the UI) and `last_used_at` (refreshed at most
+  once a minute, in the background). `name` is optional on create and
+  falls back to the id.
+- **`request_log.user_id`** is a single nullable column (plus an index on
+  `(user_id, created_at)`); new `GET /admin/stats/users` aggregates by it.
+- **Credential headers:** `Authorization: Bearer <key>` *or*
+  `x-api-key: <key>` (Anthropic SDKs), for both user keys and the shared
+  secret.
+- **Open access:** an unknown/absent key is anonymous (`NULL`); an active
+  user key is still attributed.
+- **Rotate on a revoked user is `409`** (revocation stays one-way); unknown
+  id is `404`; duplicate id on create is `409`.
+- **Export/import includes `key_hash`** (the open question under
+  "Export/import"): `ExportDump.users`, `#[serde(default)]` so older dumps
+  and seed files still import.
+
 ## New table: `users`
 
 ```sql

@@ -12,6 +12,7 @@ use crate::core::model::{Pool, PoolMember, Provider};
 use crate::core::state::{reload_snapshot, AppState};
 use crate::pools::queries as pools_q;
 use crate::providers::queries as prov_q;
+use crate::users::queries::{self as users_q, UserExport};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportDump {
@@ -20,6 +21,11 @@ pub struct ExportDump {
     pub providers: Vec<Provider>,
     pub pools: Vec<Pool>,
     pub members: Vec<PoolMember>,
+    /// `/v1/*` user credentials, carried as `key_hash` (never the raw key)
+    /// so a restore brings back working keys. `#[serde(default)]` so dumps
+    /// and seed files from before users existed still import.
+    #[serde(default)]
+    pub users: Vec<UserExport>,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -36,10 +42,12 @@ async fn export(State(s): State<AppState>) -> Result<Json<ExportDump>, AppError>
     for p in &pools {
         members.extend(pools_q::list_members(&s.db, &p.id).await?);
     }
+    let users = users_q::export_users(&s.db).await?;
     Ok(Json(ExportDump {
         providers,
         pools,
         members,
+        users,
     }))
 }
 
@@ -54,6 +62,7 @@ async fn import(
             "providers": dump.providers.len(),
             "pools": dump.pools.len(),
             "members": dump.members.len(),
+            "users": dump.users.len(),
         }
     })))
 }
@@ -129,6 +138,25 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .await?;
     }
 
+    for u in &dump.users {
+        sqlx::query(
+            "INSERT INTO users (id, name, key_prefix, key_hash, created_at, last_used_at, revoked_at)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, key_prefix=excluded.key_prefix, key_hash=excluded.key_hash,
+               revoked_at=excluded.revoked_at",
+        )
+        .bind(&u.id)
+        .bind(&u.name)
+        .bind(&u.key_prefix)
+        .bind(&u.key_hash)
+        .bind(u.created_at)
+        .bind(u.last_used_at)
+        .bind(u.revoked_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -183,6 +211,7 @@ mod tests {
                 dataset_logging_override: None,
                 reasoning_effort_override: None,
             }],
+            users: vec![],
         };
 
         let result = import_config(&db, &dump).await;

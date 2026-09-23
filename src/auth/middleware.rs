@@ -6,11 +6,11 @@ use axum::Json;
 use serde_json::json;
 
 use crate::admin::auth::session;
-use crate::auth::client_keys::{self, Caller};
+use crate::users::{self, Caller};
 use crate::core::state::AppState;
 
 /// Guards `/v1/*` and records who is calling: the shared secret resolves to
-/// `Caller::admin()`, an issued client key to its own `Caller`. In open-access
+/// `Caller::admin()`, an active user key to that user's `Caller`. In open-access
 /// mode an absent or unrecognised credential is let through as
 /// `Caller::anonymous()` (SDKs often insist on sending *some* key); otherwise
 /// it is a 401. The resolved `Caller` is inserted into the request
@@ -20,13 +20,13 @@ pub async fn require_bearer(State(state): State<AppState>, mut req: Request, nex
         .require_shared_secret
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    let caller = match client_keys::presented_key(req.headers()) {
+    let caller = match users::presented_key(req.headers()) {
         None => None,
         Some(token) if token == state.shared_secret.load().as_str() => Some(Caller::admin()),
-        Some(token) => client_keys::authenticate(&state.db, token)
+        Some(token) => users::queries::authenticate(&state.db, token)
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "client key lookup failed");
+                tracing::warn!(error = %e, "user key lookup failed");
                 None
             }),
     };

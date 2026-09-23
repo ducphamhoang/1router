@@ -5,12 +5,12 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde_json::{json, Value};
 
-use crate::auth::client_keys::Caller;
 use crate::core::model::WireFormat;
 use crate::core::state::AppState;
 use crate::proxy::body::buffer_body;
 use crate::proxy::error_response::wire_error;
 use crate::proxy::flow::handle_proxy;
+use crate::users::Caller;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

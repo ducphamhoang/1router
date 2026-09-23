@@ -10,7 +10,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/stats", get(overall))
         .route("/admin/stats/pools/:id", get(per_pool))
-        .route("/admin/stats/callers", get(per_caller))
+        .route("/admin/stats/users", get(per_user))
 }
 
 async fn overall(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
@@ -27,25 +27,22 @@ async fn overall(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
     })))
 }
 
-/// Request counts grouped by who made them: one row per client key
-/// (`caller_key_id` + its name), plus `"admin"` for the shared secret and a
-/// `null` name for anonymous open-access calls.
-async fn per_caller(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
-    // (caller_key_id, caller_name, total, successes, last created_at)
-    type Row = (Option<String>, Option<String>, i64, i64, Option<String>);
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT caller_key_id, caller_name, count(*), coalesce(sum(success),0), max(created_at)
-         FROM request_log GROUP BY caller_key_id, caller_name ORDER BY count(*) DESC",
+/// Request counts grouped by who made them: a `users.id`, `"admin"` for the
+/// shared secret, or `null` for anonymous open-access calls (and rows
+/// logged before per-user attribution existed).
+async fn per_user(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
+    let rows: Vec<(Option<String>, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT user_id, count(*), coalesce(sum(success),0), max(created_at)
+         FROM request_log GROUP BY user_id ORDER BY count(*) DESC",
     )
     .fetch_all(&s.db)
     .await?;
 
-    let callers: Vec<Value> = rows
+    let users: Vec<Value> = rows
         .into_iter()
-        .map(|(key_id, name, total, ok, last)| {
+        .map(|(user_id, total, ok, last)| {
             json!({
-                "caller_key_id": key_id,
-                "caller_name": name,
+                "user_id": user_id,
                 "total": total,
                 "successes": ok,
                 "failures": total - ok,
@@ -54,7 +51,7 @@ async fn per_caller(State(s): State<AppState>) -> Result<Json<Value>, AppError> 
         })
         .collect();
 
-    Ok(Json(json!({ "callers": callers })))
+    Ok(Json(json!({ "users": users })))
 }
 
 async fn per_pool(

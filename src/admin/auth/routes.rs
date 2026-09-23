@@ -37,14 +37,14 @@ async fn login(
     let ip = addr.ip();
     let now = Instant::now();
 
-    if rate_limit::is_locked_out(&state.login_attempts, ip, now) {
+    let Some(_attempt) = rate_limit::try_begin_attempt(&state.login_attempts, ip, now) else {
         tracing::warn!(%ip, "admin login blocked: rate limited");
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error":{"message":"too many failed attempts, try again later"}})),
         )
             .into_response();
-    }
+    };
 
     let row: Option<(String, String)> =
         match sqlx::query_as("SELECT username, password_hash FROM admin_users WHERE id = 1")
@@ -55,16 +55,16 @@ async fn login(
             Err(e) => return AppError::from(e).into_response(),
         };
 
-    let ok = row
-        .as_ref()
-        .map(|(username, hash)| {
-            username == &req.username && password::verify_password(hash, &req.password)
-        })
-        .unwrap_or(false);
+    // Always one argon2 run, whether or not the username matched.
+    let hash = row
+        .filter(|(username, _)| username == &req.username)
+        .map(|(_, hash)| hash);
+    let ok = password::verify_password_async(hash, req.password).await;
 
     if !ok {
-        rate_limit::record_failure(&state.login_attempts, ip, now);
-        tracing::warn!(username = %req.username, %ip, "admin login failed");
+        rate_limit::record_failure(&state.login_attempts, ip, Instant::now());
+        // No username: it is often a password typed into the wrong field (SEC-12).
+        tracing::warn!(%ip, "admin login failed");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":{"message":"invalid username or password"}})),
@@ -123,7 +123,7 @@ async fn change_password(
     let (_username, hash) =
         row.ok_or_else(|| AppError::Internal("admin_users row missing".into()))?;
 
-    if !password::verify_password(&hash, &req.current_password) {
+    if !password::verify_password_async(Some(hash), req.current_password).await {
         return Err(AppError::Unauthorized);
     }
 

@@ -39,6 +39,11 @@ impl Caller {
     pub fn anonymous() -> Self {
         Caller::default()
     }
+
+    /// Authenticated with the shared secret.
+    pub fn is_admin(&self) -> bool {
+        self.user_id.as_deref() == Some(ADMIN_USER_ID)
+    }
 }
 
 /// The credential a client presented: `Authorization: Bearer <key>` (OpenAI

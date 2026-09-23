@@ -1,5 +1,5 @@
 use crate::core::model::{EffortLevel, Pool, PoolMember, PoolStrategy, Provider, WireFormat};
-use crate::core::state::{ConfigSnapshot, PoolRotationMap};
+use crate::core::state::{ConfigSnapshot, DiscoveredModelsMap, PoolRotationMap};
 
 /// One resolved routing candidate: a provider plus everything the
 /// membership it was reached through says about how to call it.
@@ -165,12 +165,23 @@ fn normalize_sticky_limit(sticky_limit: Option<i64>) -> u32 {
     }
 }
 
+/// Longest `<model>` accepted in `<provider_id>/<model>` direct addressing.
+/// Real model ids are far shorter; the cap keeps a caller-chosen string from
+/// becoming an arbitrarily large runtime-state key (SEC-03).
+pub const MAX_DIRECT_MODEL_LEN: usize = 200;
+
 fn select_direct_provider<'a>(
     snapshot: &'a ConfigSnapshot,
     requested: &str,
     _wire: WireFormat,
 ) -> Option<Selection<'a>> {
     let (provider_id, model) = requested.split_once('/')?;
+    if model.is_empty()
+        || model.len() > MAX_DIRECT_MODEL_LEN
+        || model.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
     let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
     Some(Selection {
         pool: None,
@@ -183,11 +194,35 @@ fn select_direct_provider<'a>(
     })
 }
 
+/// Whether a non-admin caller may use `<provider_id>/<model>` direct
+/// addressing for `model` (SEC-06). Allowed: the provider's own default
+/// model, a model some pool member already routes to on this provider, or a
+/// model the provider's live `/models` listing reported (what
+/// `GET /v1/models` advertises). Anything else would let any caller bill an
+/// arbitrary model to the admin's key, bypassing the pools the admin set up.
+/// The shared-secret admin is not restricted.
+pub fn direct_model_allowed(
+    snapshot: &ConfigSnapshot,
+    discovered: &DiscoveredModelsMap,
+    provider: &Provider,
+    model: &str,
+) -> bool {
+    provider.upstream_model == model
+        || snapshot.pools.iter().any(|p| {
+            p.members
+                .iter()
+                .any(|m| m.provider_id == provider.id && m.model_override.as_deref() == Some(model))
+        })
+        || discovered
+            .get(&provider.id)
+            .is_some_and(|models| models.iter().any(|m| m == model))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::model::{Pool, PoolMember, PoolWithMembers, Provider, ProviderKind, WireFormat};
-    use crate::core::state::{ConfigSnapshot, PoolRotationMap};
+    use crate::core::state::{ConfigSnapshot, DiscoveredModelsMap, PoolRotationMap};
     use chrono::Utc;
     use std::sync::Arc;
 
@@ -291,6 +326,29 @@ mod tests {
         let s = snap();
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
         assert!(sel.pool.is_some());
+    }
+
+    #[test]
+    fn direct_provider_addressing_rejects_oversized_or_malformed_models() {
+        let s = snap();
+        let long = format!("a/{}", "x".repeat(MAX_DIRECT_MODEL_LEN + 1));
+        for bad in [long.as_str(), "a/", "a/has space", "a/ctl\u{1}"] {
+            assert!(select(&s, bad, WireFormat::OpenAi, &empty_rotation()).is_none(), "{bad:?}");
+        }
+        let ok = format!("a/{}", "x".repeat(MAX_DIRECT_MODEL_LEN));
+        assert!(select(&s, &ok, WireFormat::OpenAi, &empty_rotation()).is_some());
+    }
+
+    #[test]
+    fn direct_model_allowlist_covers_default_pool_and_discovered_models() {
+        let s = snap();
+        let discovered: DiscoveredModelsMap = Arc::new(dashmap::DashMap::new());
+        let a = &s.providers[0];
+        assert!(direct_model_allowed(&s, &discovered, a, "m"), "provider default");
+        assert!(!direct_model_allowed(&s, &discovered, a, "expensive"));
+        discovered.insert("a".into(), vec!["expensive".into()]);
+        assert!(direct_model_allowed(&s, &discovered, a, "expensive"), "discovered");
+        assert!(!direct_model_allowed(&s, &discovered, a, "other"));
     }
 
     #[test]

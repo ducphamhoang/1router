@@ -19,6 +19,17 @@ pub fn spawn_session_cleanup(state: AppState) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "admin session cleanup sweep failed"),
             }
+            // Same cadence, unrelated state: in-memory maps that would
+            // otherwise only ever grow (SEC-03, SEC-19).
+            let pruned = crate::core::runtime::prune_idle(
+                &state.runtime,
+                std::time::Instant::now(),
+                crate::core::runtime::RUNTIME_IDLE_RETENTION,
+            );
+            if pruned > 0 {
+                tracing::debug!(pruned, "runtime-state sweep");
+            }
+            crate::admin::auth::rate_limit::prune_stale(&state.login_attempts, std::time::Instant::now());
         }
     });
 }

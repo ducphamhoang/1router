@@ -27,6 +27,9 @@ pub type LoginAttemptMap = Arc<DashMap<IpAddr, AttemptState>>;
 pub struct AttemptState {
     pub failures: u32,
     pub locked_until: Option<Instant>,
+    /// Attempts that passed the gate and are still verifying (SEC-05).
+    pub in_flight: u32,
+    pub last_failure: Option<Instant>,
 }
 
 /// In-memory only, by design: a cache of each provider's last successful

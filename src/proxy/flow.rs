@@ -113,6 +113,30 @@ pub async fn handle_proxy(
     caller: Caller,
     body: Bytes,
 ) -> Response {
+    let is_admin = caller.is_admin();
+    let mut resp = handle_proxy_inner(state, wire, pool_id, caller, body).await;
+    if !is_admin {
+        strip_debug_headers(resp.headers_mut());
+    }
+    resp
+}
+
+/// `x-1router-tried` / `-provider` / `-error` expose provider ids and
+/// internal error text - routing topology is the admin's business, not every
+/// caller's (SEC-11). Only the shared-secret admin gets them.
+fn strip_debug_headers(headers: &mut HeaderMap) {
+    for name in ["x-1router-tried", "x-1router-provider", "x-1router-error"] {
+        headers.remove(name);
+    }
+}
+
+async fn handle_proxy_inner(
+    state: AppState,
+    wire: WireFormat,
+    pool_id: String,
+    caller: Caller,
+    body: Bytes,
+) -> Response {
     let snapshot = state.snapshot.load();
     let selection = match select(&snapshot, &pool_id, wire, &state.pool_rotation) {
         Some(s) => s,
@@ -209,7 +233,8 @@ pub async fn handle_proxy(
                     st.record_retryable(cooldown, Instant::now());
                 }
                 log(&state, &caller, &pool_id, &provider.id, None, latency_ms, false);
-                last_error_body = format!("upstream request error: {e}");
+                tracing::warn!(provider = %provider.id, error = %e, "upstream request error");
+                last_error_body = format!("upstream request error: {}", e.without_url());
                 continue;
             }
         };
@@ -351,7 +376,8 @@ pub async fn handle_proxy(
                                     st.record_retryable(cooldown, Instant::now());
                                 }
                                 log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
-                                last_error_body = format!("retry upstream request error: {e}");
+                                tracing::warn!(provider = %provider.id, error = %e, "retry upstream request error");
+                last_error_body = format!("retry upstream request error: {}", e.without_url());
                                 continue;
                             }
                         };
@@ -546,7 +572,8 @@ pub async fn handle_proxy(
                                 st.record_retryable(cooldown, Instant::now());
                             }
                             log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
-                            last_error_body = format!("retry upstream request error: {e}");
+                            tracing::warn!(provider = %provider.id, error = %e, "retry upstream request error");
+                last_error_body = format!("retry upstream request error: {}", e.without_url());
                             continue;
                         }
                     };

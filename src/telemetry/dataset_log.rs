@@ -54,11 +54,17 @@ async fn write_entry(dir: &Path, entry: &DatasetLogEntry) -> std::io::Result<()>
     line.push('\n');
 
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&file_path)
-        .await?;
+    let is_new = !tokio::fs::try_exists(&file_path).await.unwrap_or(false);
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts.open(&file_path).await?;
+    if is_new {
+        // Full prompts live here: owner-only (SEC-13). Windows needs an ACL.
+        let p = file_path.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::core::fsperm::restrict_to_owner(&p)).await;
+    }
     file.write_all(line.as_bytes()).await?;
     Ok(())
 }

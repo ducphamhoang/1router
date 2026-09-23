@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
         let db = init_pool(&sqlite_path).await?;
+    router::core::fsperm::restrict_sqlite_files(&sqlite_path);
         // Resolve and persist the auth-mode default before the manual menu
         // creates the sidecar secret; otherwise a fresh setup would be
         // misclassified as an upgrade and start in required mode.
@@ -91,11 +92,12 @@ async fn main() -> Result<()> {
             // Headless first boot: auto-generate, persist, and log it ONCE.
             let s = config::generate_secret();
             config::persist_secret(&sqlite_path, &s)?;
+            // The secret itself stays out of the log (SEC-12): stdout often
+            // ends up in container logs / aggregators. Read it from the file.
             tracing::info!(
-                secret = %s,
                 path = ?config::secret_file_path(&sqlite_path),
-                "generated a new admin shared secret - SAVE THIS NOW, it will not be logged \
-                 again. Set ROUTER_SHARED_SECRET to control it explicitly."
+                "generated a new admin shared secret and saved it to this owner-only file - \
+                 read it from there. Set ROUTER_SHARED_SECRET to control it explicitly."
             );
             secret_origin = Some(SecretOrigin::SidecarFile);
             Some(s)

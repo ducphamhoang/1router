@@ -159,6 +159,10 @@ async fn patch_auth_mode(
     }))
 }
 
+/// SEC-14: the shared secret is the admin credential; the generated one is
+/// 64 hex chars. Env-provided secrets aren't checked (operator's call).
+pub const MIN_SHARED_SECRET_LEN: usize = 32;
+
 async fn patch_shared_secret(
     State(s): State<AppState>,
     Json(body): Json<SharedSecretPatch>,
@@ -171,10 +175,10 @@ async fn patch_shared_secret(
     }
 
     let new_secret = body.shared_secret.trim().to_string();
-    if new_secret.is_empty() {
-        return Err(AppError::BadRequest(
-            "shared_secret must not be empty".to_string(),
-        ));
+    if new_secret.chars().count() < MIN_SHARED_SECRET_LEN {
+        return Err(AppError::BadRequest(format!(
+            "shared_secret must be at least {MIN_SHARED_SECRET_LEN} characters              (it is the admin credential)"
+        )));
     }
 
     config::persist_secret(&s.config.sqlite_path, &new_secret)

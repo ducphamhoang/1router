@@ -195,6 +195,9 @@ pub fn persist_secret(sqlite_path: &str, secret: &str) -> anyhow::Result<()> {
         std::fs::write(&path, secret)
             .map_err(|e| anyhow::anyhow!("failed to write secret file {path:?}: {e}"))?;
     }
+    // mode() above only applies when the file is created; a rotation onto an
+    // existing, looser file must tighten it too (and Windows needs an ACL).
+    crate::core::fsperm::restrict_to_owner(&path);
     Ok(())
 }
 

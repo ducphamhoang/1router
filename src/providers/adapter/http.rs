@@ -118,12 +118,9 @@ impl ProviderAdapter for HttpAdapter {
         let status = upstream.status();
         let mut resp_headers = HeaderMap::new();
         for (k, v) in upstream.headers().iter() {
-            if k.as_str().eq_ignore_ascii_case("transfer-encoding")
-                || k.as_str().eq_ignore_ascii_case("content-length")
-            {
-                continue;
+            if relay_upstream_header(k.as_str()) {
+                resp_headers.append(k.clone(), v.clone());
             }
-            resp_headers.insert(k.clone(), v.clone());
         }
 
         if !self.translates() {
@@ -184,8 +181,30 @@ impl ProviderAdapter for HttpAdapter {
     }
 }
 
+/// Upstream response headers worth passing to the caller (SEC-07). An
+/// allowlist, not a denylist: an upstream can send `set-cookie`, account
+/// identifiers (`openai-organization`, `anthropic-organization-id`, ...) or
+/// hop-by-hop headers, none of which belong to the caller. Header names
+/// arrive lowercased from `http`.
+pub(crate) fn relay_upstream_header(name: &str) -> bool {
+    matches!(
+        name,
+        "content-type" | "retry-after" | "x-request-id" | "request-id" | "openai-processing-ms"
+    ) || name.starts_with("x-ratelimit-")
+        || name.starts_with("anthropic-ratelimit-")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_allowlisted_upstream_headers_are_relayed() {
+        for keep in ["content-type", "retry-after", "x-request-id", "x-ratelimit-remaining-tokens", "anthropic-ratelimit-requests-limit"] {
+            assert!(relay_upstream_header(keep), "{keep}");
+        }
+        for drop in ["set-cookie", "openai-organization", "openai-project", "anthropic-organization-id", "connection", "keep-alive", "transfer-encoding", "content-length", "cf-ray"] {
+            assert!(!relay_upstream_header(drop), "{drop}");
+        }
+    }
     use super::*;
     use crate::core::model::{Provider, ProviderKind, WireFormat};
     use crate::providers::adapter::Credentials;

@@ -1078,7 +1078,9 @@ pub fn resolve_or_prompt_secret(sqlite_path: &str) -> anyhow::Result<String> {
                  Written to {path:?} (mode 0600)."
             );
             println!(
-                "  Use it as `Authorization: Bearer {secret}` on /v1/* and /admin/*. \
+                "  This is the ADMIN credential (`Authorization: Bearer {secret}` on \
+                 /admin/*; it also works on /v1/* for your own testing). Don't give it to \
+                 clients: issue each one its own key from the admin UI's Users page. \
                  Change it anytime via `PATCH /admin/settings/shared-secret`, the admin \
                  UI Settings page, or by setting ROUTER_SHARED_SECRET before first boot."
             );

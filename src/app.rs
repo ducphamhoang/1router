@@ -35,7 +35,9 @@ pub fn build_router(state: AppState) -> Router {
     #[cfg(feature = "ui")]
     let router = router.merge(crate::ui_assets::routes());
 
-    router.with_state(state)
+    router
+        .with_state(state)
+        .layer(axum::middleware::from_fn(crate::security_headers::security_headers))
 }
 
 #[cfg(test)]

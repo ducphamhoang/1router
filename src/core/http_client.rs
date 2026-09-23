@@ -17,6 +17,12 @@ pub fn build_client(cfg: &Config) -> reqwest::Client {
         .read_timeout(cfg.idle_timeout)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .tcp_nodelay(true)
+        // Never follow redirects (SEC-10): reqwest strips only
+        // Authorization/Cookie on a cross-host hop, so a 3xx from an upstream
+        // would hand `x-api-key` / `ChatGPT-Account-ID` to another host, or
+        // relay an internal address's body to the caller. A 3xx is passed
+        // back as an ordinary (retryable) upstream response instead.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("failed to build reqwest client")
 }

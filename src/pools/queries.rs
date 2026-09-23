@@ -78,7 +78,7 @@ pub async fn delete_pool(db: &SqlitePool, id: &str) -> Result<(), AppError> {
 
 pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMember>, AppError> {
     Ok(sqlx::query_as::<_, PoolMember>(
-        "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override FROM pool_members
+        "SELECT pool_id, provider_id, priority, model_override, dataset_logging_override, reasoning_effort_override FROM pool_members
          WHERE pool_id = ? ORDER BY priority ASC, provider_id ASC, COALESCE(model_override, '') ASC",
     )
     .bind(pool_id)
@@ -97,16 +97,42 @@ pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMemb
 /// here rather than trusting every caller to have done so already.
 pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppError> {
     let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
+    // A member's reasoning_effort_override is only meaningful if the
+    // provider + effective model can actually carry one. Unlike
+    // `dataset_logging_override` (a bool, with no invalid value possible)
+    // this needs a provider lookup to check against - only done when an
+    // override is actually present, so the common path stays one query.
+    // Best-effort UX, exactly like the provider-side check: config import
+    // bypasses this, so the adapters re-check at request-build time.
+    if let Some(level) = m.reasoning_effort_override {
+        let provider = crate::providers::queries::get_provider(db, &m.provider_id).await?;
+        let effective = model_override.unwrap_or(&provider.upstream_model);
+        if !crate::core::reasoning::capability_for(
+            provider.kind,
+            provider.wire_format,
+            effective,
+        )
+        .supports()
+        {
+            return Err(AppError::BadRequest(format!(
+                "provider '{}' ({:?} / {:?}) calling model '{effective}' does not accept a \
+                 reasoning effort - remove reasoning_effort_override ({level:?})",
+                provider.id, provider.kind, provider.wire_format
+            )));
+        }
+    }
     let res = sqlx::query(
-        "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override, reasoning_effort_override) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET
-           priority = excluded.priority, dataset_logging_override = excluded.dataset_logging_override",
+           priority = excluded.priority, dataset_logging_override = excluded.dataset_logging_override,
+           reasoning_effort_override = excluded.reasoning_effort_override",
     )
     .bind(&m.pool_id)
     .bind(&m.provider_id)
     .bind(m.priority)
     .bind(model_override)
     .bind(m.dataset_logging_override)
+    .bind(m.reasoning_effort_override)
     .execute(db)
     .await;
 
@@ -169,6 +195,10 @@ mod tests {
     use chrono::Utc;
 
     async fn seed_provider(db: &sqlx::SqlitePool, id: &str) {
+        seed_provider_with_model(db, id, "m").await
+    }
+
+    async fn seed_provider_with_model(db: &sqlx::SqlitePool, id: &str, model: &str) {
         sqlx::query(
             "INSERT INTO providers
                 (id, name, wire_format, kind, base_url, api_key, upstream_model, created_at, updated_at)
@@ -180,12 +210,112 @@ mod tests {
         .bind("passthrough")
         .bind("u")
         .bind("k")
-        .bind("m")
+        .bind(model)
         .bind(Utc::now())
         .bind(Utc::now())
         .execute(db)
         .await
         .unwrap();
+    }
+
+    async fn seed_pool(db: &sqlx::SqlitePool, id: &str) {
+        insert_pool(
+            db,
+            &Pool {
+                id: id.into(),
+                wire_format: WireFormat::OpenAi,
+                created_at: Utc::now(),
+                strategy: Default::default(),
+                sticky_limit: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upsert_member_round_trips_the_reasoning_effort_override() {
+        use crate::core::model::EffortLevel;
+        let db = init_pool(":memory:").await.unwrap();
+        seed_provider_with_model(&db, "p1", "gpt-5.1").await;
+        seed_pool(&db, "gpt-4o").await;
+
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 1,
+                model_override: None,
+                dataset_logging_override: None,
+                reasoning_effort_override: Some(EffortLevel::High),
+            },
+        )
+        .await
+        .unwrap();
+        let members = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(members[0].reasoning_effort_override, Some(EffortLevel::High));
+
+        // Same identity - upserting again updates it in place, including
+        // clearing it back to None.
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 1,
+                model_override: None,
+                dataset_logging_override: None,
+                reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let members = list_members(&db, "gpt-4o").await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].reasoning_effort_override, None);
+    }
+
+    #[tokio::test]
+    async fn upsert_member_rejects_a_reasoning_override_the_effective_model_cannot_carry() {
+        use crate::core::model::EffortLevel;
+        let db = init_pool(":memory:").await.unwrap();
+        seed_provider(&db, "p1").await; // upstream_model "m" -> Unsupported
+        seed_pool(&db, "gpt-4o").await;
+
+        assert!(matches!(
+            upsert_member(
+                &db,
+                &PoolMember {
+                    pool_id: "gpt-4o".into(),
+                    provider_id: "p1".into(),
+                    priority: 1,
+                    model_override: None,
+                    dataset_logging_override: None,
+                    reasoning_effort_override: Some(EffortLevel::High),
+                },
+            )
+            .await,
+            Err(crate::core::error::AppError::BadRequest(_))
+        ));
+        assert!(list_members(&db, "gpt-4o").await.unwrap().is_empty());
+
+        // The member's own model_override - not the provider's
+        // upstream_model - is what gets validated when it's set.
+        upsert_member(
+            &db,
+            &PoolMember {
+                pool_id: "gpt-4o".into(),
+                provider_id: "p1".into(),
+                priority: 1,
+                model_override: Some("gpt-5.1".into()),
+                dataset_logging_override: None,
+                reasoning_effort_override: Some(EffortLevel::High),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(list_members(&db, "gpt-4o").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -213,6 +343,7 @@ mod tests {
                 priority: 1,
                 model_override: None,
                 dataset_logging_override: Some(true),
+                reasoning_effort_override: None,
             },
         )
         .await
@@ -231,6 +362,7 @@ mod tests {
                 priority: 1,
                 model_override: None,
                 dataset_logging_override: Some(false),
+                reasoning_effort_override: None,
             },
         )
         .await
@@ -267,6 +399,7 @@ mod tests {
                 priority: 5,
                 model_override: None,
                 dataset_logging_override: None,
+                reasoning_effort_override: None,
             },
         )
         .await
@@ -286,6 +419,7 @@ mod tests {
                 priority: 9,
                 model_override: None,
                 dataset_logging_override: None,
+                reasoning_effort_override: None,
             },
         )
         .await
@@ -305,6 +439,7 @@ mod tests {
                 priority: 1,
                 model_override: Some("gpt-5.6-sol".into()),
                 dataset_logging_override: None,
+                reasoning_effort_override: None,
             },
         )
         .await

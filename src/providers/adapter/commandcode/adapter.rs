@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{Provider, WireFormat};
+use crate::core::reasoning;
 use crate::providers::adapter::codex::claude_bridge;
 use crate::providers::adapter::commandcode::transform;
 use crate::providers::adapter::{Credentials, ProviderAdapter};
@@ -149,6 +150,10 @@ impl ProviderAdapter for CommandCodeAdapter {
     ) -> Result<reqwest::Request, AppError> {
         let raw_json: Value = serde_json::from_slice(client_body)
             .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // The client's untranslated body, kept for the
+        // did-the-client-already-choose-an-effort check below (translation
+        // can drop the fields that check looks for).
+        let original_json = raw_json.clone();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let cwd_string = cwd.to_string_lossy().to_string();
         let access = creds.access_token.as_ref().ok_or_else(|| {
@@ -209,6 +214,26 @@ impl ProviderAdapter for CommandCodeAdapter {
                 WireFormat::OpenAi => transform::openai_to_commandcode_messages(&raw_json),
             };
             body["model"] = Value::String(self.provider.upstream_model.clone());
+            // Reasoning-effort default injection, Claude-family branch ONLY:
+            // this is the one Command Code request shape that speaks
+            // Anthropic Messages, so it's the one place a `thinking` object
+            // belongs. The `/alpha/generate` envelope and the OpenAI-shaped
+            // `/provider/v1/chat/completions` branches deliberately inject
+            // nothing - note `capability_for` keys off the model name for
+            // this provider kind, so a Claude model on the Go-plan generate
+            // transport would report `AnthropicThinkingBudget` too; the
+            // guard is that injection is only ever called from here.
+            if let Some((reasoning::ReasoningCapability::AnthropicThinkingBudget, level)) =
+                reasoning::effort_to_inject(
+                    self.provider.kind,
+                    self.provider.wire_format,
+                    &self.provider.upstream_model,
+                    self.provider.default_reasoning_effort,
+                    &original_json,
+                )
+            {
+                reasoning::inject_anthropic_thinking(&mut body, level);
+            }
             set_shape(UpstreamShape::AnthropicMessages);
             return command_code_headers(
                 self.http
@@ -418,7 +443,7 @@ impl CommandCodeAdapter {
 mod tests {
     use super::*;
     use crate::core::error::AppError;
-    use crate::core::model::{Provider, ProviderKind, WireFormat};
+    use crate::core::model::{EffortLevel, Provider, ProviderKind, WireFormat};
     use crate::providers::adapter::{Credentials, ProviderAdapter};
     use bytes::Bytes;
     use chrono::Utc;
@@ -441,6 +466,7 @@ mod tests {
             api_key: None,
             upstream_model: upstream_model.into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -674,6 +700,108 @@ mod tests {
         assert_eq!(sent["messages"].as_array().unwrap().len(), 1);
         assert_eq!(sent["messages"][0]["role"], "user");
         assert_eq!(sent["messages"][0]["content"].as_array().unwrap().len(), 2);
+    }
+
+    // ---- reasoning-effort default injection -------------------------------
+
+    fn prov_with_effort(id: &str, model: &str, effort: EffortLevel) -> Provider {
+        let mut p = prov_with_model(id, model);
+        p.default_reasoning_effort = Some(effort);
+        p
+    }
+
+    async fn sent_body(a: &CommandCodeAdapter, body: serde_json::Value) -> serde_json::Value {
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let req = a.build_request(&bytes, &creds()).await.unwrap();
+        serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn injects_thinking_on_the_claude_family_messages_branch() {
+        let a = CommandCodeAdapter::new(
+            prov_with_effort("cc-think", "claude-sonnet-5", EffortLevel::High),
+            reqwest::Client::new(),
+            WireFormat::Anthropic,
+        );
+        let sent = sent_body(
+            &a,
+            serde_json::json!({
+                "model": "pool", "max_tokens": 64, "temperature": 0.7, "top_k": 5,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        let budget =
+            crate::core::reasoning::ReasoningCapability::anthropic_budget_tokens(EffortLevel::High)
+                as i64;
+        assert_eq!(sent["thinking"]["type"], "enabled");
+        assert_eq!(sent["thinking"]["budget_tokens"], budget);
+        // normalization
+        assert_eq!(sent["max_tokens"].as_i64().unwrap(), budget + 1024);
+        assert!(sent.get("temperature").is_none());
+        assert!(sent.get("top_k").is_none());
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_thinking_on_the_openai_chat_branch() {
+        let a = CommandCodeAdapter::new(
+            prov_with_effort("cc-no-think-chat", "cc-model", EffortLevel::High),
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert!(sent.get("thinking").is_none());
+        assert!(sent.get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_thinking_on_the_generate_envelope_branch() {
+        // Even for a Claude-family model: the Go-plan `/alpha/generate`
+        // envelope is its own shape and takes no `thinking` object.
+        remember_transport("cc-no-think-generate", Transport::Generate);
+        let a = CommandCodeAdapter::new(
+            prov_with_effort("cc-no-think-generate", "claude-sonnet-5", EffortLevel::High),
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert!(sent.get("thinking").is_none());
+        assert!(sent["params"].get("thinking").is_none());
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_thinking_when_the_client_already_asked_for_one() {
+        let a = CommandCodeAdapter::new(
+            prov_with_effort("cc-client-think", "claude-sonnet-5", EffortLevel::High),
+            reqwest::Client::new(),
+            WireFormat::Anthropic,
+        );
+        let sent = sent_body(
+            &a,
+            serde_json::json!({
+                "model": "pool", "max_tokens": 4096,
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(sent["thinking"]["budget_tokens"], 2048);
+        assert_eq!(sent["max_tokens"], 4096, "no normalization when we didn't inject");
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_thinking_without_a_configured_effort() {
+        let a = CommandCodeAdapter::new(
+            prov_with_model("cc-no-effort", "claude-sonnet-5"),
+            reqwest::Client::new(),
+            WireFormat::Anthropic,
+        );
+        let sent = sent_body(
+            &a,
+            serde_json::json!({"model": "pool", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert!(sent.get("thinking").is_none());
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{Provider, WireFormat};
+use crate::core::reasoning;
 use crate::providers::adapter::codex::claude_bridge;
 use crate::providers::adapter::{Credentials, ProviderAdapter};
 use crate::proxy::backoff;
@@ -45,6 +46,10 @@ impl ProviderAdapter for HttpAdapter {
     ) -> Result<reqwest::Request, AppError> {
         let client_json: serde_json::Value = serde_json::from_slice(client_body)
             .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // Keep the original, pre-translation body around: the
+        // client-already-chose-an-effort check has to run against it (see
+        // below), and `claude_bridge` translation consumes/rewrites fields.
+        let client_json_for_override_check = client_json.clone();
         let mut json = if self.translates() {
             match self.client_wire {
                 WireFormat::Anthropic => claude_bridge::claude_to_openai_request(&client_json),
@@ -58,6 +63,32 @@ impl ProviderAdapter for HttpAdapter {
                 "model".into(),
                 serde_json::Value::String(self.provider.upstream_model.clone()),
             );
+        }
+        // Reasoning-effort default injection. Note `client_json` (the
+        // pre-translation body) is what gets checked for an explicit client
+        // choice - translation can drop the very fields that check needs -
+        // while `json` (the post-translation, upstream-shaped body) is what
+        // gets mutated. `effort_to_inject` also re-runs `capability_for`
+        // here, which is the real guarantee: a stale value that reached this
+        // point through config import / the onboarding wizard / direct
+        // `<provider_id>/<model>` addressing is skipped silently rather than
+        // turning a working request into a 400.
+        if let Some((capability, level)) = reasoning::effort_to_inject(
+            self.provider.kind,
+            self.provider.wire_format,
+            &self.provider.upstream_model,
+            self.provider.default_reasoning_effort,
+            &client_json_for_override_check,
+        ) {
+            match capability {
+                reasoning::ReasoningCapability::OpenAiEffort => {
+                    reasoning::inject_openai_effort(&mut json, level)
+                }
+                reasoning::ReasoningCapability::AnthropicThinkingBudget => {
+                    reasoning::inject_anthropic_thinking(&mut json, level)
+                }
+                reasoning::ReasoningCapability::Unsupported => {}
+            }
         }
         let url = self
             .provider
@@ -171,6 +202,7 @@ mod tests {
             api_key: Some("sk-xyz".into()),
             upstream_model: "real-model".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -306,6 +338,154 @@ mod tests {
         let out: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(out["type"], "message");
         assert_eq!(out["content"][0]["text"], "hello");
+    }
+
+    // ---- reasoning-effort default injection -------------------------------
+
+    use crate::core::model::EffortLevel;
+
+    fn gpt5_provider(effort: Option<EffortLevel>) -> Provider {
+        let mut p = prov();
+        p.upstream_model = "gpt-5.1".into();
+        p.default_reasoning_effort = effort;
+        p
+    }
+
+    fn claude_provider(effort: Option<EffortLevel>) -> Provider {
+        let mut p = prov();
+        p.wire_format = WireFormat::Anthropic;
+        p.base_url = Some("https://api.anthropic.com/v1/messages".into());
+        p.upstream_model = "claude-sonnet-4-5".into();
+        p.default_reasoning_effort = effort;
+        p
+    }
+
+    async fn sent_body(a: &HttpAdapter, body: serde_json::Value) -> serde_json::Value {
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let req = a.build_request(&bytes, &creds()).await.unwrap();
+        serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn injects_reasoning_effort_for_an_openai_wire_gpt5_provider() {
+        let a = HttpAdapter::new(
+            gpt5_provider(Some(EffortLevel::High)),
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert_eq!(sent["reasoning_effort"], "high");
+        assert!(sent.get("thinking").is_none());
+    }
+
+    #[tokio::test]
+    async fn injects_thinking_for_an_anthropic_wire_claude_provider() {
+        let a = HttpAdapter::new(
+            claude_provider(Some(EffortLevel::Medium)),
+            reqwest::Client::new(),
+            WireFormat::Anthropic,
+        );
+        let sent = sent_body(
+            &a,
+            serde_json::json!({"model": "pool", "max_tokens": 512, "temperature": 0.7, "messages": []}),
+        )
+        .await;
+        let budget = crate::core::reasoning::ReasoningCapability::anthropic_budget_tokens(
+            EffortLevel::Medium,
+        ) as i64;
+        assert_eq!(sent["thinking"]["type"], "enabled");
+        assert_eq!(sent["thinking"]["budget_tokens"], budget);
+        // normalization: max_tokens raised above budget, sampling params stripped
+        assert_eq!(sent["max_tokens"].as_i64().unwrap(), budget + 1024);
+        assert!(sent.get("temperature").is_none());
+        assert!(sent.get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn normalizes_max_tokens_on_the_translated_openai_to_claude_path_too() {
+        // claude_bridge defaults max_tokens to 4096 and copies temperature
+        // straight through - both would make an injected `thinking` invalid.
+        let a = HttpAdapter::new(
+            claude_provider(Some(EffortLevel::High)),
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(
+            &a,
+            serde_json::json!({
+                "model": "pool", "temperature": 0.5,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        let budget = crate::core::reasoning::ReasoningCapability::anthropic_budget_tokens(
+            EffortLevel::High,
+        ) as i64;
+        assert_eq!(sent["thinking"]["budget_tokens"], budget);
+        assert_eq!(sent["max_tokens"].as_i64().unwrap(), budget + 1024);
+        assert!(sent.get("temperature").is_none());
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_when_the_client_already_chose_an_effort() {
+        for client_field in [
+            serde_json::json!({"reasoning_effort": "low"}),
+            serde_json::json!({"reasoning": {"effort": "low"}}),
+            serde_json::json!({"thinking": {"type": "disabled"}}),
+        ] {
+            let a = HttpAdapter::new(
+                gpt5_provider(Some(EffortLevel::High)),
+                reqwest::Client::new(),
+                WireFormat::OpenAi,
+            );
+            let mut body = serde_json::json!({"model": "pool", "messages": []});
+            for (k, v) in client_field.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let sent = sent_body(&a, body).await;
+            assert_ne!(
+                sent["reasoning_effort"], "high",
+                "provider default must not override the client's own choice ({client_field})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn does_not_inject_when_no_default_is_configured() {
+        let a = HttpAdapter::new(
+            gpt5_provider(None),
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert!(sent.get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn request_time_defense_silently_skips_an_unsupported_stale_config() {
+        // A stale/imported `default_reasoning_effort` on a model that can't
+        // carry one must degrade to "inject nothing" - never to an error,
+        // and never to an invalid upstream body.
+        let mut p = prov(); // openai wire, upstream_model "real-model"
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        let a = HttpAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert!(sent.get("reasoning_effort").is_none());
+        assert!(sent.get("thinking").is_none());
+
+        // ...and specifically: a Claude-named model behind an OpenAI-wire
+        // mirror never gets a `thinking` object in an OpenAI-shaped body.
+        let mut claude_named_openai_mirror = prov();
+        claude_named_openai_mirror.upstream_model = "claude-sonnet-4-5".into();
+        claude_named_openai_mirror.default_reasoning_effort = Some(EffortLevel::High);
+        let a = HttpAdapter::new(
+            claude_named_openai_mirror,
+            reqwest::Client::new(),
+            WireFormat::OpenAi,
+        );
+        let sent = sent_body(&a, serde_json::json!({"model": "pool", "messages": []})).await;
+        assert!(sent.get("thinking").is_none());
+        assert!(sent.get("reasoning_effort").is_none());
     }
 
     #[tokio::test]

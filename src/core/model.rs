@@ -18,6 +18,8 @@ pub enum ProviderKind {
     OauthCommandCode,
 }
 
+pub use crate::core::reasoning::EffortLevel;
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Provider {
     pub id: String,
@@ -37,6 +39,24 @@ pub struct Provider {
     /// docs/superpowers/specs/2026-08-27-dataset-logging-design.md.
     #[serde(default)]
     pub dataset_logging: bool,
+    /// Reasoning/thinking effort to inject into outgoing requests for this
+    /// provider when the client didn't ask for one itself. `None` means "no
+    /// default" - the adapter leaves the request's reasoning parameters
+    /// exactly as the client sent them (except Codex, whose pre-existing
+    /// hardcoded `"medium"` fallback is preserved).
+    ///
+    /// Only meaningful when
+    /// `core::reasoning::capability_for(kind, wire_format, upstream_model)`
+    /// isn't `Unsupported`; every adapter re-checks that at request-build
+    /// time and silently skips injection otherwise, so a stale value left
+    /// behind by an `upstream_model` edit through a path that bypasses
+    /// validation (config import, the onboarding wizard, direct
+    /// `<provider_id>/<model>` addressing) can never break a request.
+    ///
+    /// `#[serde(default)]` for the same reason as `dataset_logging` - see
+    /// its doc comment.
+    #[serde(default)]
+    pub default_reasoning_effort: Option<EffortLevel>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -89,6 +109,13 @@ pub struct PoolMember {
     /// comment.
     #[serde(default)]
     pub dataset_logging_override: Option<bool>,
+    /// Overrides `Provider.default_reasoning_effort` for requests routed
+    /// through this specific pool membership. `None` inherits the provider's
+    /// own setting (`pools::select::resolve_reasoning_effort`).
+    /// `#[serde(default)]` for the same reason as
+    /// `dataset_logging_override`.
+    #[serde(default)]
+    pub reasoning_effort_override: Option<EffortLevel>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +254,7 @@ mod tests {
             api_key: Some("k".into()),
             upstream_model: "m".into(),
             dataset_logging: true,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -238,7 +266,70 @@ mod tests {
             priority: 1,
             model_override: None,
             dataset_logging_override: Some(false),
+            reasoning_effort_override: None,
         };
         assert_eq!(m.dataset_logging_override, Some(false));
+    }
+
+    #[test]
+    fn provider_and_pool_member_carry_reasoning_effort_fields() {
+        let p = Provider {
+            id: "p1".into(),
+            name: "P1".into(),
+            wire_format: WireFormat::OpenAi,
+            kind: ProviderKind::Passthrough,
+            base_url: Some("u".into()),
+            api_key: Some("k".into()),
+            upstream_model: "gpt-5".into(),
+            dataset_logging: false,
+            default_reasoning_effort: Some(EffortLevel::High),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(p.default_reasoning_effort, Some(EffortLevel::High));
+
+        let m = PoolMember {
+            pool_id: "pool1".into(),
+            provider_id: "p1".into(),
+            priority: 1,
+            model_override: None,
+            dataset_logging_override: None,
+            reasoning_effort_override: Some(EffortLevel::Low),
+        };
+        assert_eq!(m.reasoning_effort_override, Some(EffortLevel::Low));
+    }
+
+    #[test]
+    fn provider_and_pool_member_deserialize_without_the_reasoning_fields() {
+        // Config export/import and seed files predating this feature have
+        // no such key - `#[serde(default)]` must tolerate it.
+        let p: Provider = serde_json::from_value(serde_json::json!({
+            "id": "p1", "name": "P1", "wire_format": "openai", "kind": "passthrough",
+            "base_url": null, "api_key": null, "upstream_model": "m",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(p.default_reasoning_effort, None);
+        assert!(!p.dataset_logging);
+
+        let m: PoolMember = serde_json::from_value(serde_json::json!({
+            "pool_id": "pool1", "provider_id": "p1", "priority": 1, "model_override": null
+        }))
+        .unwrap();
+        assert_eq!(m.reasoning_effort_override, None);
+    }
+
+    #[test]
+    fn effort_level_round_trips_through_provider_json() {
+        let json = serde_json::json!({
+            "id": "p1", "name": "P1", "wire_format": "openai", "kind": "passthrough",
+            "base_url": null, "api_key": null, "upstream_model": "gpt-5",
+            "default_reasoning_effort": "medium",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        });
+        let p: Provider = serde_json::from_value(json).unwrap();
+        assert_eq!(p.default_reasoning_effort, Some(EffortLevel::Medium));
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["default_reasoning_effort"], "medium");
     }
 }

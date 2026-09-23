@@ -1,6 +1,9 @@
 use bytes::Bytes;
 use serde_json::{json, Value};
 
+use crate::core::model::EffortLevel;
+use crate::core::reasoning::ReasoningCapability;
+
 // Fields Codex's backend rejects. This is a denylist rather than the spec's
 // ideal "strict allowlist" (keep-known-fields), which means any future
 // OpenAI-SDK field not covered here leaks through by default - but a true
@@ -26,6 +29,11 @@ const DISALLOWED: &[&str] = &[
     "stream_options",
     "parallel_tool_calls",
     "service_tier",
+    // Chat Completions' top-level reasoning knob. The Responses API takes
+    // the nested `reasoning.effort` shape instead, so forwarding this
+    // verbatim is a 400 - its value is read off the *original* body below
+    // and folded into `reasoning.effort` before this strips it.
+    "reasoning_effort",
 ];
 
 fn message_text(message: &Value) -> String {
@@ -71,7 +79,34 @@ fn flatten_function_shape(value: &mut Value) {
     }
 }
 
-pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
+/// `default_effort` is the gateway-configured reasoning effort already
+/// resolved for this request (pool-member override, else provider default),
+/// or `None` for "nothing configured". It is only ever a *default*: an
+/// explicit client choice - top-level `reasoning_effort` (what a real
+/// OpenAI SDK client sends) or nested `reasoning.effort` (the Responses
+/// API's own shape) - always wins, and with neither present the historical
+/// hardcoded `"medium"` remains the final fallback.
+pub fn transform_request(
+    client_json: &Value,
+    session_id: &str,
+    default_effort: Option<EffortLevel>,
+) -> Value {
+    // Read the client's own choice off the ORIGINAL body, before the
+    // denylist below strips the top-level form. Both forms are checked:
+    // only the nested one used to be, so a plain OpenAI-SDK client asking
+    // for "high" silently got "medium" (and had its `reasoning_effort`
+    // forwarded into a request shape that rejects it).
+    let client_effort = client_json
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            client_json
+                .get("reasoning")
+                .and_then(|r| r.get("effort"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+
     let mut out = client_json.clone();
     let obj = match out.as_object_mut() {
         Some(o) => o,
@@ -184,10 +219,13 @@ pub fn transform_request(client_json: &Value, session_id: &str) -> Value {
     obj.insert("stream".into(), json!(true));
     obj.insert("prompt_cache_key".into(), json!(session_id));
 
+    let effort = client_effort.unwrap_or_else(|| {
+        default_effort
+            .map(|l| ReasoningCapability::openai_effort_str(l).to_string())
+            .unwrap_or_else(|| "medium".to_string())
+    });
     let reasoning = obj.entry("reasoning").or_insert_with(|| json!({}));
-    if reasoning.get("effort").is_none() {
-        reasoning["effort"] = json!("medium");
-    }
+    reasoning["effort"] = json!(effort);
     obj.insert("include".into(), json!(["reasoning.encrypted_content"]));
 
     out
@@ -464,6 +502,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::EffortLevel;
     use serde_json::json;
 
     #[test]
@@ -474,7 +513,7 @@ mod tests {
             "temperature": 0.7, "top_p": 0.9, "max_tokens": 100,
             "max_output_tokens": 50, "user": "u1"
         });
-        let out = transform_request(&input, "sess-1");
+        let out = transform_request(&input, "sess-1", None);
         assert!(out.get("temperature").is_none());
         assert!(out.get("top_p").is_none());
         assert!(out.get("max_tokens").is_none());
@@ -494,7 +533,7 @@ mod tests {
             "stream_options": {"include_usage": true}, "parallel_tool_calls": false,
             "service_tier": "default"
         });
-        let out = transform_request(&input, "sess-2");
+        let out = transform_request(&input, "sess-2", None);
         for field in [
             "n", "presence_penalty", "frequency_penalty", "logprobs", "top_logprobs",
             "logit_bias", "seed", "stop", "response_format", "stream_options",
@@ -507,7 +546,7 @@ mod tests {
     #[test]
     fn system_role_becomes_developer() {
         let input = json!({ "messages": [{"role": "system", "content": "x"}] });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert!(out.get("messages").is_none());
         assert_eq!(out["input"][0]["role"], "developer");
     }
@@ -520,7 +559,7 @@ mod tests {
                 {"role": "assistant", "content": "hello there"}
             ]
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert!(out.get("messages").is_none(), "messages should be removed");
         let items = out["input"].as_array().unwrap();
         assert_eq!(items[0]["role"], "user");
@@ -543,7 +582,7 @@ mod tests {
                 {"role": "tool", "tool_call_id": "call_1", "content": "hello"}
             ]
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         let items = out["input"].as_array().unwrap();
         // user message
         assert_eq!(items[0]["type"], "message");
@@ -572,7 +611,7 @@ mod tests {
                 ]}
             ]
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         let items = out["input"].as_array().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["type"], "message");
@@ -594,7 +633,7 @@ mod tests {
                 {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
             ]
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         let items = out["input"].as_array().unwrap();
         assert_eq!(items[0]["call_id"], "call_1");
         assert_eq!(items[1]["call_id"], "call_1");
@@ -603,7 +642,7 @@ mod tests {
     #[test]
     fn existing_input_field_is_not_overwritten_by_messages_conversion() {
         let input = json!({ "messages": [], "input": [{"id": "msg_abc", "type": "message"}] });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert!(out.get("messages").is_none());
         assert!(out["input"][0].get("id").is_none());
     }
@@ -611,11 +650,71 @@ mod tests {
     #[test]
     fn forces_store_false_stream_true_and_cache_key() {
         let input = json!({ "messages": [], "stream": false, "store": true });
-        let out = transform_request(&input, "sess-9");
+        let out = transform_request(&input, "sess-9", None);
         assert_eq!(out["store"], false);
         assert_eq!(out["stream"], true);
         assert_eq!(out["prompt_cache_key"], "sess-9");
         assert_eq!(out["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_medium_when_nothing_is_configured() {
+        // Regression guard: this is the pre-existing behavior every Codex
+        // provider has today and must keep when no default is configured.
+        let out = transform_request(&json!({ "messages": [] }), "s", None);
+        assert_eq!(out["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn configured_default_effort_replaces_the_hardcoded_medium() {
+        for (level, expected) in [
+            (EffortLevel::Low, "low"),
+            (EffortLevel::Medium, "medium"),
+            (EffortLevel::High, "high"),
+        ] {
+            let out = transform_request(&json!({ "messages": [] }), "s", Some(level));
+            assert_eq!(out["reasoning"]["effort"], expected);
+        }
+    }
+
+    #[test]
+    fn a_clients_nested_reasoning_effort_wins_over_the_configured_default() {
+        let out = transform_request(
+            &json!({ "messages": [], "reasoning": {"effort": "low"} }),
+            "s",
+            Some(EffortLevel::High),
+        );
+        assert_eq!(out["reasoning"]["effort"], "low");
+    }
+
+    #[test]
+    fn a_clients_top_level_reasoning_effort_is_honored_and_not_forwarded() {
+        // Pre-existing latent gap: only the nested Responses-API form used
+        // to be checked, so a real OpenAI-SDK client asking for "high" via
+        // the Chat Completions `reasoning_effort` field silently got
+        // "medium" - and had the unsupported top-level field forwarded on
+        // to a Responses API that rejects it.
+        let out = transform_request(
+            &json!({ "messages": [], "reasoning_effort": "high" }),
+            "s",
+            Some(EffortLevel::Low),
+        );
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert!(
+            out.get("reasoning_effort").is_none(),
+            "the Chat Completions top-level field must not reach the Responses API"
+        );
+    }
+
+    #[test]
+    fn a_clients_other_reasoning_fields_survive_effort_injection() {
+        let out = transform_request(
+            &json!({ "messages": [], "reasoning": {"summary": "auto"} }),
+            "s",
+            Some(EffortLevel::High),
+        );
+        assert_eq!(out["reasoning"]["summary"], "auto");
+        assert_eq!(out["reasoning"]["effort"], "high");
     }
 
     #[test]
@@ -631,7 +730,7 @@ mod tests {
                 }
             }]
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         let tool = &out["tools"][0];
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["name"], "get_weather");
@@ -646,7 +745,7 @@ mod tests {
             "messages": [],
             "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
         });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert_eq!(out["tool_choice"]["type"], "function");
         assert_eq!(out["tool_choice"]["name"], "get_weather");
         assert!(out["tool_choice"].get("function").is_none());
@@ -655,14 +754,14 @@ mod tests {
     #[test]
     fn tool_choice_string_variant_is_untouched() {
         let input = json!({ "messages": [], "tool_choice": "auto" });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert_eq!(out["tool_choice"], "auto");
     }
 
     #[test]
     fn strips_item_ids() {
         let input = json!({ "messages": [], "input": [{"id": "msg_abc", "type": "message"}] });
-        let out = transform_request(&input, "s");
+        let out = transform_request(&input, "s", None);
         assert!(out["input"][0].get("id").is_none());
     }
 

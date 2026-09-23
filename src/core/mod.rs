@@ -3,6 +3,7 @@ pub mod db;
 pub mod error;
 pub mod http_client;
 pub mod model;
+pub mod reasoning;
 pub mod runtime;
 pub mod settings;
 pub mod state;

@@ -2,7 +2,69 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 
 use crate::core::error::AppError;
-use crate::core::model::{OAuthState, Provider, ProviderKind, WireFormat};
+use crate::core::model::{EffortLevel, OAuthState, Provider, ProviderKind, WireFormat};
+use crate::core::reasoning::capability_for;
+
+/// Reject a provider row whose `default_reasoning_effort` its resulting
+/// (kind, wire_format, upstream_model) combination can't actually carry.
+///
+/// Validates the **resulting row**, not the incoming delta: a
+/// `PATCH {"upstream_model": "..."}` that leaves an already-set
+/// `default_reasoning_effort` stale must be rejected too, not just a patch
+/// that sets the effort itself.
+///
+/// Best-effort UX only - config import (`admin::import_config`, raw SQL) and
+/// the onboarding wizard bypass this entirely, so every adapter re-runs
+/// `capability_for` at request-build time and silently skips injection if it
+/// comes back `Unsupported`. That request-time check, not this one, is the
+/// actual correctness guarantee.
+fn check_provider_reasoning_effort(p: &Provider) -> Result<(), AppError> {
+    let Some(level) = p.default_reasoning_effort else {
+        return Ok(());
+    };
+    if capability_for(p.kind, p.wire_format, &p.upstream_model).supports() {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "provider '{}' ({:?} / {:?} / model '{}') does not accept a reasoning effort - \
+         clear default_reasoning_effort (currently {:?}) or pick a model that does",
+        p.id, p.kind, p.wire_format, p.upstream_model, level
+    )))
+}
+
+/// Cross-table re-validation for a provider edit: every pool member that
+/// carries a `reasoning_effort_override` resolves its effective model as
+/// `model_override.unwrap_or(provider.upstream_model)` and its shape from
+/// the provider's kind/wire_format, so an `upstream_model` (or
+/// `wire_format`) edit can strand a member's override even though the
+/// member row itself wasn't touched. Reject the provider edit rather than
+/// silently leaving an invalid member behind - same shape as the existing
+/// `wire_format` pool-membership guard above.
+async fn check_member_reasoning_overrides(
+    db: &SqlitePool,
+    p: &Provider,
+) -> Result<(), AppError> {
+    let rows: Vec<(String, Option<String>, EffortLevel)> = sqlx::query_as(
+        "SELECT pool_id, model_override, reasoning_effort_override FROM pool_members
+         WHERE provider_id = ? AND reasoning_effort_override IS NOT NULL",
+    )
+    .bind(&p.id)
+    .fetch_all(db)
+    .await?;
+
+    for (pool_id, model_override, level) in rows {
+        let effective = model_override.as_deref().unwrap_or(&p.upstream_model);
+        if !capability_for(p.kind, p.wire_format, effective).supports() {
+            return Err(AppError::BadRequest(format!(
+                "pool '{pool_id}' has a member on provider '{}' with reasoning_effort_override \
+                 {level:?}, which model '{effective}' would no longer accept after this edit - \
+                 clear that member's override first",
+                p.id
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ProviderPatch {
@@ -16,6 +78,26 @@ pub struct ProviderPatch {
     // credentials in `oauth_state` are keyed by provider id, not wire_format.
     pub wire_format: Option<WireFormat>,
     pub dataset_logging: Option<bool>,
+    // Option<Option<T>> like base_url/api_key above: outer None = leave
+    // alone, inner None (an explicit JSON `null`) = clear the default back
+    // to "don't inject anything". Unlike those two, this one needs
+    // `deserialize_with = "double_option"`: plain serde collapses an
+    // explicit `null` into the outer `None` ("leave alone"), which would
+    // leave the admin UI with no way at all to clear a stale effort.
+    #[serde(default, deserialize_with = "double_option")]
+    pub default_reasoning_effort: Option<Option<EffortLevel>>,
+}
+
+/// Distinguish "field absent" (`None`) from "field present and null"
+/// (`Some(None)`) for a `PATCH` field. `#[serde(default)]` supplies the
+/// absent case without ever calling this; a present `null` reaches it and
+/// gets wrapped.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 pub async fn list_providers(db: &SqlitePool) -> Result<Vec<Provider>, AppError> {
@@ -35,9 +117,10 @@ pub async fn get_provider(db: &SqlitePool, id: &str) -> Result<Provider, AppErro
 }
 
 pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppError> {
+    check_provider_reasoning_effort(p)?;
     let res = sqlx::query(
-        "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,default_reasoning_effort,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&p.id)
     .bind(&p.name)
@@ -47,6 +130,7 @@ pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppErr
     .bind(&p.api_key)
     .bind(&p.upstream_model)
     .bind(p.dataset_logging)
+    .bind(p.default_reasoning_effort)
     .bind(p.created_at)
     .bind(p.updated_at)
     .execute(db)
@@ -82,6 +166,9 @@ pub async fn update_provider(
     if let Some(v) = patch.dataset_logging {
         p.dataset_logging = v;
     }
+    if let Some(e) = patch.default_reasoning_effort {
+        p.default_reasoning_effort = e;
+    }
     if let Some(w) = patch.wire_format {
         if w != p.wire_format
             && !matches!(
@@ -116,10 +203,14 @@ pub async fn update_provider(
         }
         p.wire_format = w;
     }
+    // Validate the *resulting* row (and every pool member that inherits
+    // from it), not just the incoming delta - see the two helpers' docs.
+    check_provider_reasoning_effort(&p)?;
+    check_member_reasoning_overrides(db, &p).await?;
     p.updated_at = Utc::now();
 
     let res = sqlx::query(
-        "UPDATE providers SET name=?, base_url=?, api_key=?, upstream_model=?, wire_format=?, dataset_logging=?, updated_at=? WHERE id=?",
+        "UPDATE providers SET name=?, base_url=?, api_key=?, upstream_model=?, wire_format=?, dataset_logging=?, default_reasoning_effort=?, updated_at=? WHERE id=?",
     )
     .bind(&p.name)
     .bind(&p.base_url)
@@ -127,6 +218,7 @@ pub async fn update_provider(
     .bind(&p.upstream_model)
     .bind(p.wire_format)
     .bind(p.dataset_logging)
+    .bind(p.default_reasoning_effort)
     .bind(p.updated_at)
     .bind(id)
     .execute(db)
@@ -277,6 +369,7 @@ mod tests {
             api_key: Some("sk-abc".into()),
             upstream_model: "gpt-4o".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -297,6 +390,7 @@ mod tests {
             upstream_model: Some("gpt-4o-mini".into()),
             wire_format: None,
             dataset_logging: None,
+            default_reasoning_effort: None,
         };
         let up = update_provider(&db, "p1", &patch).await.unwrap();
         assert_eq!(up.name, "P1b");
@@ -347,6 +441,228 @@ mod tests {
         };
         let up2 = update_provider(&db, "p1", &patch2).await.unwrap();
         assert!(!up2.dataset_logging);
+    }
+
+    /// Insert a pool + one member for `provider_id`, with the given
+    /// model/reasoning overrides, using raw SQL so the member-side write
+    /// validation (added alongside this) can't interfere with setting up a
+    /// deliberately-stale fixture.
+    async fn seed_member(
+        db: &sqlx::SqlitePool,
+        pool_id: &str,
+        provider_id: &str,
+        model_override: Option<&str>,
+        reasoning: Option<EffortLevel>,
+    ) {
+        sqlx::query("INSERT OR IGNORE INTO pools (id, wire_format, created_at) VALUES (?, 'openai', ?)")
+            .bind(pool_id)
+            .bind(Utc::now())
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, reasoning_effort_override)
+             VALUES (?, ?, 0, ?, ?)",
+        )
+        .bind(pool_id)
+        .bind(provider_id)
+        .bind(model_override)
+        .bind(reasoning)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn insert_and_update_provider_round_trip_default_reasoning_effort() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample();
+        p.upstream_model = "gpt-5.1".into();
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        insert_provider(&db, &p).await.unwrap();
+        assert_eq!(
+            get_provider(&db, "p1").await.unwrap().default_reasoning_effort,
+            Some(EffortLevel::High)
+        );
+
+        // A patch that doesn't mention the field leaves it alone.
+        let up = update_provider(
+            &db,
+            "p1",
+            &ProviderPatch {
+                name: Some("P1b".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(up.default_reasoning_effort, Some(EffortLevel::High));
+
+        // `Some(Some(_))` sets it; `Some(None)` (an explicit JSON null)
+        // clears it back to "inject nothing".
+        let up = update_provider(
+            &db,
+            "p1",
+            &ProviderPatch {
+                default_reasoning_effort: Some(Some(EffortLevel::Low)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(up.default_reasoning_effort, Some(EffortLevel::Low));
+
+        let up = update_provider(
+            &db,
+            "p1",
+            &ProviderPatch {
+                default_reasoning_effort: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(up.default_reasoning_effort, None);
+        assert_eq!(
+            get_provider(&db, "p1").await.unwrap().default_reasoning_effort,
+            None
+        );
+    }
+
+    #[test]
+    fn provider_patch_parses_the_three_reasoning_effort_states() {
+        let absent: ProviderPatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.default_reasoning_effort, None);
+        let cleared: ProviderPatch =
+            serde_json::from_str(r#"{"default_reasoning_effort": null}"#).unwrap();
+        assert_eq!(cleared.default_reasoning_effort, Some(None));
+        let set: ProviderPatch =
+            serde_json::from_str(r#"{"default_reasoning_effort": "medium"}"#).unwrap();
+        assert_eq!(set.default_reasoning_effort, Some(Some(EffortLevel::Medium)));
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_a_reasoning_effort_the_model_cannot_carry() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample(); // passthrough / openai / "gpt-4o" -> Unsupported
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        assert!(matches!(
+            insert_provider(&db, &p).await,
+            Err(crate::core::error::AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_rejects_a_reasoning_effort_the_model_cannot_carry() {
+        let db = init_pool(":memory:").await.unwrap();
+        insert_provider(&db, &sample()).await.unwrap(); // gpt-4o
+        assert!(matches!(
+            update_provider(
+                &db,
+                "p1",
+                &ProviderPatch {
+                    default_reasoning_effort: Some(Some(EffortLevel::High)),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(crate::core::error::AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_validates_the_resulting_row_not_just_the_delta() {
+        // Set a valid effort first, then edit ONLY upstream_model to
+        // something that can't carry it - the patch never mentions
+        // default_reasoning_effort, but the resulting row is invalid.
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample();
+        p.upstream_model = "gpt-5.1".into();
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        insert_provider(&db, &p).await.unwrap();
+
+        assert!(matches!(
+            update_provider(
+                &db,
+                "p1",
+                &ProviderPatch {
+                    upstream_model: Some("gpt-4o".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(crate::core::error::AppError::BadRequest(_))
+        ));
+        // rejected - nothing was written
+        let after = get_provider(&db, "p1").await.unwrap();
+        assert_eq!(after.upstream_model, "gpt-5.1");
+        assert_eq!(after.default_reasoning_effort, Some(EffortLevel::High));
+
+        // Clearing the effort in the same patch makes the same edit legal.
+        let ok = update_provider(
+            &db,
+            "p1",
+            &ProviderPatch {
+                upstream_model: Some("gpt-4o".into()),
+                default_reasoning_effort: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.upstream_model, "gpt-4o");
+        assert_eq!(ok.default_reasoning_effort, None);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_an_upstream_model_edit_that_strands_a_members_override() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample();
+        p.upstream_model = "gpt-5.1".into();
+        insert_provider(&db, &p).await.unwrap();
+        // Member inherits the provider's upstream_model (no model_override)
+        // and carries its own reasoning override.
+        seed_member(&db, "pool1", "p1", None, Some(EffortLevel::Low)).await;
+
+        assert!(matches!(
+            update_provider(
+                &db,
+                "p1",
+                &ProviderPatch {
+                    upstream_model: Some("gpt-4o".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(crate::core::error::AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            get_provider(&db, "p1").await.unwrap().upstream_model,
+            "gpt-5.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_allows_an_upstream_model_edit_when_the_member_pins_its_own_model() {
+        let db = init_pool(":memory:").await.unwrap();
+        let mut p = sample();
+        p.upstream_model = "gpt-5.1".into();
+        insert_provider(&db, &p).await.unwrap();
+        // This member does NOT inherit upstream_model, so the edit can't
+        // strand it.
+        seed_member(&db, "pool1", "p1", Some("gpt-5.2"), Some(EffortLevel::Low)).await;
+
+        let ok = update_provider(
+            &db,
+            "p1",
+            &ProviderPatch {
+                upstream_model: Some("gpt-4o".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.upstream_model, "gpt-4o");
     }
 
     #[tokio::test]

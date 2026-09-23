@@ -31,9 +31,55 @@ describe("recomputeMemberPriorities", () => {
     ]);
 
     expect(result).toEqual([
-      { provider_id: "b", priority: 1, model_override: undefined, dataset_logging_override: true },
-      { provider_id: "a", priority: 2, model_override: undefined, dataset_logging_override: false },
-      { provider_id: "c", priority: 3, model_override: undefined, dataset_logging_override: undefined }
+      {
+        provider_id: "b",
+        priority: 1,
+        model_override: undefined,
+        dataset_logging_override: true,
+        reasoning_effort_override: undefined
+      },
+      {
+        provider_id: "a",
+        priority: 2,
+        model_override: undefined,
+        dataset_logging_override: false,
+        reasoning_effort_override: undefined
+      },
+      {
+        provider_id: "c",
+        priority: 3,
+        model_override: undefined,
+        dataset_logging_override: undefined,
+        reasoning_effort_override: undefined
+      }
+    ]);
+  });
+
+  // Same whitelist trap, one field later: every reorder PUTs this rebuilt
+  // object for every member, so dropping `reasoning_effort_override` here
+  // would silently reset every member's override back to "inherit" on the
+  // very next drag.
+  it("priority_recompute_preserves_reasoning_effort_override", () => {
+    const result = recomputeMemberPriorities([
+      { provider_id: "b", priority: 20, reasoning_effort_override: "high" },
+      { provider_id: "a", priority: 10, reasoning_effort_override: null }
+    ]);
+
+    expect(result).toEqual([
+      {
+        provider_id: "b",
+        priority: 1,
+        model_override: undefined,
+        dataset_logging_override: undefined,
+        reasoning_effort_override: "high"
+      },
+      {
+        provider_id: "a",
+        priority: 2,
+        model_override: undefined,
+        dataset_logging_override: undefined,
+        reasoning_effort_override: null
+      }
     ]);
   });
 });
@@ -74,8 +120,8 @@ describe("Pools", () => {
         if (url === "/admin/providers" && (!init || init.method === "GET")) {
           return new Response(
             JSON.stringify([
-              { id: "a", name: "alpha", wire_format: "openai", upstream_model: "gpt-4o" },
-              { id: "b", name: "beta", wire_format: "openai", upstream_model: "gpt-5-codex" }
+              { id: "a", name: "alpha", kind: "passthrough", wire_format: "openai", upstream_model: "gpt-4o" },
+              { id: "b", name: "beta", kind: "passthrough", wire_format: "openai", upstream_model: "gpt-5-codex" }
             ]),
             { status: 200 }
           );
@@ -335,6 +381,42 @@ describe("Pools", () => {
     });
   });
 
+  it("reasoning_effort_override_select_is_hidden_until_a_capable_provider_is_chosen", async () => {
+    render(<Pools />);
+
+    const dialog = await openPool("openai");
+    // No provider chosen yet.
+    expect(within(dialog).queryByLabelText("Reasoning effort override for openai")).not.toBeInTheDocument();
+    // Provider "a" is on gpt-4o, which can't carry a reasoning effort.
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "a");
+    expect(within(dialog).queryByLabelText("Reasoning effort override for openai")).not.toBeInTheDocument();
+    // Provider "b" is on gpt-5-codex, which can.
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "b");
+    expect(within(dialog).getByLabelText("Reasoning effort override for openai")).toBeInTheDocument();
+  });
+
+  it("adds_a_provider_with_a_reasoning_effort_override_when_one_is_chosen", async () => {
+    render(<Pools />);
+
+    const dialog = await openPool("openai");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Provider to add to openai"), "b");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Reasoning effort override for openai"),
+      "high"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add to pool" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/pools/openai/members",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ provider_id: "b", priority: 3, reasoning_effort_override: "high" })
+        })
+      );
+    });
+  });
+
   // Full-component regression test for the reorder-wipe bug: member "b"
   // starts with dataset_logging_override: true; reordering must PUT that
   // value back unchanged, not silently drop it.
@@ -355,7 +437,8 @@ describe("Pools", () => {
                 provider_id: "b",
                 provider_name: "beta",
                 priority: 2,
-                dataset_logging_override: true
+                dataset_logging_override: true,
+                reasoning_effort_override: "high"
               }
             ]),
             { status: 200 }
@@ -364,8 +447,8 @@ describe("Pools", () => {
         if (url === "/admin/providers" && (!init || init.method === "GET")) {
           return new Response(
             JSON.stringify([
-              { id: "a", name: "alpha", wire_format: "openai", upstream_model: "gpt-4o" },
-              { id: "b", name: "beta", wire_format: "openai", upstream_model: "gpt-5-codex" }
+              { id: "a", name: "alpha", kind: "passthrough", wire_format: "openai", upstream_model: "gpt-4o" },
+              { id: "b", name: "beta", kind: "passthrough", wire_format: "openai", upstream_model: "gpt-5-codex" }
             ]),
             { status: 200 }
           );
@@ -386,7 +469,12 @@ describe("Pools", () => {
         "/admin/pools/openai/members",
         expect.objectContaining({
           method: "PUT",
-          body: JSON.stringify({ provider_id: "b", priority: 1, dataset_logging_override: true })
+          body: JSON.stringify({
+            provider_id: "b",
+            priority: 1,
+            dataset_logging_override: true,
+            reasoning_effort_override: "high"
+          })
         })
       );
     });

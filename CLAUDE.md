@@ -42,6 +42,20 @@ new work should branch directly off `master`. See:
   design: `docs/superpowers/specs/2026-08-27-dataset-logging-design.md`,
   plan (7 tasks, done): `docs/superpowers/plans/2026-08-27-dataset-logging-implementation.md`,
   feature overview: `docs/ARCHITECTURE.md#dataset-logging`
+- Per-model reasoning effort — optional `providers.default_reasoning_effort`
+  (+ per-pool-member `pool_members.reasoning_effort_override`, migration
+  `0007`), injected as OpenAI `reasoning_effort` / Anthropic
+  `thinking: {budget_tokens}` depending on a static capability table in
+  `src/core/reasoning.rs` (`capability_for`, mirrored in TS as
+  `capabilityFor` in `frontend/src/pages/Providers.tsx` — keep both in sync).
+  Dispatch is by `ProviderKind` first, then `wire_format`, then model name:
+  the wire shape, **not** the model's name, decides which parameter is legal.
+  An explicit client-side `reasoning_effort` / `reasoning.effort` / `thinking`
+  always wins. Write-time validation (`providers::queries`,
+  `pools::queries::upsert_member`) is best-effort UX only — the real guarantee
+  is that every adapter re-runs `capability_for` at request-build time and
+  silently skips injection rather than erroring, since config import and the
+  onboarding wizard bypass the write path.
 - Progress ledger (historical, git-ignored scratch, may not exist in a fresh
   checkout): `.superpowers/sdd/progress.md`
 

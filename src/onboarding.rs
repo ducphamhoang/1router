@@ -142,6 +142,7 @@ pub async fn assign_to_pool(
             priority,
             model_override,
             dataset_logging_override: None,
+            reasoning_effort_override: None,
         },
     )
     .await
@@ -301,6 +302,7 @@ pub(crate) fn build_passthrough_row(
         api_key: Some(api_key.to_string()),
         upstream_model: upstream_model.to_string(),
         dataset_logging: false,
+        default_reasoning_effort: None,
         created_at: now,
         updated_at: now,
     }
@@ -670,6 +672,7 @@ pub async fn add_commandcode_provider(
         api_key: None,
         upstream_model: PENDING_MODEL.to_string(),
         dataset_logging: false,
+        default_reasoning_effort: None,
         created_at: now,
         updated_at: now,
     };
@@ -883,6 +886,7 @@ pub async fn add_codex_provider(
         // Replaced by the probe below; kept if every candidate fails.
         upstream_model: PENDING_MODEL.to_string(),
         dataset_logging: false,
+        default_reasoning_effort: None,
         created_at: now,
         updated_at: now,
     };
@@ -1454,6 +1458,7 @@ mod tests {
             priority,
             model_override: None,
             dataset_logging_override: None,
+            reasoning_effort_override: None,
         }
     }
 
@@ -1781,6 +1786,7 @@ mod tests {
             api_key: Some("k".into()),
             upstream_model: "m".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1840,6 +1846,7 @@ mod tests {
                 priority: 10,
                 model_override: None,
                 dataset_logging_override: None,
+                reasoning_effort_override: None,
             },
         )
         .await

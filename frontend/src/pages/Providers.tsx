@@ -14,9 +14,53 @@ type Provider = {
   upstream_model: string;
   credential_configured?: boolean;
   dataset_logging?: boolean;
+  default_reasoning_effort?: string | null;
 };
 
-type ProviderForm = Provider;
+// The form keeps `default_reasoning_effort` as a plain string ("" = no
+// default) rather than `string | null`, so the <select> below is always a
+// controlled component; `saveProvider` normalizes "" back to null.
+type ProviderForm = Omit<Provider, "default_reasoning_effort"> & {
+  default_reasoning_effort: string;
+};
+
+// Hand-mirrored from `capability_for` in src/core/reasoning.rs - keep the
+// two in sync. Dispatch is by `kind` FIRST, then by wire_format, and only
+// then by model name: the shape a request must take is a property of which
+// adapter builds it, not of the model's name. In particular a Claude-named
+// model behind an OpenAI-compatible mirror (wire_format "openai") is NOT
+// eligible for a thinking budget.
+//
+// Known day-one gaps, deliberate and mirrored from the Rust side: legacy
+// `claude-3-*` names and OpenAI's `o1`/`o3`/`o4-mini` are not matched.
+export type ReasoningCapability = "unsupported" | "openai_effort" | "anthropic_thinking_budget";
+
+export function capabilityFor(kind: string, wireFormat: string, upstreamModel: string): ReasoningCapability {
+  const model = (upstreamModel ?? "").toLowerCase();
+  if (kind === "oauth_codex") {
+    return "openai_effort";
+  }
+  if (kind === "oauth_command_code") {
+    // Mirrors commandcode::transform::wants_messages_shape.
+    return model.includes("claude") ? "anthropic_thinking_budget" : "unsupported";
+  }
+  if (wireFormat === "openai" && model.startsWith("gpt-5")) {
+    return "openai_effort";
+  }
+  if (
+    wireFormat === "anthropic" &&
+    (model.startsWith("claude-sonnet-") || model.startsWith("claude-opus-") || model.startsWith("claude-haiku-"))
+  ) {
+    return "anthropic_thinking_budget";
+  }
+  return "unsupported";
+}
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" }
+];
 
 // User-facing labels for backend enum values - the operator never needs to
 // know these values are "passthrough"/"openai"/"anthropic" internally, only
@@ -40,7 +84,8 @@ const emptyForm: ProviderForm = {
   base_url: "",
   api_key: "",
   upstream_model: "",
-  dataset_logging: false
+  dataset_logging: false,
+  default_reasoning_effort: ""
 };
 
 // Picking a template sets `kind` (+ a default wire_format the provider
@@ -303,7 +348,8 @@ export function Providers() {
       base_url: provider.base_url ?? "",
       api_key: "",
       upstream_model: provider.upstream_model,
-      dataset_logging: provider.dataset_logging ?? false
+      dataset_logging: provider.dataset_logging ?? false,
+      default_reasoning_effort: provider.default_reasoning_effort ?? ""
     });
     setCommandCodeModels([]);
     setCommandCodeCredentialConfirmed(Boolean(provider.credential_configured));
@@ -387,15 +433,24 @@ export function Providers() {
     event.preventDefault();
     setError(null);
     try {
+      // A stale effort left in form state after the operator changed
+      // kind/wire_format/model to something that can't carry one would be
+      // rejected by the backend's write-time validation - clear it here
+      // instead, matching the select that just disappeared from the form.
+      const effort =
+        capabilityFor(form.kind, form.wire_format, form.upstream_model) === "unsupported"
+          ? null
+          : form.default_reasoning_effort || null;
       const body = editing
         ? {
             name: form.name,
             base_url: form.base_url,
             upstream_model: form.upstream_model,
             dataset_logging: form.dataset_logging,
+            default_reasoning_effort: effort,
             ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
           }
-        : form;
+        : { ...form, default_reasoning_effort: effort };
       const saved = await apiJson<Provider>(
         editing ? `/admin/providers/${encodeURIComponent(editing.id)}` : "/admin/providers",
         {
@@ -411,7 +466,7 @@ export function Providers() {
       // mode so that panel appears immediately.
       if (!editing && saved.kind !== "passthrough") {
         setEditing(saved);
-        setForm({ ...saved, api_key: "" });
+        setForm({ ...saved, api_key: "", default_reasoning_effort: saved.default_reasoning_effort ?? "" });
       } else {
         setModalOpen(false);
       }
@@ -514,6 +569,47 @@ export function Providers() {
                 <option value="oauth_command_code">{KIND_LABELS.oauth_command_code}</option>
               </select>
             </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={Boolean(form.dataset_logging)}
+                onChange={(event) => setForm({ ...form, dataset_logging: event.target.checked })}
+              />
+              Log requests/responses for this provider (dataset logging)
+            </label>
+            {(() => {
+              // Recomputed live as kind/wire_format/upstream_model change.
+              // Hidden entirely (not merely disabled) when this
+              // provider/model can't carry a reasoning parameter - there's
+              // nothing to choose, and offering one would only produce a
+              // rejected save.
+              const capability = capabilityFor(form.kind, form.wire_format, form.upstream_model);
+              if (capability === "unsupported") {
+                return null;
+              }
+              return (
+                <label>
+                  Reasoning effort <span className="optional">optional</span>
+                  <select
+                    aria-label="Reasoning effort"
+                    value={form.default_reasoning_effort}
+                    onChange={(event) => setForm({ ...form, default_reasoning_effort: event.target.value })}
+                  >
+                    <option value="">Provider default (send nothing)</option>
+                    {REASONING_EFFORT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="hint">
+                    {capability === "anthropic_thinking_budget"
+                      ? "Sent as an Anthropic thinking budget. A client that sets its own thinking/reasoning field always wins."
+                      : "Sent as OpenAI reasoning_effort. A client that sets its own reasoning field always wins."}
+                  </span>
+                </label>
+              );
+            })()}
             {form.kind === "passthrough" ? (
               <>
                 <label>
@@ -529,14 +625,6 @@ export function Providers() {
                 <label>
                   Base URL
                   <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-                </label>
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(form.dataset_logging)}
-                    onChange={(event) => setForm({ ...form, dataset_logging: event.target.checked })}
-                  />
-                  Log requests/responses for this provider (dataset logging)
                 </label>
                 <label>
                   API key

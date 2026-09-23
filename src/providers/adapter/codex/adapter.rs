@@ -6,6 +6,7 @@ use chrono::Utc;
 
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{Provider, WireFormat};
+use crate::core::reasoning;
 use crate::providers::adapter::codex::claude_bridge;
 use crate::providers::adapter::codex::refresh;
 use crate::providers::adapter::codex::transform;
@@ -40,6 +41,7 @@ impl ProviderAdapter for CodexAdapter {
         // clients (Claude Code) directly - bridge its Claude-shaped body into
         // the OpenAI Chat-Completions shape the rest of this pipeline speaks
         // before doing anything else.
+        let original_client_json = client_json.clone();
         let client_json = match self.client_wire {
             WireFormat::Anthropic => claude_bridge::claude_to_openai_request(&client_json),
             WireFormat::OpenAi => client_json,
@@ -62,7 +64,24 @@ impl ProviderAdapter for CodexAdapter {
             "1router-{}-{}-{}",
             self.provider.id, self.provider.upstream_model, wire_tag
         );
-        let mut transformed = transform::transform_request(&client_json, &session_id);
+        // Resolve the configured reasoning-effort default (already folded
+        // into this per-request `Provider` clone by `proxy::flow`) against
+        // the client's ORIGINAL body - `claude_to_openai_request` above can
+        // drop the fields that check needs. `effort_to_inject` re-runs
+        // `capability_for` here too, which for `OauthCodex` always says
+        // `OpenAiEffort`; a client that made its own choice yields `None`,
+        // and `transform_request` then honors the client (or falls back to
+        // the historical hardcoded "medium").
+        let default_effort = reasoning::effort_to_inject(
+            self.provider.kind,
+            self.provider.wire_format,
+            &self.provider.upstream_model,
+            self.provider.default_reasoning_effort,
+            &original_client_json,
+        )
+        .map(|(_, level)| level);
+        let mut transformed =
+            transform::transform_request(&client_json, &session_id, default_effort);
         // The client's `model` is the pool id, not a real Codex model name -
         // rewrite to the provider's actual upstream model, matching
         // HttpAdapter's behavior (confirmed via a real-account 400:
@@ -192,6 +211,7 @@ mod tests {
             api_key: None,
             upstream_model: "gpt-5-codex".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -255,6 +275,53 @@ mod tests {
         let sent2: serde_json::Value =
             serde_json::from_slice(req2.body().unwrap().as_bytes().unwrap()).unwrap();
         assert_eq!(sent2["prompt_cache_key"], "1router-cx-gpt-5.6-sol-anthropic");
+    }
+
+    #[tokio::test]
+    async fn build_request_uses_the_providers_configured_reasoning_effort() {
+        use crate::core::model::EffortLevel;
+        let mut p = prov();
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        let a = CodexAdapter::new(p, reqwest::Client::new(), WireFormat::OpenAi);
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({"messages": []})).unwrap());
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["reasoning"]["effort"], "high");
+    }
+
+    #[tokio::test]
+    async fn build_request_falls_back_to_medium_with_no_configured_effort() {
+        let a = CodexAdapter::new(prov(), reqwest::Client::new(), WireFormat::OpenAi);
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({"messages": []})).unwrap());
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test]
+    async fn build_request_lets_an_anthropic_clients_thinking_block_the_configured_default() {
+        // An Anthropic-wire client that asked for `thinking` made its own
+        // choice; `claude_to_openai_request` has no equivalent to carry it
+        // into the Responses API, so the conservative outcome is the
+        // historical "medium" rather than silently applying our default.
+        use crate::core::model::EffortLevel;
+        let mut p = prov();
+        p.default_reasoning_effort = Some(EffortLevel::High);
+        let a = CodexAdapter::new(p, reqwest::Client::new(), WireFormat::Anthropic);
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "pool",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": 1024}
+            }))
+            .unwrap(),
+        );
+        let req = a.build_request(&body, &creds()).await.unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(sent["reasoning"]["effort"], "medium");
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::core::error::AppError;
-use crate::core::model::{Provider, ProviderKind, WireFormat};
+use crate::core::model::{EffortLevel, Provider, ProviderKind, WireFormat};
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 use crate::core::runtime::ProviderStatus;
 use crate::core::state::{reload_snapshot, AppState};
@@ -64,6 +64,7 @@ fn mask(p: &Provider, credential_configured: bool) -> Value {
         "upstream_model": &p.upstream_model,
         "credential_configured": credential_configured,
         "dataset_logging": p.dataset_logging,
+        "default_reasoning_effort": p.default_reasoning_effort,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     })
@@ -115,6 +116,8 @@ struct CreateBody {
     upstream_model: String,
     #[serde(default)]
     dataset_logging: bool,
+    #[serde(default)]
+    default_reasoning_effort: Option<EffortLevel>,
 }
 
 fn default_kind() -> ProviderKind {
@@ -136,6 +139,7 @@ async fn create(
         api_key: b.api_key,
         upstream_model: b.upstream_model,
         dataset_logging: b.dataset_logging,
+        default_reasoning_effort: b.default_reasoning_effort,
         created_at: now,
         updated_at: now,
     };
@@ -337,6 +341,7 @@ async fn validate_model_preview(
         api_key: body.api_key,
         upstream_model: body.model,
         dataset_logging: false,
+        default_reasoning_effort: None,
         created_at: now,
         updated_at: now,
     };
@@ -565,6 +570,7 @@ async fn list_models_preview(
         api_key: body.api_key,
         upstream_model: String::new(),
         dataset_logging: false,
+        default_reasoning_effort: None,
         created_at: now,
         updated_at: now,
     };

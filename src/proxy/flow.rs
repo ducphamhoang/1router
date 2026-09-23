@@ -8,7 +8,7 @@ use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{DatasetLogEntry, LatencyMs, LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::runtime::runtime_key;
 use crate::core::state::AppState;
-use crate::pools::select::{dataset_logging_enabled, select};
+use crate::pools::select::{dataset_logging_enabled, resolve_reasoning_effort, select};
 use crate::providers::adapter::commandcode::{
     current_transport, is_upgrade_required, remember_transport, Transport,
 };
@@ -132,7 +132,10 @@ pub async fn handle_proxy(
     let mut last_error_body = String::from("no provider produced a response");
     let mut last_provider = String::new();
 
-    for (provider, effective_model, member_override) in &selection.providers {
+    for member in &selection.providers {
+        let provider = member.provider;
+        let effective_model = &member.effective_model;
+        let member_override = &member.dataset_logging_override;
         let now = Instant::now();
         {
             let st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
@@ -147,8 +150,15 @@ pub async fn handle_proxy(
         // pool-member's effective model (its override, or the provider's own
         // default) through a cheap per-request clone rather than threading it
         // through the ProviderAdapter trait.
+        // Adapters also read `provider.default_reasoning_effort` directly;
+        // fold the member's override into the same clone rather than
+        // widening `ProviderAdapter::build_request`'s signature.
         let provider = &Provider {
             upstream_model: effective_model.clone(),
+            default_reasoning_effort: resolve_reasoning_effort(
+                provider,
+                member.reasoning_effort_override,
+            ),
             ..(*provider).clone()
         };
 

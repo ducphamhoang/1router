@@ -16,7 +16,7 @@ use crate::providers::adapter::commandcode::{
 };
 use crate::providers::adapter::{adapter_for_wire, Credentials};
 use crate::providers::queries::get_oauth_state;
-use crate::providers::refresh_lock::{refresh_and_persist, with_refresh_lock};
+use crate::providers::refresh_lock::refresh_and_persist_detached;
 use crate::proxy::backoff;
 use crate::proxy::dataset_tee;
 use crate::proxy::error_response::wire_error;
@@ -209,7 +209,8 @@ async fn handle_proxy_inner(
             ..(*provider).clone()
         };
 
-        let adapter = adapter_for_wire(provider, state.http.clone(), wire);
+        let adapter: std::sync::Arc<dyn crate::providers::adapter::ProviderAdapter> =
+            adapter_for_wire(provider, state.http.clone(), wire).into();
         let creds = credentials_for(&state, provider).await;
 
         let req = match adapter.build_request(&body, &creds).await {
@@ -349,10 +350,10 @@ async fn handle_proxy_inner(
                     );
                 }
                 drop(upstream);
-                let refreshed = with_refresh_lock(&state.refresh_locks, &provider.id, || async {
-                    refresh_and_persist(&state, provider, adapter.as_ref(), &creds).await
-                })
-                .await;
+                // Detached so a client disconnect can't drop the rotated
+                // refresh token between the upstream call and the DB write.
+                let refreshed =
+                    refresh_and_persist_detached(&state, provider, adapter.clone(), &creds).await;
                 match refreshed {
                     Ok(new_creds) => {
                         // Retry the same provider once with new credentials.

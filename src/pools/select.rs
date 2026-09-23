@@ -1,21 +1,36 @@
-use crate::core::model::{Pool, PoolMember, PoolStrategy, Provider, WireFormat};
+use crate::core::model::{EffortLevel, Pool, PoolMember, PoolStrategy, Provider, WireFormat};
 use crate::core::state::{ConfigSnapshot, PoolRotationMap};
+
+/// One resolved routing candidate: a provider plus everything the
+/// membership it was reached through says about how to call it.
+///
+/// Was a bare `(&Provider, String, Option<bool>)` tuple until a fourth
+/// member-level override arrived and destructuring stopped being readable.
+pub struct ResolvedMember<'a> {
+    pub provider: &'a Provider,
+    /// The member's `model_override` if set, else the provider's own
+    /// `upstream_model` - this is what lets one provider (one credential
+    /// set) be shared across pools that each call a different model.
+    pub effective_model: String,
+    /// `PoolMember.dataset_logging_override` for a pool-routed entry, or
+    /// `None` for a direct-provider-addressed one (which has no
+    /// `PoolMember` row at all) - either way, pass it to
+    /// `dataset_logging_enabled` alongside the provider to resolve the
+    /// effective setting.
+    pub dataset_logging_override: Option<bool>,
+    /// `PoolMember.reasoning_effort_override`, same `None`-means-inherit
+    /// contract as `dataset_logging_override` - resolve it with
+    /// `resolve_reasoning_effort`.
+    pub reasoning_effort_override: Option<EffortLevel>,
+}
 
 pub struct Selection<'a> {
     /// `None` for a direct `<provider_id>/<model>` selection (see
     /// `select_direct_provider` below) - there's no real pool row behind it.
     pub pool: Option<&'a Pool>,
-    /// (provider, effective upstream model, resolved dataset-logging
-    /// member override) triples, in priority order. The effective model is
-    /// the member's `model_override` if set, else the provider's own
-    /// `upstream_model` - this is what lets one provider (one credential
-    /// set) be shared across pools that each call a different model. The
-    /// third element is `PoolMember.dataset_logging_override` for a
-    /// pool-routed entry, or `None` for a direct-provider-addressed one
-    /// (which has no `PoolMember` row at all) - either way, pass it to
-    /// `dataset_logging_enabled` alongside the provider to resolve the
-    /// effective setting.
-    pub providers: Vec<(&'a Provider, String, Option<bool>)>,
+    /// Candidates in priority order (the caller's failover loop tries them
+    /// front-to-back).
+    pub providers: Vec<ResolvedMember<'a>>,
 }
 
 /// `member_override` is `PoolMember.dataset_logging_override` for a
@@ -24,6 +39,20 @@ pub struct Selection<'a> {
 /// provider's own setting".
 pub fn dataset_logging_enabled(provider: &Provider, member_override: Option<bool>) -> bool {
     member_override.unwrap_or(provider.dataset_logging)
+}
+
+/// Same `None`-means-inherit contract as `dataset_logging_enabled`: a
+/// pool member's own `reasoning_effort_override` wins over the provider's
+/// `default_reasoning_effort`; `None` on both means "inject nothing".
+///
+/// Whether the resolved level can actually be sent is a separate question
+/// answered by `core::reasoning::capability_for` at request-build time in
+/// each adapter - this function only resolves precedence.
+pub fn resolve_reasoning_effort(
+    provider: &Provider,
+    member_override: Option<EffortLevel>,
+) -> Option<EffortLevel> {
+    member_override.or(provider.default_reasoning_effort)
 }
 
 /// Resolve a client-requested `model` to what to actually call.
@@ -72,7 +101,12 @@ pub fn select<'a>(
                     .model_override
                     .clone()
                     .unwrap_or_else(|| provider.upstream_model.clone());
-                Some((provider, model, m.dataset_logging_override))
+                Some(ResolvedMember {
+                    provider,
+                    effective_model: model,
+                    dataset_logging_override: m.dataset_logging_override,
+                    reasoning_effort_override: m.reasoning_effort_override,
+                })
             })
             .collect();
 
@@ -140,7 +174,12 @@ fn select_direct_provider<'a>(
     let provider = snapshot.providers.iter().find(|p| p.id == provider_id)?;
     Some(Selection {
         pool: None,
-        providers: vec![(provider, model.to_string(), None)],
+        providers: vec![ResolvedMember {
+            provider,
+            effective_model: model.to_string(),
+            dataset_logging_override: None,
+            reasoning_effort_override: None,
+        }],
     })
 }
 
@@ -158,6 +197,7 @@ mod tests {
             kind: ProviderKind::Passthrough, base_url: Some("u".into()),
             api_key: Some("k".into()), upstream_model: "m".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(), updated_at: Utc::now(),
         }
     }
@@ -179,8 +219,8 @@ mod tests {
                     strategy, sticky_limit,
                 },
                 members: vec![
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None, dataset_logging_override: None },
-                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None, dataset_logging_override: None },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None, dataset_logging_override: None, reasoning_effort_override: None },
+                    PoolMember { pool_id: "gpt-4o".into(), provider_id: "a".into(), priority: 10, model_override: None, dataset_logging_override: None, reasoning_effort_override: None },
                 ],
             }],
         }
@@ -190,7 +230,7 @@ mod tests {
     fn orders_by_priority_ascending() {
         let s = snap();
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
+        let ids: Vec<&str> = sel.providers.iter().map(|m| m.provider.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
     }
 
@@ -203,16 +243,17 @@ mod tests {
             priority: 10,
             model_override: Some("gpt-5.6-sol".into()),
             dataset_logging_override: None,
+            reasoning_effort_override: None,
         });
         // dedupe: replace the "a" member from `snap()` with the overridden one
         s.pools[0].members.retain(|m| m.provider_id != "a" || m.model_override.is_some());
 
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let (_, model, _) = sel.providers.iter().find(|(p, _, _)| p.id == "a").unwrap();
-        assert_eq!(model, "gpt-5.6-sol");
+        let a = sel.providers.iter().find(|m| m.provider.id == "a").unwrap();
+        assert_eq!(a.effective_model, "gpt-5.6-sol");
 
-        let (_, model_b, _) = sel.providers.iter().find(|(p, _, _)| p.id == "b").unwrap();
-        assert_eq!(model_b, "m", "falls back to the provider's own upstream_model when unset");
+        let b = sel.providers.iter().find(|m| m.provider.id == "b").unwrap();
+        assert_eq!(b.effective_model, "m", "falls back to the provider's own upstream_model when unset");
     }
 
     #[test]
@@ -231,18 +272,16 @@ mod tests {
         let sel = select(&s, "a/some-other-model", WireFormat::OpenAi, &empty_rotation()).unwrap();
         assert!(sel.pool.is_none());
         assert_eq!(sel.providers.len(), 1);
-        let (provider, model, _) = &sel.providers[0];
-        assert_eq!(provider.id, "a");
-        assert_eq!(model, "some-other-model");
+        assert_eq!(sel.providers[0].provider.id, "a");
+        assert_eq!(sel.providers[0].effective_model, "some-other-model");
     }
 
     #[test]
     fn direct_provider_addressing_only_splits_on_the_first_slash() {
         let s = snap();
         let sel = select(&s, "a/meta-llama/Llama-3-70b", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let (provider, model, _) = &sel.providers[0];
-        assert_eq!(provider.id, "a");
-        assert_eq!(model, "meta-llama/Llama-3-70b");
+        assert_eq!(sel.providers[0].provider.id, "a");
+        assert_eq!(sel.providers[0].effective_model, "meta-llama/Llama-3-70b");
     }
 
     #[test]
@@ -266,7 +305,7 @@ mod tests {
         // Anthropic route still resolves to it rather than falling through.
         let s = snap();
         let sel = select(&s, "a/some-model", WireFormat::Anthropic, &empty_rotation()).unwrap();
-        assert_eq!(sel.providers[0].0.id, "a");
+        assert_eq!(sel.providers[0].provider.id, "a");
     }
 
     #[test]
@@ -275,8 +314,8 @@ mod tests {
         s.providers[0].kind = ProviderKind::OauthCodex;
         for wire in [WireFormat::OpenAi, WireFormat::Anthropic] {
             let sel = select(&s, "a/gpt-5-codex", wire, &empty_rotation()).unwrap();
-            assert_eq!(sel.providers[0].0.id, "a");
-            assert_eq!(sel.providers[0].1, "gpt-5-codex");
+            assert_eq!(sel.providers[0].provider.id, "a");
+            assert_eq!(sel.providers[0].effective_model, "gpt-5-codex");
         }
     }
 
@@ -289,7 +328,7 @@ mod tests {
         let rotation = empty_rotation();
         for _ in 0..5 {
             let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
-            let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
+            let ids: Vec<&str> = sel.providers.iter().map(|m| m.provider.id.as_str()).collect();
             assert_eq!(ids, vec!["a", "b"]);
         }
     }
@@ -301,7 +340,7 @@ mod tests {
         let rotation = empty_rotation();
 
         let ids = |sel: &Selection| -> Vec<String> {
-            sel.providers.iter().map(|(p, _, _)| p.id.clone()).collect()
+            sel.providers.iter().map(|m| m.provider.id.clone()).collect()
         };
 
         let sel1 = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
@@ -320,7 +359,7 @@ mod tests {
         let rotation = empty_rotation();
 
         let ids = |sel: &Selection| -> Vec<String> {
-            sel.providers.iter().map(|(p, _, _)| p.id.clone()).collect()
+            sel.providers.iter().map(|m| m.provider.id.clone()).collect()
         };
 
         let sel1 = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
@@ -349,7 +388,7 @@ mod tests {
 
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
         assert_eq!(sel.providers.len(), 2, "full member list still returned");
-        let ids: Vec<&str> = sel.providers.iter().map(|(p, _, _)| p.id.as_str()).collect();
+        let ids: Vec<&str> = sel.providers.iter().map(|m| m.provider.id.as_str()).collect();
         assert!(ids.contains(&"a") && ids.contains(&"b"));
     }
 
@@ -362,7 +401,7 @@ mod tests {
         for _ in 0..3 {
             let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &rotation).unwrap();
             assert_eq!(sel.providers.len(), 1);
-            assert_eq!(sel.providers[0].0.id, "a");
+            assert_eq!(sel.providers[0].provider.id, "a");
         }
     }
 
@@ -384,8 +423,8 @@ mod tests {
         // s.pools[0].members[0] is "b" (priority 20) per snap()'s member
         // order; find "b" explicitly rather than relying on array order.
         let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        let (_, _, member_override) = sel.providers.iter().find(|(p, _, _)| p.id == "b").unwrap();
-        assert_eq!(*member_override, Some(true));
+        let b = sel.providers.iter().find(|m| m.provider.id == "b").unwrap();
+        assert_eq!(b.dataset_logging_override, Some(true));
     }
 
     #[test]
@@ -393,6 +432,40 @@ mod tests {
         let mut s = snap();
         s.providers[0].dataset_logging = true; // "a"
         let sel = select(&s, "a/some-model", WireFormat::OpenAi, &empty_rotation()).unwrap();
-        assert_eq!(sel.providers[0].2, None);
+        assert_eq!(sel.providers[0].dataset_logging_override, None);
+        assert_eq!(sel.providers[0].reasoning_effort_override, None);
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_prefers_member_override_over_provider_default() {
+        let mut p = prov("x");
+        p.default_reasoning_effort = Some(EffortLevel::Low);
+        assert_eq!(
+            resolve_reasoning_effort(&p, Some(EffortLevel::High)),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            resolve_reasoning_effort(&p, None),
+            Some(EffortLevel::Low),
+            "no member override falls back to the provider default"
+        );
+        p.default_reasoning_effort = None;
+        assert_eq!(resolve_reasoning_effort(&p, None), None);
+        assert_eq!(
+            resolve_reasoning_effort(&p, Some(EffortLevel::Medium)),
+            Some(EffortLevel::Medium),
+            "a member override applies even with no provider default"
+        );
+    }
+
+    #[test]
+    fn select_carries_the_reasoning_effort_override_for_a_pool_routed_call() {
+        let mut s = snap();
+        s.pools[0].members[0].reasoning_effort_override = Some(EffortLevel::High);
+        let sel = select(&s, "gpt-4o", WireFormat::OpenAi, &empty_rotation()).unwrap();
+        let b = sel.providers.iter().find(|m| m.provider.id == "b").unwrap();
+        assert_eq!(b.reasoning_effort_override, Some(EffortLevel::High));
+        let a = sel.providers.iter().find(|m| m.provider.id == "a").unwrap();
+        assert_eq!(a.reasoning_effort_override, None);
     }
 }

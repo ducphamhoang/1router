@@ -10,6 +10,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::providers::oauth_routes::routes())
         .merge(crate::pools::routes::routes())
         .merge(crate::admin::routes())
+        .merge(crate::users::routes())
         .merge(crate::admin::auth::routes::routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

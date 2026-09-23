@@ -320,7 +320,12 @@ describe("Providers", () => {
       // false rather than dropping the key (see
       // editing_a_provider_reflects_its_stored_dataset_logging_value for
       // the case where the fixture *does* set it).
-      dataset_logging: false
+      dataset_logging: false,
+      // Same story: the fixture has no default_reasoning_effort, and this
+      // model ("gpt-4.1-mini") couldn't carry one anyway - an explicit
+      // null clears it rather than being omitted, since a PATCH that omits
+      // the key means "leave alone", not "clear".
+      default_reasoning_effort: null
     });
 
     await userEvent.click(screen.getByRole("button", { name: "Delete openai" }));
@@ -412,5 +417,174 @@ describe("Providers", () => {
     await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
 
     expect(screen.queryByRole("button", { name: "Validate" })).not.toBeInTheDocument();
+  });
+
+  // Regression test: the dataset-logging checkbox used to live inside the
+  // `form.kind === "passthrough"` branch, so it silently never rendered for
+  // OAuth-kind providers (Codex, Command Code) even though the backend
+  // field and save payload are kind-agnostic - see saveProvider, which
+  // always includes `dataset_logging` regardless of kind.
+  it("dataset_logging_checkbox_is_offered_for_a_non_passthrough_provider_kind", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.selectOptions(screen.getByLabelText(/Template/), "Command Code");
+
+    const checkbox = screen.getByLabelText("Log requests/responses for this provider (dataset logging)");
+    expect(checkbox).toBeInTheDocument();
+    await userEvent.click(checkbox);
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining("\"dataset_logging\":true") })
+      )
+    );
+  });
+
+  // ---- reasoning effort -------------------------------------------------
+
+  it("reasoning_effort_select_is_hidden_for_a_model_that_cannot_carry_one", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    // Default form: passthrough / openai / empty model -> unsupported.
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("Upstream model"), "gpt-4o");
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+  });
+
+  it("reasoning_effort_select_appears_and_changes_with_the_upstream_model", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+
+    await userEvent.type(screen.getByLabelText("Upstream model"), "gpt-5.1");
+    expect(screen.getByLabelText("Reasoning effort")).toBeInTheDocument();
+
+    // Editing the model back to a non-reasoning one hides it again - the
+    // capability is recomputed live, not captured once.
+    await userEvent.clear(screen.getByLabelText("Upstream model"));
+    await userEvent.type(screen.getByLabelText("Upstream model"), "gpt-4o");
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+  });
+
+  // The wire_format, not the model name, decides the shape: a Claude-named
+  // model behind an OpenAI-compatible mirror must not offer a thinking
+  // budget (that would be a guaranteed upstream 400).
+  it("reasoning_effort_select_follows_wire_format_not_the_model_name", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Upstream model"), "claude-sonnet-5");
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText("API format"), "anthropic");
+    expect(screen.getByLabelText("Reasoning effort")).toBeInTheDocument();
+  });
+
+  it("choosing_a_reasoning_effort_on_create_sends_it", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Provider ID"), "prov_5");
+    await userEvent.type(screen.getByLabelText("Name"), "gpt5");
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.openai.com/v1/chat/completions");
+    await userEvent.type(screen.getByLabelText("Upstream model"), "gpt-5.1");
+    await userEvent.selectOptions(screen.getByLabelText("Reasoning effort"), "high");
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining("\"default_reasoning_effort\":\"high\"")
+        })
+      )
+    );
+  });
+
+  it("editing_a_provider_reflects_and_patches_its_stored_reasoning_effort", async () => {
+    const stored = {
+      ...providers[0],
+      upstream_model: "gpt-5.1",
+      default_reasoning_effort: "low"
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([stored]), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/state") {
+          return new Response(JSON.stringify({ provider_id: "prov_1", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1" && init?.method === "PATCH") {
+          const sent = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ ...stored, ...sent }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+    expect(screen.getByLabelText("Reasoning effort")).toHaveValue("low");
+
+    await userEvent.selectOptions(screen.getByLabelText("Reasoning effort"), "high");
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers/prov_1",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining("\"default_reasoning_effort\":\"high\"")
+        })
+      )
+    );
+  });
+
+  // The select disappearing must actually clear the value, not leave a
+  // stale one in form state for the backend to reject.
+  it("switching_to_an_unsupported_model_clears_the_stored_reasoning_effort_on_save", async () => {
+    const stored = {
+      ...providers[0],
+      upstream_model: "gpt-5.1",
+      default_reasoning_effort: "high"
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/providers" && (!init || init.method === "GET")) {
+          return new Response(JSON.stringify([stored]), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1/state") {
+          return new Response(JSON.stringify({ provider_id: "prov_1", backoff_level: 0, status: "healthy", unavailable_in_secs: null }), { status: 200 });
+        }
+        if (url === "/admin/providers/prov_1" && init?.method === "PATCH") {
+          const sent = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ ...stored, ...sent }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+    await userEvent.clear(screen.getByLabelText("Upstream model"));
+    await userEvent.type(screen.getByLabelText("Upstream model"), "gpt-4o");
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/admin/providers/prov_1",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining("\"default_reasoning_effort\":null")
+        })
+      )
+    );
   });
 });

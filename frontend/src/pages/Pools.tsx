@@ -3,6 +3,7 @@ import { DndContext, DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove } from "@dnd-kit/sortable";
 import { apiJson } from "../lib/apiClient";
 import { Modal } from "../components/Modal";
+import { capabilityFor } from "./Providers";
 
 type PoolMember = {
   provider_id: string;
@@ -10,7 +11,14 @@ type PoolMember = {
   priority: number;
   model_override?: string;
   dataset_logging_override?: boolean | null;
+  reasoning_effort_override?: string | null;
 };
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" }
+];
 
 type Pool = {
   id: string;
@@ -28,6 +36,7 @@ type Provider = {
   id: string;
   name: string;
   wire_format: string;
+  kind: string;
   upstream_model: string;
 };
 
@@ -47,7 +56,8 @@ export function recomputeMemberPriorities(members: PoolMember[]) {
     provider_id: member.provider_id,
     priority: index + 1,
     model_override: member.model_override,
-    dataset_logging_override: member.dataset_logging_override
+    dataset_logging_override: member.dataset_logging_override,
+    reasoning_effort_override: member.reasoning_effort_override
   }));
 }
 
@@ -127,7 +137,15 @@ export function Pools() {
   const [strategy, setStrategy] = useState("priority");
   const [stickyLimit, setStickyLimit] = useState("");
   const [addMemberDraft, setAddMemberDraft] = useState<
-    Record<string, { providerId: string; modelOverride: string; datasetLoggingOverride: boolean }>
+    Record<
+      string,
+      {
+        providerId: string;
+        modelOverride: string;
+        datasetLoggingOverride: boolean;
+        reasoningEffortOverride: string;
+      }
+    >
   >({});
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
@@ -258,13 +276,37 @@ export function Pools() {
     }
   }
 
+  // Mirrors the Rust side's resolution: the member's own model_override
+  // wins, else the provider's upstream_model; shape comes from the
+  // provider's kind/wire_format. Returns "unsupported" (so the control is
+  // hidden) while no provider is chosen yet.
+  function memberCapability(pool: Pool, providerId: string, modelOverride: string) {
+    const provider = providers.find((p) => p.id === providerId);
+    if (!provider) {
+      return "unsupported" as const;
+    }
+    return capabilityFor(provider.kind, provider.wire_format, modelOverride.trim() || provider.upstream_model);
+  }
+
   function draftFor(poolId: string) {
-    return addMemberDraft[poolId] ?? { providerId: "", modelOverride: "", datasetLoggingOverride: false };
+    return (
+      addMemberDraft[poolId] ?? {
+        providerId: "",
+        modelOverride: "",
+        datasetLoggingOverride: false,
+        reasoningEffortOverride: ""
+      }
+    );
   }
 
   function setDraftFor(
     poolId: string,
-    patch: Partial<{ providerId: string; modelOverride: string; datasetLoggingOverride: boolean }>
+    patch: Partial<{
+      providerId: string;
+      modelOverride: string;
+      datasetLoggingOverride: boolean;
+      reasoningEffortOverride: string;
+    }>
   ) {
     setAddMemberDraft((current) => ({ ...current, [poolId]: { ...draftFor(poolId), ...patch } }));
     // Any edit to what's being added invalidates a prior "this model is
@@ -365,14 +407,22 @@ export function Pools() {
           // model_override above - v1 has no UI for explicitly forcing a
           // member's logging *off* against a provider default of on, only
           // "inherit" or "on".
-          ...(draft.datasetLoggingOverride ? { dataset_logging_override: true } : {})
+          ...(draft.datasetLoggingOverride ? { dataset_logging_override: true } : {}),
+          // Same "only sent when explicitly chosen" pattern: blank means
+          // inherit the provider's own default_reasoning_effort. Cleared
+          // when the provider/model can't carry one at all, so a stale
+          // draft value can't produce a rejected write.
+          ...(memberCapability(pool, draft.providerId, draft.modelOverride) !== "unsupported" &&
+          draft.reasoningEffortOverride
+            ? { reasoning_effort_override: draft.reasoningEffortOverride }
+            : {})
         })
       });
       // Only the model field clears - the provider stays selected, so
       // adding several models from the same provider (the whole point of
       // this pool's model_override support) is pick-provider-once,
       // pick-model-per-add instead of re-selecting the provider every time.
-      setDraftFor(pool.id, { modelOverride: "", datasetLoggingOverride: false });
+      setDraftFor(pool.id, { modelOverride: "", datasetLoggingOverride: false, reasoningEffortOverride: "" });
       await loadMembers([pool.id]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adding pool member failed.");
@@ -688,6 +738,24 @@ export function Pools() {
             />
             Log requests/responses for this membership (overrides the provider default)
           </label>
+          {memberCapability(pool, draftFor(pool.id).providerId, draftFor(pool.id).modelOverride) !==
+          "unsupported" ? (
+            <label>
+              Reasoning effort <span className="optional">optional</span>
+              <select
+                aria-label={`Reasoning effort override for ${pool.id}`}
+                value={draftFor(pool.id).reasoningEffortOverride}
+                onChange={(event) => setDraftFor(pool.id, { reasoningEffortOverride: event.target.value })}
+              >
+                <option value="">Inherit the provider's default</option>
+                {REASONING_EFFORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <button type="submit" disabled={!draftFor(pool.id).providerId}>
             Add to pool
           </button>

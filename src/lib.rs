@@ -8,6 +8,7 @@ pub mod providers;
 pub mod proxy;
 pub mod seed;
 pub mod telemetry;
+pub mod users;
 
 #[cfg(feature = "ui")]
 pub mod ui_assets;

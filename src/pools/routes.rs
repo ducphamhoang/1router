@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::core::error::AppError;
-use crate::core::model::{Pool, PoolMember, PoolStrategy, WireFormat};
+use crate::core::model::{EffortLevel, Pool, PoolMember, PoolStrategy, WireFormat};
 use crate::core::state::{reload_snapshot, AppState};
 use crate::pools::queries;
 use crate::providers::queries as pq;
@@ -119,6 +119,8 @@ struct PutMember {
     model_override: Option<String>,
     #[serde(default)]
     dataset_logging_override: Option<bool>,
+    #[serde(default)]
+    reasoning_effort_override: Option<EffortLevel>,
 }
 
 async fn put_member(
@@ -140,6 +142,7 @@ async fn put_member(
             priority: b.priority,
             model_override: model_override.clone(),
             dataset_logging_override: b.dataset_logging_override,
+            reasoning_effort_override: b.reasoning_effort_override,
         },
     )
     .await?;
@@ -150,6 +153,7 @@ async fn put_member(
         "priority": b.priority,
         "model_override": model_override,
         "dataset_logging_override": b.dataset_logging_override,
+        "reasoning_effort_override": b.reasoning_effort_override,
     })))
 }
 

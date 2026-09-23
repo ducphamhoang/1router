@@ -12,6 +12,7 @@ use crate::core::model::{Pool, PoolMember, Provider};
 use crate::core::state::{reload_snapshot, AppState};
 use crate::pools::queries as pools_q;
 use crate::providers::queries as prov_q;
+use crate::users::queries::{self as users_q, UserExport};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportDump {
@@ -20,6 +21,11 @@ pub struct ExportDump {
     pub providers: Vec<Provider>,
     pub pools: Vec<Pool>,
     pub members: Vec<PoolMember>,
+    /// `/v1/*` user credentials, carried as `key_hash` (never the raw key)
+    /// so a restore brings back working keys. `#[serde(default)]` so dumps
+    /// and seed files from before users existed still import.
+    #[serde(default)]
+    pub users: Vec<UserExport>,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -36,10 +42,12 @@ async fn export(State(s): State<AppState>) -> Result<Json<ExportDump>, AppError>
     for p in &pools {
         members.extend(pools_q::list_members(&s.db, &p.id).await?);
     }
+    let users = users_q::export_users(&s.db).await?;
     Ok(Json(ExportDump {
         providers,
         pools,
         members,
+        users,
     }))
 }
 
@@ -54,6 +62,7 @@ async fn import(
             "providers": dump.providers.len(),
             "pools": dump.pools.len(),
             "members": dump.members.len(),
+            "users": dump.users.len(),
         }
     })))
 }
@@ -72,12 +81,13 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
 
     for p in &dump.providers {
         sqlx::query(
-            "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,created_at,updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,default_reasoning_effort,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, wire_format=excluded.wire_format, kind=excluded.kind,
                base_url=excluded.base_url, api_key=excluded.api_key,
                upstream_model=excluded.upstream_model, dataset_logging=excluded.dataset_logging,
+               default_reasoning_effort=excluded.default_reasoning_effort,
                updated_at=excluded.updated_at",
         )
         .bind(&p.id)
@@ -88,6 +98,7 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         .bind(&p.api_key)
         .bind(&p.upstream_model)
         .bind(p.dataset_logging)
+        .bind(p.default_reasoning_effort)
         .bind(p.created_at)
         .bind(p.updated_at)
         .execute(&mut *tx)
@@ -112,15 +123,36 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
         // unique index.
         let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
         sqlx::query(
-            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override) VALUES (?,?,?,?,?)
+            "INSERT INTO pool_members (pool_id, provider_id, priority, model_override, dataset_logging_override, reasoning_effort_override) VALUES (?,?,?,?,?,?)
              ON CONFLICT (pool_id, provider_id, COALESCE(model_override, '')) DO UPDATE SET
-               priority=excluded.priority, dataset_logging_override=excluded.dataset_logging_override",
+               priority=excluded.priority, dataset_logging_override=excluded.dataset_logging_override,
+               reasoning_effort_override=excluded.reasoning_effort_override",
         )
         .bind(&m.pool_id)
         .bind(&m.provider_id)
         .bind(m.priority)
         .bind(model_override)
         .bind(m.dataset_logging_override)
+        .bind(m.reasoning_effort_override)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for u in &dump.users {
+        sqlx::query(
+            "INSERT INTO users (id, name, key_prefix, key_hash, created_at, last_used_at, revoked_at)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, key_prefix=excluded.key_prefix, key_hash=excluded.key_hash,
+               revoked_at=excluded.revoked_at",
+        )
+        .bind(&u.id)
+        .bind(&u.name)
+        .bind(&u.key_prefix)
+        .bind(&u.key_hash)
+        .bind(u.created_at)
+        .bind(u.last_used_at)
+        .bind(u.revoked_at)
         .execute(&mut *tx)
         .await?;
     }
@@ -146,6 +178,7 @@ mod tests {
             api_key: Some("k".into()),
             upstream_model: "m".into(),
             dataset_logging: false,
+            default_reasoning_effort: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -176,7 +209,9 @@ mod tests {
                 priority: 1,
                 model_override: None,
                 dataset_logging_override: None,
+                reasoning_effort_override: None,
             }],
+            users: vec![],
         };
 
         let result = import_config(&db, &dump).await;

@@ -9,6 +9,12 @@ pub enum ProviderStatus {
     Misconfigured,
 }
 
+/// How long a `Misconfigured` (provider, model) is skipped before the next
+/// request is allowed through to re-probe upstream (BL-01). A still-broken
+/// credential just gets re-marked for another window; a recovered upstream
+/// heals itself via `record_success`, with no admin action or restart.
+pub const MISCONFIGURED_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Clone, Debug)]
 pub struct ProviderRuntimeState {
     pub backoff_level: u8,
@@ -28,9 +34,6 @@ impl Default for ProviderRuntimeState {
 
 impl ProviderRuntimeState {
     pub fn is_available(&self, now: Instant) -> bool {
-        if matches!(self.status, ProviderStatus::Misconfigured) {
-            return false;
-        }
         match self.unavailable_until {
             Some(until) => now >= until,
             None => true,
@@ -59,9 +62,13 @@ impl ProviderRuntimeState {
         self.status = ProviderStatus::Cooling;
     }
 
-    pub fn mark_misconfigured(&mut self) {
+    /// Skip this (provider, model) for [`MISCONFIGURED_RETRY_AFTER`]. Only
+    /// for failures that are the *provider's* fault (rejected credential,
+    /// dead refresh token) - never for a request the upstream rejected as
+    /// malformed, which says nothing about the provider (SEC-01).
+    pub fn mark_misconfigured(&mut self, now: Instant) {
         self.status = ProviderStatus::Misconfigured;
-        self.unavailable_until = None;
+        self.unavailable_until = Some(now + MISCONFIGURED_RETRY_AFTER);
     }
 }
 
@@ -95,9 +102,10 @@ pub fn reset_provider_to_healthy(map: &RuntimeStateMap, provider_id: &str) {
 /// later for a model nobody has called yet.
 pub fn mark_provider_misconfigured(map: &RuntimeStateMap, provider_id: &str) {
     let prefix = runtime_key_prefix(provider_id);
+    let now = Instant::now();
     for mut entry in map.iter_mut() {
         if entry.key().starts_with(&prefix) {
-            entry.value_mut().mark_misconfigured();
+            entry.value_mut().mark_misconfigured(now);
         }
     }
 }
@@ -213,10 +221,18 @@ mod tests {
     }
 
     #[test]
-    fn misconfigured_is_never_available() {
+    fn misconfigured_is_skipped_then_re_probed_after_the_retry_window() {
         let mut s = ProviderRuntimeState::default();
-        s.mark_misconfigured();
+        let now = Instant::now();
+        s.mark_misconfigured(now);
         assert!(matches!(s.status, ProviderStatus::Misconfigured));
-        assert!(!s.is_available(Instant::now() + Duration::from_secs(999_999)));
+        assert!(!s.is_available(now));
+        assert!(!s.is_available(now + MISCONFIGURED_RETRY_AFTER - Duration::from_secs(1)));
+        assert!(s.is_available(now + MISCONFIGURED_RETRY_AFTER));
+
+        // the re-probe succeeding heals it
+        s.record_success();
+        assert!(matches!(s.status, ProviderStatus::Healthy));
+        assert!(s.is_available(now));
     }
 }

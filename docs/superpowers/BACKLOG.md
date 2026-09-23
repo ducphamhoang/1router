@@ -233,3 +233,45 @@ Command Code credential to re-test the Provider API path.
 **Acceptance sketch:** a request carrying unsupported fields logs which
 ones were dropped; the design doc states which client params Command Code
 honors and which it cannot.
+
+---
+
+## BL-06: Live deployment is exposed (default admin password, 0.0.0.0, open access, plain HTTP)
+
+**Status:** known issue — deliberately deferred; fix **last**, after the
+BL-07 code fixes land (decision 2026-09-23).
+
+**Where:** the local deployment at `E:\1router` (`1router.exe`, started with
+no env), not the code.
+
+**What:** the running gateway listens on `0.0.0.0:8080`, has open access on
+(`/v1/*` needs no key), still uses the published default admin UI password
+(`password` — startup log warns about it), and serves plain HTTP. Anyone who
+can reach the machine can log into `/ui/`, pull every provider's upstream
+key via `/admin/export`, mint users, or spend provider credits anonymously.
+The code-side hardening for this class of problem (refuse a non-loopback
+bind while defaults are in use, generate a random secret on the TTY
+onboarding path instead of `1router-api-key`) is part of SEC-04/SEC-14 in
+the audit.
+
+**Fix (when picked up):** change the admin password; bind
+`ROUTER_LISTEN_ADDR=127.0.0.1:8080` unless LAN access is needed; hand out
+per-user keys, then turn open access off; put TLS in front if it stays
+reachable from other machines.
+
+---
+
+## BL-07: Security audit 2026-09-23 remediation
+
+**Where:** [`security-audit-2026-09-23.md`](security-audit-2026-09-23.md) —
+20 verified findings (2 High, 7 Medium, 10 Low, 1 Info) with file:line,
+scenario and fix for each.
+
+**Why it matters:** SEC-01 was reproduced live: a single user request the
+upstream rejects with 400 took a pool offline for every other user until an
+admin intervened (same root cause as BL-01, now client-triggerable).
+SEC-02 lets any `/v1` caller exhaust memory with one oversized body.
+
+**Suggested order:** SEC-01 + BL-01 together, SEC-02, SEC-03, SEC-05,
+SEC-04 (onboarding/README now that per-user keys exist), SEC-07/SEC-08/SEC-10
+(small, mechanical), then the Lows. BL-06 last.

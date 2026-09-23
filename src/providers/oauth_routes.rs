@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::OnceLock;
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dashmap::DashMap;
@@ -133,6 +134,7 @@ struct CommandCodeKeyBody {
 async fn set_commandcode_key(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(body): Json<CommandCodeKeyBody>,
 ) -> Result<Json<Value>, AppError> {
     let provider = queries::get_provider(&s.db, &id).await?;
@@ -143,6 +145,17 @@ async fn set_commandcode_key(
     }
     let key = body.api_key.trim();
     if key.is_empty() {
+        // The on-disk key is the host OS user's own Command Code account.
+        // Only an admin sitting at that host (loopback) may wire it in; a
+        // remote admin must paste a key (SEC-18).
+        let local = peer.is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback());
+        if !local {
+            return Err(AppError::BadRequest(
+                "using the key from this machine is only allowed from the machine itself \
+                 (open the admin UI on localhost); paste an api_key instead"
+                    .into(),
+            ));
+        }
         let from_disk = crate::providers::adapter::commandcode::api_key::commandcode_key_from_disk();
         let key = from_disk
             .ok_or_else(|| AppError::BadRequest("api_key must not be empty".into()))?;

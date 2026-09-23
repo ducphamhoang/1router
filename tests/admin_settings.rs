@@ -388,3 +388,35 @@ async fn shared_secret_patch_rejects_short_secrets() {
     let body = json_body(patched).await;
     assert!(body["error"]["message"].as_str().unwrap().contains("at least 32"));
 }
+
+/// SEC-18: "use the key from this machine" pulls the host OS user's own
+/// Command Code credential, so it is refused unless the admin request comes
+/// from loopback (no peer address at all counts as not local).
+#[tokio::test]
+async fn commandcode_key_from_disk_is_refused_for_a_non_local_admin() {
+    let (state, _dir) = test_state(SecretOrigin::SidecarFile).await;
+    let router = build_router(state);
+    let created = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/admin/providers",
+            "initial",
+            Some(json!({"id":"cc","name":"cc","wire_format":"openai","kind":"oauth_command_code","upstream_model":"m"})),
+        ))
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "{}", created.status());
+    let resp = router
+        .oneshot(request(
+            Method::POST,
+            "/admin/providers/cc/commandcode/key",
+            "initial",
+            Some(json!({ "api_key": "" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().contains("only allowed from the machine itself"));
+}

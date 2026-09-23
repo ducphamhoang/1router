@@ -44,7 +44,7 @@ impl AuthListener {
     }
 
     pub async fn wait(self) -> Result<AuthCallback, LoginError> {
-        match tokio::time::timeout(auth_timeout(), accept_loop(self.listener)).await {
+        match tokio::time::timeout(auth_timeout(), accept_loop(self.listener, &self.state_token)).await {
             Ok(result) => result,
             Err(_) => Err(LoginError::Timeout),
         }
@@ -123,17 +123,26 @@ enum RequestOutcome {
     Complete(Result<AuthCallback, LoginError>),
 }
 
-async fn accept_loop(listener: TcpListener) -> Result<AuthCallback, LoginError> {
+/// One slow or silent connection must not hold up the (serial) accept loop
+/// for the rest of the login window (SEC-17).
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn accept_loop(listener: TcpListener, expected_state: &str) -> Result<AuthCallback, LoginError> {
     loop {
         let (stream, _) = listener.accept().await.map_err(LoginError::Io)?;
-        match handle_connection(stream).await.map_err(LoginError::Io)? {
-            RequestOutcome::Continue => {}
-            RequestOutcome::Complete(result) => return result,
+        match tokio::time::timeout(CONNECTION_TIMEOUT, handle_connection(stream, expected_state)).await {
+            Ok(Ok(RequestOutcome::Complete(result))) => return result,
+            // A broken or timed-out connection is that client's problem; keep
+            // waiting for the real callback.
+            Ok(Ok(RequestOutcome::Continue)) | Ok(Err(_)) | Err(_) => {}
         }
     }
 }
 
-async fn handle_connection(mut stream: tokio::net::TcpStream) -> io::Result<RequestOutcome> {
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    expected_state: &str,
+) -> io::Result<RequestOutcome> {
     let mut request = Vec::new();
     let header_end = loop {
         let mut part = [0u8; 1024];
@@ -166,12 +175,14 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) -> io::Result<Requ
     let mut origin = "";
     let mut requested_headers = "";
     let mut content_length = 0usize;
+    let mut content_type = String::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             match name.trim().to_ascii_lowercase().as_str() {
                 "origin" => origin = value.trim(),
                 "access-control-request-headers" => requested_headers = value.trim(),
                 "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                "content-type" => content_type = value.trim().to_ascii_lowercase(),
                 _ => {}
             }
         }
@@ -228,6 +239,21 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) -> io::Result<Requ
         .await?;
         return Ok(RequestOutcome::Continue);
     }
+    // A JSON content type forces a CORS preflight, which only the allowlisted
+    // origins pass - a random page's `text/plain` "simple" POST can't reach
+    // the parser (SEC-17).
+    if !content_type.starts_with("application/json") {
+        write_response_with_headers(
+            &mut stream,
+            415,
+            "{\"success\":false,\"error\":\"expected application/json\"}",
+            cors_origin,
+            requested_headers,
+            true,
+        )
+        .await?;
+        return Ok(RequestOutcome::Continue);
+    }
     let value: Value = match serde_json::from_slice(&body[..body.len().min(content_length)]) {
         Ok(value) => value,
         Err(_) => {
@@ -243,6 +269,21 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) -> io::Result<Requ
             return Ok(RequestOutcome::Continue);
         }
     };
+    // Check `state` before anything else, including `error`: only the page
+    // we sent the user to knows it, so anything else is ignored rather than
+    // allowed to end (or cancel) the login (SEC-17).
+    if value.get("state").and_then(Value::as_str).map(str::trim) != Some(expected_state) {
+        write_response_with_headers(
+            &mut stream,
+            400,
+            "{\"success\":false,\"error\":\"state mismatch\"}",
+            cors_origin,
+            requested_headers,
+            true,
+        )
+        .await?;
+        return Ok(RequestOutcome::Continue);
+    }
     if let Some(error) = value.get("error") {
         let description = error
             .as_str()
@@ -345,6 +386,7 @@ async fn write_response_with_headers(
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         _ => "Error",
     };
     let body_bytes = body.as_bytes();
@@ -470,7 +512,7 @@ mod tests {
         let (status, _) = request(
             port,
             format!(
-                "POST /callback HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                "POST /callback HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
             ),
@@ -481,7 +523,7 @@ mod tests {
         let _ = request(
             port,
             format!(
-                "POST /callback HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                "POST /callback HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
             ),
@@ -509,13 +551,39 @@ mod tests {
         let _ = request(
             port,
             format!(
-                "POST /callback HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                "POST /callback HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
             ),
         )
         .await;
         assert!(task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn foreign_posts_cannot_end_the_login() {
+        async fn post(port: u16, content_type: &str, body: &str) -> u16 {
+            let raw = format!(
+                "POST /callback HTTP/1.1\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            request(port, raw).await.0
+        }
+        // This test outlives the 100ms auth timeout another test sets via env.
+        let _guard = auth_timeout_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let l = listener().await;
+        let port = l.port;
+        let task = tokio::spawn(l.wait());
+        // Wrong state, even carrying `error`: ignored, flow keeps waiting.
+        let foreign = json!({"error": "cancelled", "state": "guess"}).to_string();
+        assert_eq!(post(port, "application/json", &foreign).await, 400);
+        // A CORS "simple" text/plain POST is refused before parsing.
+        let real = callback("state-1").to_string();
+        assert_eq!(post(port, "text/plain", &real).await, 415);
+        // A silent connection doesn't block the real callback forever.
+        let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        assert_eq!(post(port, "application/json", &real).await, 200);
+        assert_eq!(task.await.unwrap().unwrap().api_key, "cc-key");
     }
 
     #[test]

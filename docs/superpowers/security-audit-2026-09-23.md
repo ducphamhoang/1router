@@ -16,6 +16,15 @@ or anyone at all while open access is on), **admin**, **upstream** (a
 malicious or compromised provider endpoint the admin configured), **local**
 (another OS user / process on the host).
 
+## Remediation status
+
+| ID | Status |
+|---|---|
+| SEC-01 | **Fixed** (`fix/sec-01-02`): 400/413/422 no longer touch runtime state; re-verified live |
+| SEC-02 | **Fixed** (`fix/sec-01-02`): cap enforced mid-stream via `http_body_util::Limited`; 200 MB chunked body cut off at ~12 MB, gateway RSS 13 MB |
+| BL-01 | **Fixed** alongside SEC-01: `Misconfigured` now re-probes after 5 min instead of being permanent |
+| others | Open — see BL-07 for order |
+
 | ID | Sev | Title | Attacker |
 |---|---|---|---|
 | SEC-01 | High | One bad request permanently disables a pool member | /v1 caller |

@@ -372,10 +372,10 @@ async fn same_provider_different_model_members_fail_over_to_each_other() {
 }
 
 /// The other half of the runtime-keying fix: a `NonRetryable` error on one
-/// model must not misconfigure its siblings. First request hits the
-/// broken model and gets a 400 (misconfiguring it); a SEPARATE, later
-/// request for the healthy model must still succeed - proving the first
-/// model's `Misconfigured` flag didn't take down the whole provider.
+/// model must not affect its siblings. First request hits the broken model
+/// and gets a 400; a SEPARATE, later request for the healthy model must
+/// still succeed. (Since SEC-01 a 400 no longer changes runtime state at
+/// all - see `client_rejected_request_does_not_take_the_pool_offline`.)
 #[tokio::test]
 async fn nonretryable_error_on_one_model_does_not_misconfigure_its_sibling() {
     let upstream = MockServer::start().await;
@@ -439,4 +439,53 @@ async fn nonretryable_error_on_one_model_does_not_misconfigure_its_sibling() {
         "the healthy model must still serve - it must not have been misconfigured \
          by the broken model's failure, since they share a provider id but not a runtime_key"
     );
+}
+
+/// SEC-01 regression: a request the upstream rejects as malformed (400 /
+/// 413 / 422) is the *caller's* fault. It used to mark the pool member
+/// `Misconfigured` forever, so one bad request from one user took the pool
+/// offline for everyone until an admin intervened. Now the error is relayed
+/// and the very next well-formed request is served normally.
+#[tokio::test]
+async fn client_rejected_request_does_not_take_the_pool_offline() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "messages": "x" })))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": {"message": "invalid messages"}})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "messages": "too-long" })))
+        .respond_with(ResponseTemplate::new(413))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&upstream)
+        .await;
+
+    let app = spawn_app().await;
+    create_pool(&app).await;
+    add_provider(&app, "only", &format!("{}/v1/chat/completions", upstream.uri())).await;
+    add_pool_member(&app, "only", 1).await;
+
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    let send = |messages: serde_json::Value| {
+        client
+            .post(format!("{}/v1/chat/completions", app.base_url))
+            .header(&k, &v)
+            .json(&json!({ "model": "gpt-4o", "messages": messages }))
+            .send()
+    };
+
+    assert_eq!(send(json!("x")).await.unwrap().status(), 400, "caller sees the upstream 400");
+    assert_eq!(send(json!("too-long")).await.unwrap().status(), 413, "and the upstream 413");
+    for _ in 0..3 {
+        assert_eq!(
+            send(json!([])).await.unwrap().status(),
+            200,
+            "the pool must keep serving other requests after a client-caused rejection"
+        );
+    }
 }

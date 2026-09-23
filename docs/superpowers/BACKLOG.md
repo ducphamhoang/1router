@@ -9,6 +9,13 @@ removes). Entries are roughly ordered by impact; no dates promised.
 
 ## BL-01: Misconfigured runtime flag is a permanent, silent circuit breaker
 
+**Status (2026-09-23): mostly fixed** with SEC-01 — `Misconfigured` now
+expires after `MISCONFIGURED_RETRY_AFTER` (5 min, `src/core/runtime.rs`) so
+the next request re-probes and `record_success` heals it; and client-caused
+400/413/422 no longer mark anything. **Still open:** surfacing the real
+upstream error instead of `"no provider produced a response"` while a
+provider is skipped.
+
 **Where:** `src/core/runtime.rs` (`ProviderRuntimeState::is_available`,
 `mark_misconfigured`), `src/proxy/flow.rs`, `src/providers/refresh_task.rs`.
 

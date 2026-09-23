@@ -13,7 +13,13 @@ pub fn classify(status: StatusCode, headers: &HeaderMap) -> ErrorClass {
 
     match status {
         StatusCode::UNAUTHORIZED => ErrorClass::AuthExpired,
-        StatusCode::BAD_REQUEST => ErrorClass::NonRetryable,
+        // The upstream rejected *this request* (malformed body, context too
+        // long, payload too large, unprocessable). Another provider would
+        // most likely reject it too, and it says nothing about this
+        // provider's health - relay it and leave runtime state alone (SEC-01).
+        StatusCode::BAD_REQUEST
+        | StatusCode::PAYLOAD_TOO_LARGE
+        | StatusCode::UNPROCESSABLE_ENTITY => ErrorClass::NonRetryable,
         StatusCode::TOO_MANY_REQUESTS
         | StatusCode::REQUEST_TIMEOUT
         | StatusCode::INTERNAL_SERVER_ERROR
@@ -65,6 +71,8 @@ mod tests {
         assert_eq!(classify(StatusCode::OK, &h), ErrorClass::Success);
         assert_eq!(classify(StatusCode::UNAUTHORIZED, &h), ErrorClass::AuthExpired);
         assert_eq!(classify(StatusCode::BAD_REQUEST, &h), ErrorClass::NonRetryable);
+        assert_eq!(classify(StatusCode::PAYLOAD_TOO_LARGE, &h), ErrorClass::NonRetryable);
+        assert_eq!(classify(StatusCode::UNPROCESSABLE_ENTITY, &h), ErrorClass::NonRetryable);
     }
 
     #[test]

@@ -263,10 +263,7 @@ pub async fn handle_proxy(
                 }
             }
             ErrorClass::NonRetryable => {
-                {
-                    let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                    st.mark_misconfigured();
-                }
+                // Client-caused rejection: no runtime-state change (SEC-01).
                 let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
                 let text = upstream.text().await.unwrap_or_default();
                 log(
@@ -287,7 +284,7 @@ pub async fn handle_proxy(
                 {
                     {
                         let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                        st.mark_misconfigured();
+                        st.mark_misconfigured(Instant::now());
                     }
                     let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
                     let text = upstream.text().await.unwrap_or_default();
@@ -411,11 +408,7 @@ pub async fn handle_proxy(
                                 }
                             }
                             ErrorClass::NonRetryable => {
-                                {
-                                    let mut st =
-                                        state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                                    st.mark_misconfigured();
-                                }
+                                // Client-caused rejection: no runtime-state change (SEC-01).
                                 let text = resp2.text().await.unwrap_or_default();
                                 log(
                                     &state,
@@ -432,7 +425,7 @@ pub async fn handle_proxy(
                                 {
                                     let mut st =
                                         state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                                    st.mark_misconfigured();
+                                    st.mark_misconfigured(Instant::now());
                                 }
                                 let text = resp2.text().await.unwrap_or_default();
                                 log(
@@ -483,7 +476,7 @@ pub async fn handle_proxy(
                     Err(RefreshError::InvalidGrant) => {
                         {
                             let mut st = state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                            st.mark_misconfigured();
+                            st.mark_misconfigured(Instant::now());
                         }
                         last_error_body = "refresh token invalid_grant; re-auth required".into();
                         log(&state, &caller, &pool_id, &provider.id, Some(401), latency_ms, false);
@@ -608,11 +601,7 @@ pub async fn handle_proxy(
                             }
                         }
                         ErrorClass::NonRetryable => {
-                            {
-                                let mut st =
-                                    state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                                st.mark_misconfigured();
-                            }
+                            // Client-caused rejection: no runtime-state change (SEC-01).
                             last_error_body = resp2.text().await.unwrap_or_default();
                             log(
                                 &state,
@@ -628,7 +617,7 @@ pub async fn handle_proxy(
                             {
                                 let mut st =
                                     state.runtime.entry(runtime_key(&provider.id, effective_model)).or_default();
-                                st.mark_misconfigured();
+                                st.mark_misconfigured(Instant::now());
                             }
                             last_error_body = resp2.text().await.unwrap_or_default();
                             log(
@@ -756,8 +745,9 @@ mod tests {
     #[test]
     fn misconfigured_is_skipped() {
         let mut st = ProviderRuntimeState::default();
-        st.mark_misconfigured();
-        assert!(!st.is_available(Instant::now()));
+        let now = Instant::now();
+        st.mark_misconfigured(now);
+        assert!(!st.is_available(now));
         assert!(matches!(st.status, ProviderStatus::Misconfigured));
     }
 }

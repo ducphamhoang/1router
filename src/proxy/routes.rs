@@ -1,11 +1,11 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde_json::{json, Value};
 
+use crate::auth::client_keys::Caller;
 use crate::core::model::WireFormat;
 use crate::core::state::AppState;
 use crate::proxy::body::buffer_body;
@@ -27,15 +27,29 @@ fn model_from_body(bytes: &[u8]) -> Option<String> {
     })
 }
 
-async fn chat_completions(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Response {
-    proxy_entry(s, WireFormat::OpenAi, headers, body).await
+// `Caller` is inserted by `auth::middleware::require_bearer`; `Option` so a
+// router built without that layer (tests) still works, as anonymous.
+async fn chat_completions(
+    State(s): State<AppState>,
+    caller: Option<Extension<Caller>>,
+    body: Body,
+) -> Response {
+    proxy_entry(s, WireFormat::OpenAi, caller_of(caller), body).await
 }
 
-async fn messages(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Response {
-    proxy_entry(s, WireFormat::Anthropic, headers, body).await
+async fn messages(
+    State(s): State<AppState>,
+    caller: Option<Extension<Caller>>,
+    body: Body,
+) -> Response {
+    proxy_entry(s, WireFormat::Anthropic, caller_of(caller), body).await
 }
 
-async fn proxy_entry(s: AppState, wire: WireFormat, headers: HeaderMap, body: Body) -> Response {
+fn caller_of(caller: Option<Extension<Caller>>) -> Caller {
+    caller.map(|Extension(c)| c).unwrap_or_default()
+}
+
+async fn proxy_entry(s: AppState, wire: WireFormat, caller: Caller, body: Body) -> Response {
     let cap = s.config.max_body_bytes;
     let bytes = match buffer_body(body, cap).await {
         Ok(b) => b,
@@ -51,7 +65,7 @@ async fn proxy_entry(s: AppState, wire: WireFormat, headers: HeaderMap, body: Bo
             )
         }
     };
-    handle_proxy(s, wire, pool_id, headers, bytes).await
+    handle_proxy(s, wire, pool_id, caller, bytes).await
 }
 
 async fn models(State(s): State<AppState>) -> Json<Value> {

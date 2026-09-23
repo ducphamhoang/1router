@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 
+use crate::auth::client_keys::Caller;
 use crate::core::error::{AppError, ErrorClass, RefreshError};
 use crate::core::model::{DatasetLogEntry, LatencyMs, LogEntry, Provider, ProviderKind, WireFormat};
 use crate::core::runtime::runtime_key;
@@ -28,6 +29,7 @@ pub(crate) async fn credentials_for(state: &AppState, provider: &Provider) -> Cr
 
 fn log(
     state: &AppState,
+    caller: &Caller,
     pool_id: &str,
     provider_id: &str,
     status: Option<i64>,
@@ -41,6 +43,8 @@ fn log(
         status_code: status,
         latency_ms,
         success,
+        caller_key_id: caller.key_id.clone(),
+        caller_name: caller.name.clone(),
     });
 }
 
@@ -58,6 +62,7 @@ fn maybe_log_dataset(
     state: &AppState,
     enabled: bool,
     resp: Response,
+    caller: &Caller,
     pool_id: Option<String>,
     provider_id: String,
     model: String,
@@ -74,6 +79,7 @@ fn maybe_log_dataset(
     let timestamp = chrono::Utc::now();
     let input_body = String::from_utf8_lossy(body).into_owned();
     let dataset_log_tx = state.dataset_log_tx.clone();
+    let user_id = caller.name.clone();
 
     let (parts, resp_body) = resp.into_parts();
     let wrapped = dataset_tee::tee(resp_body, move |output_bytes, complete| {
@@ -83,7 +89,7 @@ fn maybe_log_dataset(
             pool_id,
             provider_id,
             model,
-            user_id: None,
+            user_id,
             wire_format: wire,
             stream,
             input_body,
@@ -103,7 +109,7 @@ pub async fn handle_proxy(
     state: AppState,
     wire: WireFormat,
     pool_id: String,
-    _client_headers: HeaderMap,
+    caller: Caller,
     body: Bytes,
 ) -> Response {
     let snapshot = state.snapshot.load();
@@ -185,7 +191,7 @@ pub async fn handle_proxy(
                     let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                     st.record_retryable(cooldown, Instant::now());
                 }
-                log(&state, &pool_id, &provider.id, None, latency_ms, false);
+                log(&state, &caller, &pool_id, &provider.id, None, latency_ms, false);
                 last_error_body = format!("upstream request error: {e}");
                 continue;
             }
@@ -208,6 +214,7 @@ pub async fn handle_proxy(
                     Ok(resp) => {
                         log(
                             &state,
+                            &caller,
                             &pool_id,
                             &provider.id,
                             Some(status.as_u16() as i64),
@@ -219,6 +226,7 @@ pub async fn handle_proxy(
                             &state,
                             dataset_enabled,
                             resp,
+                            &caller,
                             selection.pool.map(|p| p.id.clone()),
                             provider.id.clone(),
                             effective_model.clone(),
@@ -236,6 +244,7 @@ pub async fn handle_proxy(
                         // the misleading raw status.
                         log(
                             &state,
+                            &caller,
                             &pool_id,
                             &provider.id,
                             Some(status.as_u16() as i64),
@@ -263,6 +272,7 @@ pub async fn handle_proxy(
                 let text = upstream.text().await.unwrap_or_default();
                 log(
                     &state,
+                    &caller,
                     &pool_id,
                     &provider.id,
                     Some(status.as_u16() as i64),
@@ -284,6 +294,7 @@ pub async fn handle_proxy(
                     let text = upstream.text().await.unwrap_or_default();
                     log(
                         &state,
+                        &caller,
                         &pool_id,
                         &provider.id,
                         Some(status.as_u16() as i64),
@@ -309,7 +320,7 @@ pub async fn handle_proxy(
                         let retry_req = match adapter.build_request(&body, &new_creds).await {
                             Ok(req) => req,
                             Err(e) => {
-                                log(&state, &pool_id, &provider.id, None, 0, false);
+                                log(&state, &caller, &pool_id, &provider.id, None, 0, false);
                                 last_error_body = format!("retry request build failed: {e}");
                                 continue;
                             }
@@ -325,7 +336,7 @@ pub async fn handle_proxy(
                                     let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                                     st.record_retryable(cooldown, Instant::now());
                                 }
-                                log(&state, &pool_id, &provider.id, None, lat2, false);
+                                log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
                                 last_error_body = format!("retry upstream request error: {e}");
                                 continue;
                             }
@@ -351,6 +362,7 @@ pub async fn handle_proxy(
                                     Ok(response) => {
                                         log(
                                             &state,
+                                            &caller,
                                             &pool_id,
                                             &provider.id,
                                             Some(retry_status.as_u16() as i64),
@@ -363,6 +375,7 @@ pub async fn handle_proxy(
                                             &state,
                                             dataset_enabled,
                                             response,
+                                            &caller,
                                             selection.pool.map(|p| p.id.clone()),
                                             provider.id.clone(),
                                             effective_model.clone(),
@@ -376,6 +389,7 @@ pub async fn handle_proxy(
                                     Err(e) => {
                                         log(
                                             &state,
+                                            &caller,
                                             &pool_id,
                                             &provider.id,
                                             Some(retry_status.as_u16() as i64),
@@ -406,6 +420,7 @@ pub async fn handle_proxy(
                                 let text = resp2.text().await.unwrap_or_default();
                                 log(
                                     &state,
+                                    &caller,
                                     &pool_id,
                                     &provider.id,
                                     Some(retry_status.as_u16() as i64),
@@ -423,6 +438,7 @@ pub async fn handle_proxy(
                                 let text = resp2.text().await.unwrap_or_default();
                                 log(
                                     &state,
+                                    &caller,
                                     &pool_id,
                                     &provider.id,
                                     Some(retry_status.as_u16() as i64),
@@ -452,6 +468,7 @@ pub async fn handle_proxy(
                                 last_error_body = resp2.text().await.unwrap_or_default();
                                 log(
                                     &state,
+                                    &caller,
                                     &pool_id,
                                     &provider.id,
                                     Some(retry_status.as_u16() as i64),
@@ -470,7 +487,7 @@ pub async fn handle_proxy(
                             st.mark_misconfigured();
                         }
                         last_error_body = "refresh token invalid_grant; re-auth required".into();
-                        log(&state, &pool_id, &provider.id, Some(401), latency_ms, false);
+                        log(&state, &caller, &pool_id, &provider.id, Some(401), latency_ms, false);
                         continue;
                     }
                     Err(RefreshError::Transient(msg)) => {
@@ -480,7 +497,7 @@ pub async fn handle_proxy(
                             st.record_retryable(cooldown, Instant::now());
                         }
                         last_error_body = format!("transient refresh error: {msg}");
-                        log(&state, &pool_id, &provider.id, Some(401), latency_ms, false);
+                        log(&state, &caller, &pool_id, &provider.id, Some(401), latency_ms, false);
                         continue;
                     }
                 }
@@ -502,7 +519,7 @@ pub async fn handle_proxy(
                     let retry_req = match adapter.build_request(&body, &creds).await {
                         Ok(req) => req,
                         Err(e) => {
-                            log(&state, &pool_id, &provider.id, None, 0, false);
+                            log(&state, &caller, &pool_id, &provider.id, None, 0, false);
                             last_error_body = format!("retry request build failed: {e}");
                             continue;
                         }
@@ -518,7 +535,7 @@ pub async fn handle_proxy(
                                 let cooldown = backoff::cooldown_for(st.backoff_level + 1);
                                 st.record_retryable(cooldown, Instant::now());
                             }
-                            log(&state, &pool_id, &provider.id, None, lat2, false);
+                            log(&state, &caller, &pool_id, &provider.id, None, lat2, false);
                             last_error_body = format!("retry upstream request error: {e}");
                             continue;
                         }
@@ -543,6 +560,7 @@ pub async fn handle_proxy(
                                 Ok(response) => {
                                     log(
                                         &state,
+                                        &caller,
                                         &pool_id,
                                         &provider.id,
                                         Some(retry_status.as_u16() as i64),
@@ -555,6 +573,7 @@ pub async fn handle_proxy(
                                         &state,
                                         dataset_enabled,
                                         response,
+                                        &caller,
                                         selection.pool.map(|p| p.id.clone()),
                                         provider.id.clone(),
                                         effective_model.clone(),
@@ -568,6 +587,7 @@ pub async fn handle_proxy(
                                 Err(e) => {
                                     log(
                                         &state,
+                                        &caller,
                                         &pool_id,
                                         &provider.id,
                                         Some(retry_status.as_u16() as i64),
@@ -597,6 +617,7 @@ pub async fn handle_proxy(
                             last_error_body = resp2.text().await.unwrap_or_default();
                             log(
                                 &state,
+                                &caller,
                                 &pool_id,
                                 &provider.id,
                                 Some(retry_status.as_u16() as i64),
@@ -613,6 +634,7 @@ pub async fn handle_proxy(
                             last_error_body = resp2.text().await.unwrap_or_default();
                             log(
                                 &state,
+                                &caller,
                                 &pool_id,
                                 &provider.id,
                                 Some(retry_status.as_u16() as i64),
@@ -634,6 +656,7 @@ pub async fn handle_proxy(
                             last_error_body = resp2.text().await.unwrap_or_default();
                             log(
                                 &state,
+                                &caller,
                                 &pool_id,
                                 &provider.id,
                                 Some(retry_status.as_u16() as i64),
@@ -663,6 +686,7 @@ pub async fn handle_proxy(
                 last_error_body = error_text;
                 log(
                     &state,
+                    &caller,
                     &pool_id,
                     &provider.id,
                     Some(status.as_u16() as i64),

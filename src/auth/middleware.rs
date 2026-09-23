@@ -6,34 +6,45 @@ use axum::Json;
 use serde_json::json;
 
 use crate::admin::auth::session;
+use crate::auth::client_keys::{self, Caller};
 use crate::core::state::AppState;
 
-pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if !state
+/// Guards `/v1/*` and records who is calling: the shared secret resolves to
+/// `Caller::admin()`, an issued client key to its own `Caller`. In open-access
+/// mode an absent or unrecognised credential is let through as
+/// `Caller::anonymous()` (SDKs often insist on sending *some* key); otherwise
+/// it is a 401. The resolved `Caller` is inserted into the request
+/// extensions for the proxy's request log.
+pub async fn require_bearer(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let require = state
         .require_shared_secret
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        return next.run(req).await;
-    }
+        .load(std::sync::atomic::Ordering::Relaxed);
 
-    let current_secret = state.shared_secret.load();
-    let ok = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == current_secret.as_str())
-        .unwrap_or(false);
+    let caller = match client_keys::presented_key(req.headers()) {
+        None => None,
+        Some(token) if token == state.shared_secret.load().as_str() => Some(Caller::admin()),
+        Some(token) => client_keys::authenticate(&state.db, token)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "client key lookup failed");
+                None
+            }),
+    };
 
-    if ok {
-        next.run(req).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": { "message": "unauthorized" } })),
-        )
-            .into_response()
-    }
+    let caller = match caller {
+        Some(c) => c,
+        None if !require => Caller::anonymous(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": { "message": "unauthorized" } })),
+            )
+                .into_response()
+        }
+    };
+
+    req.extensions_mut().insert(caller);
+    next.run(req).await
 }
 
 pub async fn require_admin_session(

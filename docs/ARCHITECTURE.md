@@ -94,6 +94,33 @@ fine capturing what actually flows through that provider/membership;
 there's no PII scrubbing pass to get subtly wrong. Full design rationale:
 [`docs/superpowers/specs/2026-08-27-dataset-logging-design.md`](superpowers/specs/2026-08-27-dataset-logging-design.md).
 
+## Client API keys (caller identity)
+
+`/v1/*` can be called by many users, each with their own key, so the
+request log shows **who** made each request. Keys are issued by the admin
+(UI: the **API Keys** page; API: `POST /admin/client-keys {"name": ...}`,
+`GET /admin/client-keys`, `DELETE /admin/client-keys/:id` to revoke) and are
+only used to authenticate the client to 1router — upstream provider calls
+still use each provider's own stored credential, and the client's key is
+never forwarded.
+
+- Clients send the key as `Authorization: Bearer <key>` (OpenAI SDKs) or
+  `x-api-key: <key>` (Anthropic SDKs). Keys look like `1r_<64 hex>`; only
+  their SHA-256 is stored, and the raw key is returned once, by the create
+  call. Revocation is soft (the row stays so old log rows keep a name) and
+  takes effect on the next request.
+- `auth::middleware::require_bearer` resolves the credential to an
+  `auth::client_keys::Caller` and inserts it into the request extensions:
+  the shared admin secret → `admin`; an active client key → the key's
+  name; anything else → 401, or `anonymous` when open access is on (an
+  active client key is still recognised by name in open-access mode).
+- Every `request_log` row records `caller_key_id` + `caller_name` (a
+  snapshot of the name; `NULL` for anonymous), dataset-log JSONL records
+  carry it as `user_id`, and `GET /admin/stats/callers` aggregates by
+  caller. `last_used_at` on a key is refreshed at most once a minute.
+- Client keys grant `/v1/*` only — they are not accepted on `/admin/*`, and
+  they are not part of `/admin/export` / `/admin/import`.
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
@@ -113,6 +140,9 @@ there's no PII scrubbing pass to get subtly wrong. Full design rationale:
 
 ```
 client → /v1/chat/completions or /v1/messages
+           │
+           ▼
+       auth: shared secret / client key → Caller (logged per request)
            │
            ▼
        pool lookup (by `model`),         SQLite: providers, pools,

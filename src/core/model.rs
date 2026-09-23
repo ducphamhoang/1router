@@ -145,6 +145,12 @@ pub struct LogEntry {
     pub status_code: Option<i64>,
     pub latency_ms: i64,
     pub success: bool,
+    /// Issued client key that made the request (`None` for the shared
+    /// secret or an anonymous open-access call).
+    pub caller_key_id: Option<String>,
+    /// `"admin"` for the shared secret, the key's name for a client key,
+    /// `None` for anonymous.
+    pub caller_name: Option<String>,
 }
 
 /// Time-to-first-byte and total wall-clock duration for one dataset-logged
@@ -173,8 +179,9 @@ pub struct DatasetLogEntry {
     pub pool_id: Option<String>,
     pub provider_id: String,
     pub model: String,
-    /// Reserved for a future "User credential" feature - always `None`
-    /// until that exists.
+    /// Name of the caller that made the request (see
+    /// `auth::client_keys::Caller`): `"admin"` for the shared secret, the
+    /// client key's name otherwise, `None` for anonymous open access.
     pub user_id: Option<String>,
     pub wire_format: WireFormat,
     pub stream: bool,

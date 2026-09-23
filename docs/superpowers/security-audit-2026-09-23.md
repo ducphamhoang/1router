@@ -23,7 +23,25 @@ malicious or compromised provider endpoint the admin configured), **local**
 | SEC-01 | **Fixed** (`fix/sec-01-02`): 400/413/422 no longer touch runtime state; re-verified live |
 | SEC-02 | **Fixed** (`fix/sec-01-02`): cap enforced mid-stream via `http_body_util::Limited`; 200 MB chunked body cut off at ~12 MB, gateway RSS 13 MB |
 | BL-01 | **Fixed** alongside SEC-01: `Misconfigured` now re-probes after 5 min instead of being permanent |
-| others | Open — see BL-07 for order |
+| SEC-03 | **Fixed** (`fix/sec-03-05-19`): idle runtime entries pruned; non-admin direct addressing limited to models the provider is configured for |
+| SEC-05 | **Fixed** (`fix/sec-03-05-19`): attempt slot reserved before verifying (atomic), IPv6 keyed per /64, argon2 runs behind a semaphore on the blocking pool |
+| SEC-06 | **Fixed** with SEC-03 (same allowlist) |
+| SEC-19 | **Fixed** with SEC-05: stale limiter entries pruned |
+| SEC-04 | **Mitigated** (`fix/sec-04-07-08-10`): README/onboarding treat the shared secret as the admin credential and point clients at per-user keys. It still works on `/v1/*` for compatibility |
+| SEC-07 | **Fixed**: upstream headers relayed through an allowlist (content-type, retry-after, request ids, rate-limit) |
+| SEC-08 | **Fixed**: CSP `frame-ancestors 'none'`, X-Frame-Options, nosniff, Referrer-Policy; no-store on `/admin/*` |
+| SEC-10 | **Fixed**: the shared HTTP client never follows redirects |
+| SEC-11 | **Fixed** (`fix/sec-lows`): `x-1router-*` debug headers only for the admin caller; transport errors shown without URLs (full error logged) |
+| SEC-12 | **Fixed**: boot log names the secret file, not the secret; DB errors return a generic 500 and are logged server-side |
+| SEC-13 | **Fixed**: secret file, SQLite DB (+ -wal/-shm) and dataset logs restricted to the owner (0600 on unix; `icacls` owner-only ACL on Windows, best effort: a failure only warns) |
+| SEC-14 | **Fixed**: PATCHed shared secrets must be 32+ chars; constant-time compare; failed admin Bearer attempts share the login lockout. `/v1/*` Bearer is deliberately **not** throttled: keys are high-entropy, and a per-IP lockout would hit every client behind a shared NAT |
+| SEC-15 | **Fixed**: a non-object `reasoning` is replaced, not indexed |
+| SEC-16 | **Fixed**: SSE framing shared (`adapter::sse`) with UTF-8 carry-over, CRLF support and a 16 MiB unframed cap; error bodies read up to 1 MiB, non-stream bodies up to 64 MiB, dataset capture up to 64 MiB. **No total deadline** added on purpose: long generations are legitimate, and the idle read timeout already bounds a stalled upstream |
+| SEC-17 | **Fixed**: per-connection 5 s timeout, JSON content type required (415 otherwise), `state` checked before `error` |
+| SEC-18 | **Fixed**: the on-disk key is only used when the admin request comes from loopback; remote admins must paste a key |
+| SEC-09 | **Fixed**: distroless `:nonroot` (uid 65532), state under `/data`, `.dockerignore` covers secrets/env/logs/tooling |
+| SEC-20 | **Fixed**: `.gitignore` additions, API key input is `type=password` |
+| BL-06 | Deployment config, not code: handled last, see BACKLOG |
 
 | ID | Sev | Title | Attacker |
 |---|---|---|---|

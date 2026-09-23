@@ -11,3 +11,8 @@ frontend/tsconfig.tsbuildinfo
 *.log
 .commandcode/
 dataset-logs/
+**/.env
+cookies*.txt
+*backup*.json
+*.pem
+graphify-out/

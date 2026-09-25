@@ -175,6 +175,9 @@ async fn main() -> Result<()> {
     let snapshot = load_snapshot(&db).await?;
     let log_tx = spawn_writer(db.clone(), 4096, 100);
     let dataset_log_tx = dataset_log::spawn_writer(cfg.dataset_log_dir.clone(), 4096);
+    let images_enabled = router::core::settings::get_bool(&db, router::media::IMAGES_ENABLED_SETTING)
+        .await?
+        .unwrap_or(false);
 
     let state = AppState {
         db,
@@ -192,6 +195,7 @@ async fn main() -> Result<()> {
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),
         pool_rotation: Arc::new(dashmap::DashMap::new()),
+        media: Arc::new(router::media::MediaState::new(&cfg, images_enabled)),
     };
 
     if let Err(e) = router::admin::auth::session::delete_expired(&state.db).await {

@@ -27,6 +27,7 @@ async fn state_for(source: &SecretSource) -> AppState {
         max_body_bytes: 1024,
         drain_timeout: Duration::from_secs(1),
         dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
+        media: Default::default(),
     };
     let mode = config::resolve_auth_mode(source, None).unwrap();
     let (require, origin) = match mode {
@@ -55,6 +56,7 @@ async fn state_for(source: &SecretSource) -> AppState {
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),
         pool_rotation: Arc::new(dashmap::DashMap::new()),
+        media: Default::default(),
     }
 }
 

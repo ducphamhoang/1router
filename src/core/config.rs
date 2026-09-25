@@ -14,6 +14,65 @@ pub struct Config {
     pub max_body_bytes: usize,
     pub drain_timeout: Duration,
     pub dataset_log_dir: PathBuf,
+    /// `/v1/images/*` settings (`src/media`). Test harnesses use
+    /// `Default::default()` and override `codex_responses_url` for wiremock.
+    pub media: MediaConfig,
+}
+
+/// The Codex Responses endpoint - the same URL the chat adapter hardcodes.
+pub const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+
+#[derive(Clone, Debug)]
+pub struct MediaConfig {
+    /// Overridable so tests can point the image path at wiremock (the chat
+    /// adapter keeps its own const).
+    pub codex_responses_url: String,
+    /// Whole-request deadline for one upstream image call.
+    pub request_timeout: Duration,
+    /// Inter-read idle timeout of the media HTTP client.
+    pub idle_timeout: Duration,
+    pub max_response_bytes: usize,
+    /// Concurrent image requests; each can buffer `max_response_bytes`.
+    pub max_concurrency: usize,
+    /// Responses `model` that hosts the image tool for `gpt-image-*` models.
+    pub codex_image_host_model: String,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        MediaConfig {
+            codex_responses_url: DEFAULT_CODEX_RESPONSES_URL.to_string(),
+            request_timeout: Duration::from_secs(300),
+            idle_timeout: Duration::from_secs(300),
+            max_response_bytes: 64 * 1024 * 1024,
+            max_concurrency: 4,
+            codex_image_host_model: "gpt-5.5".to_string(),
+        }
+    }
+}
+
+impl MediaConfig {
+    pub fn from_env() -> MediaConfig {
+        let d = MediaConfig::default();
+        let env_usize = |key: &str, default: usize| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n: &usize| *n > 0)
+                .unwrap_or(default)
+        };
+        MediaConfig {
+            codex_responses_url: d.codex_responses_url,
+            request_timeout: env_secs("ROUTER_MEDIA_REQUEST_TIMEOUT", 300),
+            idle_timeout: env_secs("ROUTER_MEDIA_IDLE_TIMEOUT", 300),
+            max_response_bytes: env_usize("ROUTER_MEDIA_MAX_RESPONSE_BYTES", d.max_response_bytes),
+            max_concurrency: env_usize("ROUTER_MEDIA_MAX_CONCURRENCY", d.max_concurrency),
+            codex_image_host_model: std::env::var("ROUTER_CODEX_IMAGE_HOST_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(d.codex_image_host_model),
+        }
+    }
 }
 
 fn env_secs(key: &str, default: u64) -> Duration {
@@ -239,6 +298,7 @@ impl Config {
             max_body_bytes,
             drain_timeout: env_secs("ROUTER_DRAIN_TIMEOUT", 30),
             dataset_log_dir,
+            media: MediaConfig::from_env(),
         })
     }
 }

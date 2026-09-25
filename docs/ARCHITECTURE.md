@@ -227,6 +227,21 @@ state (providers/pools/members, OAuth tokens) lives in that same DB; the
 shared admin secret is the only thing that can live outside it (env var or
 the `.router_secret` sidecar).
 
+Codex OAuth tokens get into that DB one of two ways, both from the provider's
+admin panel. **Browser login** (`/admin/providers/:id/oauth/start` +
+`/oauth/complete`) is PKCE with the Codex CLI's fixed
+`http://localhost:1455/auth/callback` redirect: the admin pastes the address
+the browser lands on and the UI extracts `code`/`state`. **Headless login**
+(`/oauth/device/start` + `/oauth/device/status`) is the Codex CLI's device-code
+flow: 1router asks `auth.openai.com/api/accounts/deviceauth/usercode` for a
+user code, a background task polls `deviceauth/token` (403/404 = still
+pending) for up to 15 minutes, then exchanges the returned
+`authorization_code` + server-issued `code_verifier` at `/oauth/token` with
+redirect `https://auth.openai.com/deviceauth/callback`, stores the tokens and
+reloads the snapshot. Login state is in-memory (a restart abandons a pending
+login); a newer start supersedes an older one for the same provider. Tests
+point both endpoints at a mock via `CODEX_DEVICE_AUTH_URL` / `CODEX_TOKEN_URL`.
+
 For the full design rationale — DB schema, the `ProviderAdapter` trait,
 failover/backoff rules, the Codex OAuth token-refresh/locking scheme, and
 what's explicitly out of scope for v1 — see:

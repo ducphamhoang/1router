@@ -121,6 +121,7 @@ pub async fn assign_to_pool(
                     created_at: chrono::Utc::now(),
                     strategy: Default::default(),
                     sticky_limit: None,
+                    modality: Default::default(),
                 },
             )
             .await
@@ -1905,6 +1906,7 @@ mod tests {
                 created_at: created,
                 strategy: Default::default(),
                 sticky_limit: None,
+                modality: Default::default(),
             },
         )
         .await

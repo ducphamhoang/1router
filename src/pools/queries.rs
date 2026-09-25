@@ -19,13 +19,14 @@ pub async fn get_pool(db: &SqlitePool, id: &str) -> Result<Pool, AppError> {
 
 pub async fn insert_pool(db: &SqlitePool, p: &Pool) -> Result<(), AppError> {
     let res = sqlx::query(
-        "INSERT INTO pools (id, wire_format, created_at, strategy, sticky_limit) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO pools (id, wire_format, created_at, strategy, sticky_limit, modality) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&p.id)
     .bind(p.wire_format)
     .bind(p.created_at)
     .bind(p.strategy)
     .bind(p.sticky_limit)
+    .bind(p.modality)
     .execute(db)
     .await;
 
@@ -97,6 +98,28 @@ pub async fn list_members(db: &SqlitePool, pool_id: &str) -> Result<Vec<PoolMemb
 /// here rather than trusting every caller to have done so already.
 pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppError> {
     let model_override = m.model_override.as_deref().filter(|s| !s.is_empty());
+    // Image pools: Codex providers only, with an image model override (a
+    // Codex provider's own `upstream_model` is a chat model). Also
+    // re-checked at selection time, since config import bypasses this.
+    let pool = get_pool(db, &m.pool_id).await?;
+    if pool.modality == crate::core::model::Modality::Image {
+        let provider = crate::providers::queries::get_provider(db, &m.provider_id).await?;
+        if provider.kind != crate::core::model::ProviderKind::OauthCodex {
+            return Err(AppError::BadRequest(format!(
+                "image pool '{}' only accepts Codex (ChatGPT OAuth) providers; '{}' is {:?}",
+                pool.id, provider.id, provider.kind
+            )));
+        }
+        match model_override {
+            Some(model) if crate::pools::select::is_image_model(model) => {}
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "image pool members need model_override set to an image model                      (gpt-image-* or <chat-model>-image), got {:?}",
+                    model_override
+                )))
+            }
+        }
+    }
     // A member's reasoning_effort_override is only meaningful if the
     // provider + effective model can actually carry one. Unlike
     // `dataset_logging_override` (a bool, with no invalid value possible)
@@ -227,6 +250,7 @@ mod tests {
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
+                modality: Default::default(),
             },
         )
         .await
@@ -330,6 +354,7 @@ mod tests {
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
+                modality: Default::default(),
             },
         )
         .await
@@ -385,6 +410,7 @@ mod tests {
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
+                modality: Default::default(),
             },
         )
         .await

@@ -78,6 +78,28 @@ pub enum PoolStrategy {
     RoundRobin,
 }
 
+/// What a pool serves. `Chat` pools are reached through
+/// `/v1/chat/completions` + `/v1/messages`; `Image` pools only through
+/// `/v1/images/generations` (`pools::select::select_for_modality`).
+/// Immutable after creation, like `wire_format`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
+pub enum Modality {
+    #[default]
+    Chat,
+    Image,
+}
+
+impl Modality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Modality::Chat => "chat",
+            Modality::Image => "image",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Pool {
     pub id: String,
@@ -90,6 +112,9 @@ pub struct Pool {
     /// `RoundRobin`; `None` (or any non-positive value) normalizes to `1`
     /// (rotate every selection) - see `pools::select::rotate_from_cursor`.
     pub sticky_limit: Option<i64>,
+    /// `#[serde(default)]`: exports from before migration 0009 import as chat.
+    #[serde(default)]
+    pub modality: Modality,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -148,6 +173,10 @@ pub struct LogEntry {
     /// Who made the request (see `users::Caller`): a `users.id`, `"admin"`
     /// for the shared secret, `None` for anonymous open access.
     pub user_id: Option<String>,
+    /// `None` = chat (the column is NULL for every pre-0009 row too).
+    pub modality: Option<Modality>,
+    /// Billable units for media requests (images generated); `None` for chat.
+    pub units: Option<f64>,
 }
 
 /// Time-to-first-byte and total wall-clock duration for one dataset-logged

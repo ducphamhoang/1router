@@ -106,12 +106,17 @@ pub async fn import_config(db: &SqlitePool, dump: &ExportDump) -> Result<(), App
     }
     for pool in &dump.pools {
         sqlx::query(
-            "INSERT INTO pools (id, wire_format, created_at) VALUES (?,?,?)
-             ON CONFLICT(id) DO UPDATE SET wire_format=excluded.wire_format",
+            "INSERT INTO pools (id, wire_format, created_at, strategy, sticky_limit, modality) VALUES (?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET wire_format=excluded.wire_format,
+               strategy=excluded.strategy, sticky_limit=excluded.sticky_limit,
+               modality=excluded.modality",
         )
         .bind(&pool.id)
         .bind(pool.wire_format)
         .bind(pool.created_at)
+        .bind(pool.strategy)
+        .bind(pool.sticky_limit)
+        .bind(pool.modality)
         .execute(&mut *tx)
         .await?;
     }
@@ -207,6 +212,7 @@ mod tests {
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
+                modality: Default::default(),
             }],
             // references a provider that was never inserted - FK violation
             members: vec![PoolMember {

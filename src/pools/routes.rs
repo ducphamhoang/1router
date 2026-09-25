@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::core::error::AppError;
-use crate::core::model::{EffortLevel, Pool, PoolMember, PoolStrategy, WireFormat};
+use crate::core::model::{EffortLevel, Modality, Pool, PoolMember, PoolStrategy, WireFormat};
 use crate::core::state::{reload_snapshot, AppState};
 use crate::pools::queries;
 use crate::providers::queries as pq;
@@ -41,6 +41,9 @@ struct CreatePool {
     strategy: PoolStrategy,
     #[serde(default)]
     sticky_limit: Option<i64>,
+    /// Fixed at creation (no PATCH path), like `wire_format`.
+    #[serde(default)]
+    modality: Modality,
 }
 
 async fn create(
@@ -54,6 +57,7 @@ async fn create(
         created_at: Utc::now(),
         strategy: b.strategy,
         sticky_limit: b.sticky_limit,
+        modality: b.modality,
     };
     queries::insert_pool(&s.db, &p).await?;
     reload_snapshot(&s).await?;

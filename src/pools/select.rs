@@ -1,4 +1,6 @@
-use crate::core::model::{EffortLevel, Pool, PoolMember, PoolStrategy, Provider, WireFormat};
+use crate::core::model::{
+    EffortLevel, Modality, Pool, PoolMember, PoolStrategy, Provider, ProviderKind, WireFormat,
+};
 use crate::core::state::{ConfigSnapshot, DiscoveredModelsMap, PoolRotationMap};
 
 /// One resolved routing candidate: a provider plus everything the
@@ -82,7 +84,9 @@ pub fn select<'a>(
     rotation: &PoolRotationMap,
 ) -> Option<Selection<'a>> {
     if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
-        if pwm.pool.wire_format != wire {
+        // Checked before `rotate_from_cursor`, so a rejected request never
+        // advances the pool's rotation cursor.
+        if pwm.pool.wire_format != wire || pwm.pool.modality != Modality::Chat {
             return None;
         }
 
@@ -117,6 +121,92 @@ pub fn select<'a>(
     }
 
     select_direct_provider(snapshot, pool_id, wire)
+}
+
+/// Image models a Codex provider can serve through the `image_generation`
+/// tool: `gpt-image-*` (hosted by `MediaConfig::codex_image_host_model`) or
+/// `<chat-model>-image` (hosted by `<chat-model>` itself).
+pub fn is_image_model(model: &str) -> bool {
+    let valid = |s: &str| !s.is_empty() && s.len() <= MAX_DIRECT_MODEL_LEN
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace());
+    valid(model)
+        && (model.strip_prefix("gpt-image-").is_some_and(|rest| !rest.is_empty())
+            || model.strip_suffix("-image").is_some_and(|host| !host.is_empty()))
+}
+
+/// Whether a member may serve an image pool: Codex providers with an image
+/// `model_override` only. Enforced on write by `queries::upsert_member`,
+/// re-checked here because config import bypasses that.
+fn image_member_eligible(provider: &Provider, member: &PoolMember) -> bool {
+    provider.kind == ProviderKind::OauthCodex
+        && member.model_override.as_deref().is_some_and(is_image_model)
+}
+
+/// `select`'s counterpart for `/v1/images/generations`: `model` is an
+/// `Image`-modality pool id (a chat pool yields `None`, checked before
+/// rotation), or `<codex_provider_id>/<image_model>` direct addressing -
+/// which the caller must restrict to the admin (`Selection.pool == None`).
+/// `wire_format` is ignored: image pools speak the OpenAI Images API.
+pub fn select_image<'a>(
+    snapshot: &'a ConfigSnapshot,
+    pool_id: &str,
+    rotation: &PoolRotationMap,
+) -> Option<Selection<'a>> {
+    if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
+        if pwm.pool.modality != Modality::Image {
+            return None;
+        }
+        let mut members: Vec<PoolMember> = pwm
+            .members
+            .iter()
+            .filter(|m| {
+                snapshot
+                    .providers
+                    .iter()
+                    .find(|p| p.id == m.provider_id)
+                    .is_some_and(|p| image_member_eligible(p, m))
+            })
+            .cloned()
+            .collect();
+        members.sort_by_key(|m| m.priority);
+        if pwm.pool.strategy == PoolStrategy::RoundRobin && members.len() > 1 {
+            members = rotate_from_cursor(&pwm.pool, members, rotation);
+        }
+        let providers = members
+            .iter()
+            .filter_map(|m| {
+                let provider = snapshot.providers.iter().find(|p| p.id == m.provider_id)?;
+                Some(ResolvedMember {
+                    provider,
+                    effective_model: m.model_override.clone()?,
+                    dataset_logging_override: Some(false),
+                    reasoning_effort_override: None,
+                })
+            })
+            .collect();
+        return Some(Selection {
+            pool: Some(&pwm.pool),
+            providers,
+        });
+    }
+
+    let (provider_id, model) = pool_id.split_once('/')?;
+    if !is_image_model(model) {
+        return None;
+    }
+    let provider = snapshot
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id && p.kind == ProviderKind::OauthCodex)?;
+    Some(Selection {
+        pool: None,
+        providers: vec![ResolvedMember {
+            provider,
+            effective_model: model.to_string(),
+            dataset_logging_override: Some(false),
+            reasoning_effort_override: None,
+        }],
+    })
 }
 
 /// Rotate `members` (already priority-sorted) so the pool's rotation cursor
@@ -200,7 +290,8 @@ fn select_direct_provider<'a>(
 /// model the provider's live `/models` listing reported (what
 /// `GET /v1/models` advertises). Anything else would let any caller bill an
 /// arbitrary model to the admin's key, bypassing the pools the admin set up.
-/// The shared-secret admin is not restricted.
+/// The shared-secret admin is not restricted. Only chat pools count: an
+/// image pool's `gpt-image-*` override must not become chat-addressable.
 pub fn direct_model_allowed(
     snapshot: &ConfigSnapshot,
     discovered: &DiscoveredModelsMap,
@@ -208,7 +299,7 @@ pub fn direct_model_allowed(
     model: &str,
 ) -> bool {
     provider.upstream_model == model
-        || snapshot.pools.iter().any(|p| {
+        || snapshot.pools.iter().filter(|p| p.pool.modality == Modality::Chat).any(|p| {
             p.members
                 .iter()
                 .any(|m| m.provider_id == provider.id && m.model_override.as_deref() == Some(model))
@@ -251,7 +342,7 @@ mod tests {
             pools: vec![PoolWithMembers {
                 pool: Pool {
                     id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now(),
-                    strategy, sticky_limit,
+                    strategy, sticky_limit, modality: Modality::Chat,
                 },
                 members: vec![
                     PoolMember { pool_id: "gpt-4o".into(), provider_id: "b".into(), priority: 20, model_override: None, dataset_logging_override: None, reasoning_effort_override: None },
@@ -525,5 +616,86 @@ mod tests {
         assert_eq!(b.reasoning_effort_override, Some(EffortLevel::High));
         let a = sel.providers.iter().find(|m| m.provider.id == "a").unwrap();
         assert_eq!(a.reasoning_effort_override, None);
+    }
+
+    fn image_snap() -> ConfigSnapshot {
+        let mut s = snap();
+        s.providers[0].kind = ProviderKind::OauthCodex; // "a"
+        let member = |provider: &str, priority: i64, model: Option<&str>| PoolMember {
+            pool_id: "img".into(), provider_id: provider.into(), priority,
+            model_override: model.map(Into::into), dataset_logging_override: None,
+            reasoning_effort_override: None,
+        };
+        s.pools.push(PoolWithMembers {
+            pool: Pool {
+                id: "img".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now(),
+                strategy: PoolStrategy::RoundRobin, sticky_limit: None, modality: Modality::Image,
+            },
+            members: vec![
+                member("a", 10, Some("gpt-image-2")),
+                // passthrough provider and a chat-model override: both skipped
+                member("b", 20, Some("gpt-image-2")),
+                member("a", 30, Some("gpt-5.5")),
+            ],
+        });
+        s
+    }
+
+    #[test]
+    fn image_model_rule() {
+        for ok in ["gpt-image-2", "gpt-image-1.5", "gpt-5.5-image"] {
+            assert!(is_image_model(ok), "{ok}");
+        }
+        for bad in ["gpt-image-", "-image", "gpt-5.5", "dall-e-3", "gpt image-2", ""] {
+            assert!(!is_image_model(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn chat_select_never_returns_an_image_pool_and_does_not_rotate_it() {
+        let s = image_snap();
+        let rotation = empty_rotation();
+        assert!(select(&s, "img", WireFormat::OpenAi, &rotation).is_none());
+        assert!(rotation.get("img").is_none(), "rejected selection must not touch the cursor");
+    }
+
+    #[test]
+    fn image_select_rejects_chat_pools_without_rotating() {
+        let s = snap_with_strategy(PoolStrategy::RoundRobin, None);
+        let rotation = empty_rotation();
+        assert!(select_image(&s, "gpt-4o", &rotation).is_none());
+        assert!(rotation.get("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn image_select_keeps_only_codex_members_with_an_image_override() {
+        let s = image_snap();
+        let sel = select_image(&s, "img", &empty_rotation()).unwrap();
+        assert_eq!(sel.providers.len(), 1);
+        assert_eq!(sel.providers[0].provider.id, "a");
+        assert_eq!(sel.providers[0].effective_model, "gpt-image-2");
+        assert_eq!(sel.providers[0].dataset_logging_override, Some(false));
+    }
+
+    #[test]
+    fn image_direct_addressing_needs_codex_kind_and_image_model() {
+        let s = image_snap();
+        let rotation = empty_rotation();
+        let sel = select_image(&s, "a/gpt-5.5-image", &rotation).unwrap();
+        assert!(sel.pool.is_none());
+        assert_eq!(sel.providers[0].effective_model, "gpt-5.5-image");
+        assert!(select_image(&s, "a/gpt-5.5", &rotation).is_none(), "chat model");
+        assert!(select_image(&s, "b/gpt-image-2", &rotation).is_none(), "passthrough provider");
+    }
+
+    #[test]
+    fn direct_model_allowlist_ignores_image_pool_overrides() {
+        let s = image_snap();
+        let discovered: DiscoveredModelsMap = Arc::new(dashmap::DashMap::new());
+        let a = &s.providers[0];
+        assert!(
+            !direct_model_allowed(&s, &discovered, a, "gpt-image-2"),
+            "an image pool member must not make its model chat-addressable"
+        );
     }
 }

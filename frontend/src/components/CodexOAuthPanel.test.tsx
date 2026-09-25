@@ -111,5 +111,23 @@ describe("CodexOAuthPanel", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(await screen.findByRole("status")).toHaveTextContent("Codex OAuth connected.");
     expect(screen.queryByText("ABCD-1234")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start headless login" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Codex OAuth" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log in again" })).toBeInTheDocument();
+  });
+
+  it("hides_login_options_when_already_connected_until_log_in_again", async () => {
+    render(<CodexOAuthPanel providerId="prov_1" connected />);
+
+    expect(screen.getByText(/A ChatGPT account is connected/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start headless login" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Redirect URL")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Log in again" }));
+    expect(screen.getByRole("button", { name: "Start headless login" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Redirect URL")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: "Start headless login" })).not.toBeInTheDocument();
   });
 });

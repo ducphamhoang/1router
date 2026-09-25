@@ -48,6 +48,103 @@ pub fn build_authorize_url(state: &str, challenge: &str) -> String {
     format!("{AUTHORIZE_URL}?{query}")
 }
 
+/// Device-code ("headless") login, as `codex login --device-auth` does it:
+/// the user enters a short code at [`DEVICE_VERIFY_URL`] on any device while
+/// the server polls; no localhost redirect is involved. Not a public API -
+/// endpoints mirror the Codex CLI (checked against codex-cli 0.150.1).
+pub const DEVICE_AUTH_BASE: &str = "https://auth.openai.com/api/accounts";
+pub const DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
+pub const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+
+fn device_auth_base() -> String {
+    // Test hook, same as CODEX_TOKEN_URL.
+    std::env::var("CODEX_DEVICE_AUTH_URL").unwrap_or_else(|_| DEVICE_AUTH_BASE.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceCode {
+    pub device_auth_id: String,
+    pub user_code: String,
+    /// Poll interval the server asked for (1..=60 s).
+    pub interval: std::time::Duration,
+}
+
+/// Parse `/deviceauth/usercode`. The code field has shipped as both
+/// `user_code` and `usercode`, and `interval` as a string or a number.
+pub fn parse_device_code(j: &serde_json::Value) -> Option<DeviceCode> {
+    let device_auth_id = j["device_auth_id"].as_str()?.to_string();
+    let user_code = j["user_code"].as_str().or_else(|| j["usercode"].as_str())?.to_string();
+    let secs = match &j["interval"] {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .unwrap_or(5)
+    .clamp(1, 60);
+    Some(DeviceCode {
+        device_auth_id,
+        user_code,
+        interval: std::time::Duration::from_secs(secs),
+    })
+}
+
+pub async fn request_device_code(http: &reqwest::Client) -> Result<DeviceCode, String> {
+    let resp = http
+        .post(format!("{}/deviceauth/usercode", device_auth_base()))
+        .json(&serde_json::json!({ "client_id": CODEX_CLIENT_ID }))
+        .send()
+        .await
+        .map_err(|e| format!("device code request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
+        return Err(if status == reqwest::StatusCode::NOT_FOUND {
+            "device code login is not available (endpoint returned 404)".to_string()
+        } else {
+            format!("device code request returned {status}: {body}")
+        });
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|e| format!("device code parse: {e}"))?;
+    parse_device_code(&j).ok_or_else(|| "device code response is missing device_auth_id/user_code".to_string())
+}
+
+/// What `/deviceauth/token` hands back once the user approved: an ordinary
+/// authorization code plus the PKCE verifier the server generated for it.
+pub struct DeviceGrant {
+    pub authorization_code: String,
+    pub code_verifier: String,
+}
+
+/// One poll. `Ok(None)` = not approved yet (the endpoint answers 403/404
+/// while pending).
+pub async fn poll_device_token(http: &reqwest::Client, code: &DeviceCode) -> Result<Option<DeviceGrant>, String> {
+    let resp = http
+        .post(format!("{}/deviceauth/token", device_auth_base()))
+        .json(&serde_json::json!({
+            "device_auth_id": code.device_auth_id,
+            "user_code": code.user_code,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("device token poll failed: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
+        return Err(format!("device token poll returned {status}: {body}"));
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|e| format!("device token parse: {e}"))?;
+    match (j["authorization_code"].as_str(), j["code_verifier"].as_str()) {
+        (Some(c), Some(v)) => Ok(Some(DeviceGrant {
+            authorization_code: c.to_string(),
+            code_verifier: v.to_string(),
+        })),
+        _ => Err("device token response is missing authorization_code/code_verifier".to_string()),
+    }
+}
+
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -67,11 +164,22 @@ pub async fn exchange_code(
     code: &str,
     verifier: &str,
 ) -> Result<TokenSet, RefreshError> {
+    exchange_code_with_redirect(http, code, verifier, REDIRECT_URI).await
+}
+
+/// `redirect_uri` must match the flow the code came from: [`REDIRECT_URI`]
+/// for the browser flow, [`DEVICE_REDIRECT_URI`] for device-code login.
+pub async fn exchange_code_with_redirect(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<TokenSet, RefreshError> {
     // Code exchange uses form-urlencoded (differs from refresh which is JSON).
     let form = [
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("client_id", CODEX_CLIENT_ID),
         ("code_verifier", verifier),
     ];
@@ -159,6 +267,25 @@ mod tests {
         assert!(
             url.contains(&urlencoding::encode("http://localhost:1455/auth/callback").into_owned())
         );
+    }
+
+    #[test]
+    fn device_code_accepts_both_field_spellings_and_interval_shapes() {
+        let a = parse_device_code(&serde_json::json!({
+            "device_auth_id": "d1", "user_code": "ABCD-1234", "interval": "5"
+        }))
+        .unwrap();
+        assert_eq!(a.user_code, "ABCD-1234");
+        assert_eq!(a.interval, std::time::Duration::from_secs(5));
+        let b = parse_device_code(&serde_json::json!({
+            "device_auth_id": "d1", "usercode": "WXYZ", "interval": 0
+        }))
+        .unwrap();
+        assert_eq!(b.user_code, "WXYZ");
+        assert_eq!(b.interval, std::time::Duration::from_secs(1), "clamped up");
+        let c = parse_device_code(&serde_json::json!({ "device_auth_id": "d1", "user_code": "Q" })).unwrap();
+        assert_eq!(c.interval, std::time::Duration::from_secs(5), "default");
+        assert!(parse_device_code(&serde_json::json!({ "user_code": "Q" })).is_none());
     }
 
     #[test]

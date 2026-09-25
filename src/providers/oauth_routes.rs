@@ -21,6 +21,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/providers/:id/oauth/start", post(start))
         .route("/admin/providers/:id/oauth/complete", post(complete))
+        .route("/admin/providers/:id/oauth/device/start", post(start_device_login))
+        .route("/admin/providers/:id/oauth/device/status", get(device_login_status))
         .route(
             "/admin/providers/:id/commandcode/key",
             post(set_commandcode_key),
@@ -86,7 +88,18 @@ pub async fn complete_oauth_exchange(
     let tokens = oauth::exchange_code(http, code, &verifier)
         .await
         .map_err(|e| AppError::BadRequest(format!("code exchange failed: {e}")))?;
+    store_codex_tokens(db, provider_id, &tokens).await?;
+    queries::clear_pkce(db, provider_id).await?;
+    Ok(())
+}
 
+/// Persist a fresh token set plus the account claims read from its id_token.
+/// Shared by the browser and device-code flows.
+async fn store_codex_tokens(
+    db: &sqlx::SqlitePool,
+    provider_id: &str,
+    tokens: &oauth::TokenSet,
+) -> Result<(), AppError> {
     let mut provider_data = serde_json::json!({});
     if let Some(idt) = &tokens.id_token {
         let claims = oauth::decode_account_claims(idt);
@@ -111,7 +124,6 @@ pub async fn complete_oauth_exchange(
         &provider_data,
     )
     .await?;
-    queries::clear_pkce(db, provider_id).await?;
     Ok(())
 }
 
@@ -123,6 +135,121 @@ async fn complete(
     complete_oauth_exchange(&s.db, &s.http, &id, &b.code, &b.state).await?;
     reload_snapshot(&s).await?;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+/// Device codes expire after ~15 minutes upstream; stop polling then.
+const DEVICE_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// In-flight device-code logins by provider id - process-global for the
+/// same reason as `commandcode_logins`. `attempt` ties a poll task to the
+/// start that spawned it, so restarting a login stops the older task.
+#[derive(Clone)]
+enum DeviceLoginStatus {
+    Pending { attempt: Uuid },
+    Success,
+    Error(String),
+}
+
+fn device_logins() -> &'static DashMap<String, DeviceLoginStatus> {
+    static MAP: OnceLock<DashMap<String, DeviceLoginStatus>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+fn is_current_attempt(provider_id: &str, attempt: Uuid) -> bool {
+    matches!(
+        device_logins().get(provider_id).map(|e| e.clone()),
+        Some(DeviceLoginStatus::Pending { attempt: a }) if a == attempt
+    )
+}
+
+/// Headless Codex login: returns a short code the admin enters at
+/// `verification_url` on any device (phone, laptop) - unlike /oauth/start,
+/// nothing has to reach localhost:1455. The server polls in the background;
+/// the UI polls /oauth/device/status.
+async fn start_device_login(State(s): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, AppError> {
+    let provider = queries::get_provider(&s.db, &id).await?;
+    if !matches!(provider.kind, ProviderKind::OauthCodex) {
+        return Err(AppError::BadRequest("provider is not oauth_codex".into()));
+    }
+    let code = oauth::request_device_code(&s.http).await.map_err(AppError::BadRequest)?;
+    let attempt = Uuid::new_v4();
+    device_logins().insert(id.clone(), DeviceLoginStatus::Pending { attempt });
+
+    let body = json!({
+        "user_code": code.user_code,
+        "verification_url": oauth::DEVICE_VERIFY_URL,
+        "interval": code.interval.as_secs(),
+        "expires_in": DEVICE_LOGIN_TTL.as_secs(),
+    });
+    let state = s.clone();
+    tokio::spawn(async move {
+        let outcome = poll_device_login(&state, &id, attempt, &code).await;
+        // Only the current attempt may publish a result.
+        if !is_current_attempt(&id, attempt) {
+            return;
+        }
+        let status = match outcome {
+            Ok(()) => DeviceLoginStatus::Success,
+            Err(message) => DeviceLoginStatus::Error(message),
+        };
+        device_logins().insert(id, status);
+    });
+    Ok(Json(body))
+}
+
+async fn poll_device_login(
+    s: &AppState,
+    provider_id: &str,
+    attempt: Uuid,
+    code: &oauth::DeviceCode,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + DEVICE_LOGIN_TTL;
+    let grant = loop {
+        tokio::time::sleep(code.interval).await;
+        if !is_current_attempt(provider_id, attempt) {
+            return Err("superseded by a newer login".into());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("device code expired; start the login again".into());
+        }
+        match oauth::poll_device_token(&s.http, code).await {
+            Ok(Some(grant)) => break grant,
+            Ok(None) => continue,
+            // A transient network error must not kill a login the user is
+            // still completing; a hard upstream answer ends it.
+            Err(e) if e.contains("poll failed") => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let tokens = oauth::exchange_code_with_redirect(
+        &s.http,
+        &grant.authorization_code,
+        &grant.code_verifier,
+        oauth::DEVICE_REDIRECT_URI,
+    )
+    .await
+    .map_err(|e| format!("code exchange failed: {e}"))?;
+    store_codex_tokens(&s.db, provider_id, &tokens)
+        .await
+        .map_err(|e| format!("failed to store tokens: {e}"))?;
+    // Tokens are live from here on even if nobody polls the status again.
+    reload_snapshot(s).await.map_err(|e| format!("tokens stored, reload failed: {e}"))?;
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, provider_id);
+    Ok(())
+}
+
+async fn device_login_status(Path(id): Path<String>) -> Json<Value> {
+    let status = device_logins().get(&id).map(|e| e.clone());
+    let body = match &status {
+        None => json!({ "status": "not_started" }),
+        Some(DeviceLoginStatus::Pending { .. }) => json!({ "status": "pending" }),
+        Some(DeviceLoginStatus::Success) => json!({ "status": "success" }),
+        Some(DeviceLoginStatus::Error(message)) => json!({ "status": "error", "error": message }),
+    };
+    if matches!(status, Some(DeviceLoginStatus::Success | DeviceLoginStatus::Error(_))) {
+        device_logins().remove(&id);
+    }
+    Json(body)
 }
 
 #[derive(Deserialize)]

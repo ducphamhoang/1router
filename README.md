@@ -92,6 +92,14 @@ Adding a second provider of the same template (e.g. a second OpenAI key)
 suggests a name that doesn't collide with the first one (`openai-2`,
 `openai-3`, ...) instead of asking you to invent one.
 
+On a headless server, a Codex provider's **Codex OAuth** panel in the admin
+UI has a **Start headless login** button: it shows a one-time code to enter
+at `https://auth.openai.com/codex/device` from any phone or computer, and
+1router polls for the approval and stores the tokens itself (some ChatGPT
+accounts must first enable device code login under Settings → Security).
+The browser flow still works too — paste the whole `localhost:1455` address
+the browser lands on into the **Redirect URL** box.
+
 Here's a real run, picking OpenCode's free tier (no API key needed —
 just press Enter to accept the pre-filled one):
 

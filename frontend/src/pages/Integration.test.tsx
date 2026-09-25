@@ -81,6 +81,16 @@ describe("Integration", () => {
     expect(screen.getByText(/\/chat\/completions/, { selector: "pre" })).not.toHaveTextContent("img-main");
   });
 
+  it("shows sdk examples for image pools", async () => {
+    render(<Integration />);
+    expect(await screen.findByText(/client.images.generate\(model="img-main"/, { selector: "pre" })).toBeInTheDocument();
+    expect(screen.getByText(/new OpenAI\(\{ baseURL:/, { selector: "pre" })).toHaveTextContent('model: "img-main"');
+    expect(screen.getByText(/no streaming, no/)).toBeInTheDocument();
+    // Line continuations survive: each curl line ends in a literal backslash.
+    expect(screen.getByText(/\/images\/generations/, { selector: "pre" }).textContent).toContain("generations \\\n");
+    expect(screen.getByText(/\/images\/generations/, { selector: "pre" })).toHaveTextContent("http://localhost:3000/v1/images/generations");
+  });
+
   it("renders the current client API access mode", async () => {
     render(<Integration />);
     expect(await screen.findByLabelText(/Open access — \/v1/)).not.toBeChecked();

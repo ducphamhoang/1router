@@ -209,12 +209,43 @@ pool on the Pools page, add Codex providers with an image model such as
 `gpt-image-2`, then enable it on the Settings page:
 
 ```
-curl http://localhost:8080/v1/images/generations   -H "Authorization: Bearer $(cat .router_secret)"   -H 'Content-Type: application/json'   -d '{"model":"<image-pool-id>","prompt":"a watercolor fox","size":"1024x1024"}'
+curl http://localhost:8080/v1/images/generations \
+  -H "Authorization: Bearer <client-key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<image-pool-id>","prompt":"a watercolor fox","size":"1536x1024"}'
 ```
 
-The response carries the image as `data[0].b64_json`. See
-[Image generation](docs/ARCHITECTURE.md#image-generation) for limits,
-failover, and the `ROUTER_MEDIA_*` settings.
+Any OpenAI SDK works — point it at `http://<host>:8080/v1` and use the image
+pool id as `model`. Give each app its own key from the **Users** page (image
+calls always need a key, even with open access on):
+
+```python
+from openai import OpenAI
+import base64
+
+client = OpenAI(base_url="http://<host>:8080/v1", api_key="1r_...", timeout=300)
+r = client.images.generate(model="<image-pool-id>", prompt="a watercolor fox", size="1536x1024")
+open("out.png", "wb").write(base64.b64decode(r.data[0].b64_json))
+```
+
+What clients should expect:
+
+- One image per request (`n: 1`), returned as `data[0].b64_json` only — no
+  `response_format: "url"`, no streaming, and no `/v1/images/edits` (no
+  reference/input images or masks). `background: "transparent"` is rejected
+  upstream with a 400 — generate on a flat colour and key it out yourself.
+- An image takes roughly 25–40 s; set client and reverse-proxy timeouts to
+  120 s or more.
+- `size`/`quality` are hints: `1536x1024` and `1024x1536` come back exact,
+  a square request comes back 1254×1254, and `high` may be served as
+  `medium`. The response's `size`/`quality` report what was produced.
+- 429 = every account is busy or rate-limited (retry with backoff);
+  404 = image generation is switched off.
+
+The admin UI's **Integration** page shows these examples pre-filled with
+your base URL and pool ids. See
+[Image generation](docs/ARCHITECTURE.md#image-generation) for failover and
+the `ROUTER_MEDIA_*` settings.
 
 ## Admin dashboard
 

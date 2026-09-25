@@ -349,8 +349,9 @@ export function Integration() {
           <>
             <h3>Image generation</h3>
             <p>
-              Image pools (<code>POST /v1/images/generations</code>, one image per request, <code>b64_json</code>{" "}
-              only) must be enabled under Settings and always need an API key, even with open access on:
+              Image pools serve <code>POST /v1/images/generations</code> (OpenAI Images API shape) — point any OpenAI
+              SDK at <code>{baseUrl}</code> and use a pool id as <code>model</code>. They must be enabled under Settings
+              and always need an API key, even with open access on; give each app its own key from the Users page.
             </p>
             <ul>
               {imagePools.map((p) => (
@@ -362,7 +363,39 @@ export function Integration() {
             <pre>{`curl ${baseUrl}/images/generations \\
   -H "Authorization: Bearer ${sharedSecretRevealed ? sharedSecret : "<your-api-key>"}" \\
   -H "Content-Type: application/json" \\
-  -d '{"model":"${imagePools[0].id}","prompt":"a watercolor fox","size":"1024x1024"}'`}</pre>
+  -d '{"model":"${imagePools[0].id}","prompt":"a watercolor fox","size":"1536x1024"}'`}</pre>
+            <p>Python (openai SDK):</p>
+            <pre>{`from openai import OpenAI
+import base64
+
+client = OpenAI(base_url="${baseUrl}", api_key="<your-api-key>", timeout=300)
+r = client.images.generate(model="${imagePools[0].id}", prompt="a watercolor fox", size="1536x1024")
+open("out.png", "wb").write(base64.b64decode(r.data[0].b64_json))`}</pre>
+            <p>JavaScript / TypeScript (openai SDK):</p>
+            <pre>{`import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "${baseUrl}", apiKey: "<your-api-key>", timeout: 300_000 });
+const r = await client.images.generate({ model: "${imagePools[0].id}", prompt: "a watercolor fox" });
+const png = Buffer.from(r.data[0].b64_json!, "base64");`}</pre>
+            <ul>
+              <li>
+                One image per request (<code>n: 1</code>), returned as <code>b64_json</code> only — no{" "}
+                <code>response_format: "url"</code>, no streaming, no <code>/images/edits</code>, and{" "}
+                <code>background: "transparent"</code> is rejected (400).
+              </li>
+              <li>
+                An image takes about 25–40 s: set client (and any reverse proxy) timeouts to 120 s or more.
+              </li>
+              <li>
+                <code>size</code>/<code>quality</code> are hints: <code>1536x1024</code> and <code>1024x1536</code> are
+                honoured, square comes back as 1254×1254, and <code>high</code> may be served as{" "}
+                <code>medium</code>. The response reports the real <code>size</code>/<code>quality</code>.
+              </li>
+              <li>
+                429 means every account is busy or rate-limited (retry later); 404 means image generation is turned
+                off.
+              </li>
+            </ul>
           </>
         ) : null}
 

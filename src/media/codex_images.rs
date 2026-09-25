@@ -34,13 +34,19 @@ pub struct ImageParams {
     pub quality: Option<String>,
     pub background: Option<String>,
     pub output_format: String,
+    /// Reference images as `data:image/...;base64,` URLs (`/images/edits`).
+    pub images: Vec<String>,
 }
 
 /// The Responses request body for `model` (a pool member's effective model:
 /// `gpt-image-*` or `<chat-model>-image`).
+///
+/// `background` is only a prompt hint: upstream rejects the tool's
+/// `background: "transparent"` with a 400, yet draws a transparent PNG when
+/// the prompt asks for one (verified 2026-09-25).
 pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
     let mut tool = json!({ "type": "image_generation", "output_format": p.output_format });
-    for (key, value) in [("size", &p.size), ("quality", &p.quality), ("background", &p.background)] {
+    for (key, value) in [("size", &p.size), ("quality", &p.quality)] {
         if let Some(v) = value {
             tool[key] = json!(v);
         }
@@ -50,7 +56,7 @@ pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
         Some(host) => (host.to_string(), json!("auto")),
         None => {
             tool["model"] = json!(TOOL_MODEL);
-            tool["action"] = json!("generate");
+            tool["action"] = json!(if p.images.is_empty() { "generate" } else { "edit" });
             (host_model.to_string(), json!({ "type": "image_generation" }))
         }
     };
@@ -60,7 +66,7 @@ pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
         "input": [{
             "type": "message",
             "role": "user",
-            "content": [{ "type": "input_text", "text": prompt_with_hints(p) }]
+            "content": content(p)
         }],
         "tools": [tool],
         "tool_choice": tool_choice,
@@ -74,6 +80,19 @@ pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
         body["reasoning"] = json!({ "effort": "medium", "summary": "auto" });
     }
     body
+}
+
+/// Each reference image wrapped in a named tag the prompt can point at
+/// ("image1", ...), then the prompt (same shape as the Codex CLI).
+fn content(p: &ImageParams) -> Value {
+    let mut parts = Vec::with_capacity(p.images.len() * 3 + 1);
+    for (i, url) in p.images.iter().enumerate() {
+        parts.push(json!({ "type": "input_text", "text": format!("<image name=image{}>", i + 1) }));
+        parts.push(json!({ "type": "input_image", "image_url": url, "detail": "high" }));
+        parts.push(json!({ "type": "input_text", "text": "</image>" }));
+    }
+    parts.push(json!({ "type": "input_text", "text": prompt_with_hints(p) }));
+    Value::Array(parts)
 }
 
 /// Upstream ignores the tool's size/quality/background, so also state them in
@@ -361,6 +380,7 @@ mod tests {
         assert_eq!(b["tool_choice"], json!({"type": "image_generation"}));
         assert_eq!(b["tools"][0]["model"], TOOL_MODEL);
         assert_eq!(b["tools"][0]["action"], "generate");
+        assert_eq!(b["input"][0]["content"].as_array().unwrap().len(), 1, "text only");
         assert_eq!(b["tools"][0]["size"], "1024x1024");
         assert_eq!(b["reasoning"]["effort"], "medium");
         assert_eq!(b["stream"], true);
@@ -369,6 +389,24 @@ mod tests {
         assert!(text.starts_with("a fox") && text.contains("size: 1024x1024") && text.contains("quality: low"));
         let other = build_body("gpt-image-1.5", "gpt-5.5", &p);
         assert_ne!(b["prompt_cache_key"], other["prompt_cache_key"], "fresh key per request");
+    }
+
+    #[test]
+    fn reference_images_come_before_the_prompt_and_switch_to_edit() {
+        let mut p = params();
+        p.background = Some("transparent".into());
+        p.images = vec!["data:image/png;base64,AAAA".into(), "data:image/jpeg;base64,BBBB".into()];
+        let b = build_body("gpt-image-2", "gpt-5.5", &p);
+        assert_eq!(b["tools"][0]["action"], "edit");
+        assert!(b["tools"][0].get("background").is_none(), "upstream 400s on a transparent tool background");
+        let c = b["input"][0]["content"].as_array().unwrap();
+        assert_eq!(c.len(), 7);
+        assert_eq!(c[0]["text"], "<image name=image1>");
+        assert_eq!(c[1], json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "high"}));
+        assert_eq!(c[2]["text"], "</image>");
+        assert_eq!(c[4]["image_url"], "data:image/jpeg;base64,BBBB");
+        let text = c[6]["text"].as_str().unwrap();
+        assert!(text.starts_with("a fox") && text.contains("background: transparent"), "{text}");
     }
 
     #[test]

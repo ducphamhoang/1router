@@ -146,7 +146,16 @@ buffered request rather than a stream.
   `quality`, `background`, `output_format`. Only `n = 1`,
   `response_format = b64_json` and non-streaming are supported.
   Size/quality are hints to the upstream tool — the response reports what
-  was actually produced.
+  was actually produced. `background` is sent only as a prompt hint: the
+  tool parameter is rejected upstream (400), but asking in the prompt does
+  yield a transparent RGBA PNG.
+- **Reference images**: `POST /v1/images/edits` takes multipart `image` /
+  `image[]` files (OpenAI SDK `images.edit`) or JSON `images` (data URLs or
+  bare base64, as strings or `{image_url}`), up to 16 PNG/JPEG/WebP of
+  ≤ 20 MiB each (route body cap 50 MiB). They are sent as `input_image`
+  content parts tagged `<image name=imageN>` ahead of the prompt, with the
+  tool's `action: "edit"`. Masks, remote URLs and file ids are rejected
+  with 400 before any upstream call.
 - **Member model** (`model_override`, required) selects the upstream shape:
   `gpt-image-*` (e.g. `gpt-image-2`) runs the `image_generation` tool with that
   model, hosted by `ROUTER_CODEX_IMAGE_HOST_MODEL`; `<chat-model>-image`

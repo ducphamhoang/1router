@@ -1,5 +1,7 @@
-//! `POST /v1/images/generations` (OpenAI Images API, `b64_json` only),
-//! served by image pools of Codex OAuth providers. Buffered, not streamed:
+//! `POST /v1/images/generations` and `POST /v1/images/edits` (OpenAI
+//! Images API, `b64_json` only), served by image pools of Codex OAuth
+//! providers. Edits carry reference images (multipart files or JSON data
+//! URLs); upstream has no mask support. Buffered, not streamed:
 //! the Codex SSE body is read whole (bounded by
 //! `MediaConfig.max_response_bytes`) and classified by
 //! `codex_images::parse_stream`.
@@ -13,8 +15,9 @@
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
+use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
+use base64::Engine as _;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
@@ -40,9 +43,17 @@ use crate::proxy::flow::credentials_for;
 use crate::users::Caller;
 
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+/// Largest `/images/edits` body: the reference images ride in it.
+pub const MAX_EDIT_BODY_BYTES: usize = 50 * 1024 * 1024;
+/// Most reference images per edit (OpenAI's own limit).
+pub const MAX_REFERENCE_IMAGES: usize = 16;
+/// Largest single reference image, decoded.
+pub const MAX_REFERENCE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/v1/images/generations", post(generations))
+    Router::new()
+        .route("/v1/images/generations", post(generations))
+        .route("/v1/images/edits", post(edits).layer(DefaultBodyLimit::max(MAX_EDIT_BODY_BYTES)))
 }
 
 /// OpenAI-shaped error body.
@@ -61,23 +72,32 @@ fn bad_request(message: &str) -> Response {
 
 // `Caller` is inserted by `auth::middleware::require_bearer`; `Option` so a
 // router built without that layer still works, as anonymous.
+#[allow(clippy::result_large_err)]
+fn admit(state: &AppState, caller: Option<Extension<Caller>>) -> Result<Caller, Response> {
+    if !state.media.images_enabled() {
+        return Err(image_error(StatusCode::NOT_FOUND, "not_found", "image generation is not enabled"));
+    }
+    let caller = caller.map(|Extension(c)| c).unwrap_or_default();
+    // Images spend subscription quota fast: never for anonymous open access.
+    if caller.user_id.is_none() {
+        return Err(image_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "image generation requires an API key",
+        ));
+    }
+    Ok(caller)
+}
+
 async fn generations(
     State(state): State<AppState>,
     caller: Option<Extension<Caller>>,
     body: Body,
 ) -> Response {
-    if !state.media.images_enabled() {
-        return image_error(StatusCode::NOT_FOUND, "not_found", "image generation is not enabled");
-    }
-    let caller = caller.map(|Extension(c)| c).unwrap_or_default();
-    // Images spend subscription quota fast: never for anonymous open access.
-    if caller.user_id.is_none() {
-        return image_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "image generation requires an API key",
-        );
-    }
+    let caller = match admit(&state, caller) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let bytes = match buffer_body(body, state.config.max_body_bytes).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
@@ -90,9 +110,142 @@ async fn generations(
         Ok(p) => p,
         Err(msg) => return bad_request(&msg),
     };
+    respond(&state, &caller, &model, &params).await
+}
 
+/// `multipart/form-data` (what the OpenAI SDKs send: `image` / `image[]`
+/// files) or JSON with `images: [{"image_url": "data:..."}]`.
+async fn edits(State(state): State<AppState>, caller: Option<Extension<Caller>>, request: Request) -> Response {
+    let caller = match admit(&state, caller) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let multipart = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.trim_start().to_ascii_lowercase().starts_with("multipart/form-data"));
+    let parsed = if multipart {
+        match Multipart::from_request(request, &state).await {
+            Ok(form) => read_multipart(form).await,
+            Err(e) => return image_error(e.status(), "invalid_request", &e.body_text()),
+        }
+    } else {
+        let bytes = match buffer_body(request.into_body(), MAX_EDIT_BODY_BYTES).await {
+            Ok(b) => b,
+            Err(e) => return e.into_response(),
+        };
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(v) => parse_edit_json(&v).map_err(|m| bad_request(&m)),
+            Err(_) => Err(bad_request("request body must be multipart/form-data or JSON")),
+        }
+    };
+    match parsed {
+        Ok((model, params)) => respond(&state, &caller, &model, &params).await,
+        Err(resp) => resp,
+    }
+}
+
+fn multipart_error(e: axum::extract::multipart::MultipartError) -> Response {
+    image_error(e.status(), "invalid_request", &e.body_text())
+}
+
+#[allow(clippy::result_large_err)]
+async fn read_multipart(mut form: Multipart) -> Result<(String, ImageParams), Response> {
+    let mut fields = serde_json::Map::new();
+    let mut images = Vec::new();
+    while let Some(field) = form.next_field().await.map_err(multipart_error)? {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "image" | "image[]" => {
+                if images.len() == MAX_REFERENCE_IMAGES {
+                    return Err(bad_request(&format!("at most {MAX_REFERENCE_IMAGES} images are supported")));
+                }
+                let bytes = field.bytes().await.map_err(multipart_error)?;
+                images.push(image_data_url(&bytes).map_err(|m| bad_request(&m))?);
+            }
+            "mask" => return Err(bad_request("'mask' is not supported")),
+            _ => {
+                let text = field.text().await.map_err(multipart_error)?;
+                // Form fields are strings; `parse_request` expects JSON types.
+                let value = match name.as_str() {
+                    "n" => text.trim().parse::<u64>().map(Value::from).unwrap_or(Value::String(text)),
+                    "stream" => text.trim().parse::<bool>().map(Value::from).unwrap_or(Value::String(text)),
+                    _ => Value::String(text),
+                };
+                fields.insert(name, value);
+            }
+        }
+    }
+    let (model, mut params) = parse_request(&Value::Object(fields)).map_err(|m| bad_request(&m))?;
+    if images.is_empty() {
+        return Err(bad_request("missing 'image' file"));
+    }
+    params.images = images;
+    Ok((model, params))
+}
+
+/// JSON edits: `images` as `[{"image_url": ...}]` or plain strings, and/or
+/// `image` as a string or an array. Data URLs or bare base64 only - no
+/// remote URLs or file ids.
+pub fn parse_edit_json(v: &Value) -> Result<(String, ImageParams), String> {
+    if !v["mask"].is_null() {
+        return Err("'mask' is not supported".into());
+    }
+    let (model, mut params) = parse_request(v)?;
+    let mut refs = Vec::new();
+    for key in ["images", "image"] {
+        match &v[key] {
+            Value::Null => {}
+            Value::Array(items) => refs.extend(items.iter()),
+            other => refs.push(other),
+        }
+    }
+    if refs.is_empty() {
+        return Err("missing 'images' (reference images)".into());
+    }
+    if refs.len() > MAX_REFERENCE_IMAGES {
+        return Err(format!("at most {MAX_REFERENCE_IMAGES} images are supported"));
+    }
+    for r in refs {
+        let s = r.as_str().or_else(|| r["image_url"].as_str()).or_else(|| r["image_url"]["url"].as_str());
+        let s = s.ok_or("each image must be a data URL string or {\"image_url\": \"data:...\"}")?;
+        let payload = match s.strip_prefix("data:") {
+            Some(rest) => rest.split_once(";base64,").map(|(_, b)| b).ok_or("image data URLs must be base64")?,
+            None if s.starts_with("http://") || s.starts_with("https://") => {
+                return Err("remote image URLs are not supported; send the image as a data URL".into())
+            }
+            None => s,
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .map_err(|_| "an image is not valid base64".to_string())?;
+        params.images.push(image_data_url(&bytes)?);
+    }
+    Ok((model, params))
+}
+
+/// Sniffs the format (never the client's content type) and re-encodes the
+/// image as a data URL.
+fn image_data_url(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() > MAX_REFERENCE_IMAGE_BYTES {
+        return Err(format!("an image exceeds {} MiB", MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)));
+    }
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return Err("images must be PNG, JPEG or WebP".into());
+    };
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+async fn respond(state: &AppState, caller: &Caller, model: &str, params: &ImageParams) -> Response {
     let mut tried = Vec::new();
-    let mut resp = generate(&state, &caller, &model, &params, &mut tried).await;
+    let mut resp = generate(state, caller, model, params, &mut tried).await;
     // Routing topology is the admin's business only (SEC-11).
     if caller.is_admin() && !tried.is_empty() {
         let headers = resp.headers_mut();
@@ -151,6 +304,7 @@ pub fn parse_request(v: &Value) -> Result<(String, ImageParams), String> {
         quality: opt_enum(v, "quality", &["low", "medium", "high", "auto"])?,
         background: opt_enum(v, "background", &["transparent", "opaque", "auto"])?,
         output_format: opt_enum(v, "output_format", &["png", "jpeg", "webp"])?.unwrap_or_else(|| "png".into()),
+        images: Vec::new(),
     };
     Ok((model.to_string(), params))
 }

@@ -402,6 +402,159 @@ async fn disabled_is_404_and_anonymous_open_access_is_401() {
         .await
         .unwrap();
     assert_eq!(anon.status(), 401);
+    let anon_edit = reqwest::Client::new()
+        .post(format!("{}/v1/images/edits", app.base_url))
+        .json(&json!({ "model": "img", "prompt": "a fox", "images": [PNG_DATA_URL] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon_edit.status(), 401);
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-png-body";
+const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0fake-jpeg-body";
+// base64 of PNG.
+const PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgpmYWtlLXBuZy1ib2R5";
+
+/// A hand-built multipart body (the test reqwest has no `multipart` feature).
+/// Parts are `(name, filename, bytes)`; `None` filename = a text field.
+fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+    let boundary = "1router-test-boundary";
+    let mut body = Vec::new();
+    for (name, filename, bytes) in parts {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        match filename {
+            Some(f) => body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+            ),
+            None => body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes()),
+        }
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+async fn edit_multipart(app: &TestApp, parts: &[(&str, Option<&str>, &[u8])]) -> reqwest::Response {
+    let (content_type, body) = multipart(parts);
+    admin(app, reqwest::Method::POST, "/v1/images/edits")
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn sent_body(req: &wiremock::Request) -> Value {
+    serde_json::from_slice(&req.body).unwrap()
+}
+
+#[tokio::test]
+async fn multipart_edit_sends_reference_images_before_the_prompt() {
+    let upstream = MockServer::start().await;
+    mount(&upstream, "cx1", sse(HAPPY), 1).await;
+    let app = two_account_app(&upstream).await;
+
+    let resp = edit_multipart(
+        &app,
+        &[
+            ("model", None, b"img"),
+            ("prompt", None, b"redraw image1 in the style of image2"),
+            ("n", None, b"1"),
+            ("size", None, b"1024x1536"),
+            ("background", None, b"transparent"),
+            ("input_fidelity", None, b"high"),
+            ("image[]", Some("subject.png"), PNG),
+            ("image[]", Some("style.jpg"), JPEG),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let reqs = upstream.received_requests().await.unwrap();
+    let sent = sent_body(&reqs[0]);
+    assert_eq!(sent["tools"][0]["action"], "edit");
+    assert!(sent["tools"][0].get("background").is_none(), "transparent is a prompt hint only");
+    let content = sent["input"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 7);
+    assert_eq!(content[0]["text"], "<image name=image1>");
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["image_url"], PNG_DATA_URL);
+    assert!(content[4]["image_url"].as_str().unwrap().starts_with("data:image/jpeg;base64,"));
+    let prompt = content[6]["text"].as_str().unwrap();
+    assert!(prompt.starts_with("redraw image1") && prompt.contains("background: transparent"), "{prompt}");
+}
+
+#[tokio::test]
+async fn json_edit_accepts_data_urls_and_bare_base64() {
+    let upstream = MockServer::start().await;
+    mount(&upstream, "cx1", sse(HAPPY), 2).await;
+    let app = two_account_app(&upstream).await;
+
+    let resp = admin(&app, reqwest::Method::POST, "/v1/images/edits")
+        .json(&json!({ "model": "img", "prompt": "a fox sticker",
+            "images": [{ "image_url": PNG_DATA_URL }, "iVBORw0KGgpmYWtlLXBuZy1ib2R5"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let reqs = upstream.received_requests().await.unwrap();
+    let content = sent_body(&reqs[0])["input"][0]["content"].as_array().unwrap().clone();
+    assert_eq!(content[1]["image_url"], PNG_DATA_URL);
+    assert_eq!(content[4]["image_url"], PNG_DATA_URL, "bare base64 is sniffed and wrapped");
+
+    // Text-only generations are unchanged.
+    assert_eq!(generate_img(&app).await.status(), 200);
+    let reqs = upstream.received_requests().await.unwrap();
+    assert_eq!(sent_body(&reqs[1])["tools"][0]["action"], "generate");
+}
+
+#[tokio::test]
+async fn bad_edits_are_rejected_before_any_upstream_call() {
+    let upstream = MockServer::start().await;
+    mount(&upstream, "cx1", sse(HAPPY), 0).await;
+    let app = two_account_app(&upstream).await;
+
+    let gif: &[u8] = b"GIF89a....";
+    for parts in [
+        vec![("model", None, &b"img"[..]), ("prompt", None, b"x")],
+        vec![("model", None, b"img"), ("prompt", None, b"x"), ("image", Some("a.gif"), gif)],
+        vec![("model", None, b"img"), ("prompt", None, b"x"), ("image", Some("a.png"), PNG), ("mask", Some("m.png"), PNG)],
+        vec![("model", None, b"img"), ("prompt", None, b"x"), ("n", None, b"2"), ("image", Some("a.png"), PNG)],
+        vec![("model", None, b"img"), ("image", Some("a.png"), PNG)],
+    ] {
+        let resp = edit_multipart(&app, &parts).await;
+        assert_eq!(resp.status(), 400, "{:?}", parts.iter().map(|p| p.0).collect::<Vec<_>>());
+    }
+    let seventeen: Vec<(&str, Option<&str>, &[u8])> = [("model", None, &b"img"[..]), ("prompt", None, b"x")]
+        .into_iter()
+        .chain(std::iter::repeat(("image[]", Some("a.png"), PNG)).take(17))
+        .collect();
+    assert_eq!(edit_multipart(&app, &seventeen).await.status(), 400);
+
+    for bad in [
+        json!({ "model": "img", "prompt": "x" }),
+        json!({ "model": "img", "prompt": "x", "images": ["https://example.com/a.png"] }),
+        json!({ "model": "img", "prompt": "x", "images": ["not base64!"] }),
+        json!({ "model": "img", "prompt": "x", "images": [PNG_DATA_URL], "mask": PNG_DATA_URL }),
+        json!({ "model": "img", "prompt": "x", "images": [{ "file_id": "file-1" }] }),
+    ] {
+        let resp = admin(&app, reqwest::Method::POST, "/v1/images/edits").json(&bad).send().await.unwrap();
+        assert_eq!(resp.status(), 400, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn edit_bodies_above_the_generations_cap_are_accepted() {
+    let upstream = MockServer::start().await;
+    mount(&upstream, "cx1", sse(HAPPY), 1).await;
+    let app = two_account_app_with(&upstream, |cfg| cfg.max_body_bytes = 64 * 1024).await;
+
+    let mut big = PNG.to_vec();
+    big.resize(3 * 1024 * 1024, 0);
+    let resp = edit_multipart(&app, &[("model", None, b"img"), ("prompt", None, b"x"), ("image", Some("a.png"), &big)]).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 }
 
 #[tokio::test]

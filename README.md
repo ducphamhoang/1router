@@ -228,12 +228,28 @@ r = client.images.generate(model="<image-pool-id>", prompt="a watercolor fox", s
 open("out.png", "wb").write(base64.b64decode(r.data[0].b64_json))
 ```
 
+Reference images go to `POST /v1/images/edits`: the SDK's
+`images.edit` (multipart `image` / `image[]` files), or JSON with
+`"images": [{"image_url": "data:image/png;base64,..."}]`. Up to 16 PNG, JPEG
+or WebP images (20 MiB each). Each is tagged `image1`, `image2`, ... in the
+order sent, so the prompt can refer to them:
+
+```python
+r = client.images.edit(
+    model="<image-pool-id>",
+    image=[open("subject.png", "rb"), open("style.png", "rb")],
+    prompt="Redraw the character from image1 in the art style of image2, transparent background",
+)
+```
+
 What clients should expect:
 
 - One image per request (`n: 1`), returned as `data[0].b64_json` only — no
-  `response_format: "url"`, no streaming, and no `/v1/images/edits` (no
-  reference/input images or masks). `background: "transparent"` is rejected
-  upstream with a 400 — generate on a flat colour and key it out yourself.
+  `response_format: "url"`, no streaming, no masks, and reference images
+  only as uploads or data URLs (no remote URLs or file ids).
+- `background: "transparent"` works, but as a hint like `size`: the model
+  decides, so ask for it in the prompt too, and check the response's
+  `background` field.
 - An image takes roughly 25–40 s; set client and reverse-proxy timeouts to
   120 s or more.
 - `size`/`quality` are hints: `1536x1024` and `1024x1536` come back exact,

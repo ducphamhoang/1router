@@ -377,11 +377,24 @@ open("out.png", "wb").write(base64.b64decode(r.data[0].b64_json))`}</pre>
 const client = new OpenAI({ baseURL: "${baseUrl}", apiKey: "<your-api-key>", timeout: 300_000 });
 const r = await client.images.generate({ model: "${imagePools[0].id}", prompt: "a watercolor fox" });
 const png = Buffer.from(r.data[0].b64_json!, "base64");`}</pre>
+            <p>
+              Reference images: <code>POST /v1/images/edits</code> (SDK <code>images.edit</code>, multipart{" "}
+              <code>image[]</code>, or JSON <code>images: [{"{"}"image_url": "data:..."{"}"}]</code>). Up to 16
+              PNG/JPEG/WebP, 20 MiB each, tagged <code>image1</code>, <code>image2</code>… in upload order:
+            </p>
+            <pre>{`r = client.images.edit(
+    model="${imagePools[0].id}",
+    image=[open("subject.png", "rb"), open("style.png", "rb")],
+    prompt="Redraw the character from image1 in the style of image2, transparent background",
+)`}</pre>
             <ul>
               <li>
                 One image per request (<code>n: 1</code>), returned as <code>b64_json</code> only — no{" "}
-                <code>response_format: "url"</code>, no streaming, no <code>/images/edits</code>, and{" "}
-                <code>background: "transparent"</code> is rejected (400).
+                <code>response_format: "url"</code>, no streaming, no masks, no remote image URLs.
+              </li>
+              <li>
+                <code>background: "transparent"</code> is a hint the model may ignore — say it in the prompt too and
+                check the response's <code>background</code>.
               </li>
               <li>
                 An image takes about 25–40 s: set client (and any reverse proxy) timeouts to 120 s or more.

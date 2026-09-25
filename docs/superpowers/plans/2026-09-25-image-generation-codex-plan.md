@@ -398,8 +398,9 @@ where they conflict.
   `/images/generations` URL (reviewed design in the media plan §5.1/§5.5).
 
 ### P3 — Later
-- `/v1/images/edits` (multipart, OpenAI-official) → Codex `input_image` +
-  `action: "edit"`; OpenAI-shaped streaming (`partial_images`); `n>1` by
+- ~~`/v1/images/edits` (multipart, OpenAI-official) → Codex `input_image` +
+  `action: "edit"`~~ — done on `feature/image-edits` (masks not supported);
+  OpenAI-shaped streaming (`partial_images`); `n>1` by
   sequential calls with explicit opt-in; Gemini/Antigravity image adapters.
 
 ---

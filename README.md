@@ -195,6 +195,19 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model":"command-code/Qwen/Qwen3.7-Flash","messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,<base64-data>"}}]}]}'
 ```
 
+Image generation (`POST /v1/images/generations`) runs through ChatGPT
+accounts added as Codex providers. It is off by default: create an **image**
+pool on the Pools page, add Codex providers with an image model such as
+`gpt-image-2`, then enable it on the Settings page:
+
+```
+curl http://localhost:8080/v1/images/generations   -H "Authorization: Bearer $(cat .router_secret)"   -H 'Content-Type: application/json'   -d '{"model":"<image-pool-id>","prompt":"a watercolor fox","size":"1024x1024"}'
+```
+
+The response carries the image as `data[0].b64_json`. See
+[Image generation](docs/ARCHITECTURE.md#image-generation) for limits,
+failover, and the `ROUTER_MEDIA_*` settings.
+
 ## Admin dashboard
 
 Open `http://localhost:8080/ui/` and log in as `admin` with the password

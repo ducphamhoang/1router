@@ -114,7 +114,7 @@ pub async fn upsert_member(db: &SqlitePool, m: &PoolMember) -> Result<(), AppErr
             Some(model) if crate::pools::select::is_image_model(model) => {}
             _ => {
                 return Err(AppError::BadRequest(format!(
-                    "image pool members need model_override set to an image model                      (gpt-image-* or <chat-model>-image), got {:?}",
+                    "image pool members need model_override set to an image model \n                     (gpt-image-* or <chat-model>-image), got {:?}",
                     model_override
                 )))
             }

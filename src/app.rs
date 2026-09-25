@@ -22,7 +22,9 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin = Router::new().merge(admin_authenticated).merge(admin_public);
 
-    let proxy = crate::proxy::routes::routes().route_layer(axum::middleware::from_fn_with_state(
+    let proxy = crate::proxy::routes::routes()
+        .merge(crate::media::images::routes())
+        .route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
         require_bearer,
     ));

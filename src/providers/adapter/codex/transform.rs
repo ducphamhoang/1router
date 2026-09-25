@@ -256,7 +256,7 @@ pub fn parse_sse_block(block: &str) -> Option<(String, Value)> {
 }
 
 /// Parse an SSE body into (event, data-json) pairs.
-fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
+pub(crate) fn sse_events(sse_body: &str) -> Vec<(String, Value)> {
     sse_body.split("\n\n").filter_map(parse_sse_block).collect()
 }
 

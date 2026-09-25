@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Settings } from "./Settings";
 
@@ -52,5 +52,36 @@ describe("Settings", () => {
     render(<Settings />);
     expect(screen.queryByText("Client API access")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("API key for client connections")).not.toBeInTheDocument();
+  });
+});
+
+describe("Settings image toggle", () => {
+  it("loads_and_toggles_images_enabled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/admin/settings/images" && init?.method === "PATCH") {
+          return new Response(String(init.body), { status: 200 });
+        }
+        if (url === "/admin/settings/images") {
+          return new Response(JSON.stringify({ images_enabled: false }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    render(<Settings />);
+
+    const toggle = screen.getByRole("checkbox", { name: /images\/generations/ });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).not.toBeChecked();
+
+    await userEvent.click(toggle);
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/settings/images",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ images_enabled: true }) })
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent("Image generation enabled.");
+    expect(toggle).toBeChecked();
   });
 });

@@ -20,7 +20,7 @@ type SecurityStatusResponse = {
   listen_addr_is_loopback: boolean;
 };
 
-type Pool = { id: string; wire_format: string };
+type Pool = { id: string; wire_format: string; modality?: string };
 type Provider = { id: string; name: string; kind: string; wire_format: string };
 
 // Per-provider result of calling its own GET .../models - kept separate
@@ -114,9 +114,12 @@ export function Integration() {
   }
 
   const baseUrl = `${window.location.origin}/v1`;
-  const exampleModel = pools[0]?.id ?? "<pool-id>";
-  const anthropicPools = pools.filter((p) => p.wire_format === "anthropic");
-  const openaiPools = pools.filter((p) => p.wire_format === "openai");
+  // Image pools only serve /v1/images/generations, never chat.
+  const chatPools = pools.filter((p) => p.modality !== "image");
+  const imagePools = pools.filter((p) => p.modality === "image");
+  const exampleModel = chatPools[0]?.id ?? "<pool-id>";
+  const anthropicPools = chatPools.filter((p) => p.wire_format === "anthropic");
+  const openaiPools = chatPools.filter((p) => p.wire_format === "openai");
   const poolIds = new Set(pools.map((p) => p.id));
   const discoverableProviders = providers.filter((p) => p.kind === "passthrough" || p.kind === "oauth_command_code");
 
@@ -341,6 +344,27 @@ export function Integration() {
   -H "Content-Type: application/json" \\
   -d '{"model":"${exampleModel}","messages":[{"role":"user","content":"hi"}]}'`}
         </pre>
+
+        {imagePools.length > 0 ? (
+          <>
+            <h3>Image generation</h3>
+            <p>
+              Image pools (<code>POST /v1/images/generations</code>, one image per request, <code>b64_json</code>{" "}
+              only) must be enabled under Settings and always need an API key, even with open access on:
+            </p>
+            <ul>
+              {imagePools.map((p) => (
+                <li key={p.id}>
+                  <code>{p.id}</code>
+                </li>
+              ))}
+            </ul>
+            <pre>{`curl ${baseUrl}/images/generations \\
+  -H "Authorization: Bearer ${sharedSecretRevealed ? sharedSecret : "<your-api-key>"}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${imagePools[0].id}","prompt":"a watercolor fox","size":"1024x1024"}'`}</pre>
+          </>
+        ) : null}
 
         <h3>Other models available from your providers</h3>
         <p>

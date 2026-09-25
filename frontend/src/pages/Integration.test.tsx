@@ -48,7 +48,8 @@ describe("Integration", () => {
           return new Response(
             JSON.stringify([
               { id: "codex-sol", wire_format: "openai" },
-              { id: "claude-main", wire_format: "anthropic" }
+              { id: "claude-main", wire_format: "anthropic" },
+              { id: "img-main", wire_format: "openai", modality: "image" }
             ]),
             { status: 200 }
           );
@@ -71,6 +72,13 @@ describe("Integration", () => {
         return new Response("{}", { status: 404 });
       })
     );
+  });
+
+  it("lists image pools separately with an images curl example", async () => {
+    render(<Integration />);
+    expect(await screen.findByRole("heading", { name: "Image generation" })).toBeInTheDocument();
+    expect(screen.getByText(/\/images\/generations/, { selector: "pre" })).toHaveTextContent('"model":"img-main"');
+    expect(screen.getByText(/\/chat\/completions/, { selector: "pre" })).not.toHaveTextContent("img-main");
   });
 
   it("renders the current client API access mode", async () => {

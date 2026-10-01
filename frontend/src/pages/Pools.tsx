@@ -25,7 +25,26 @@ type Pool = {
   wire_format: string;
   strategy: string;
   sticky_limit?: number | null;
+  // Absent on pre-image servers: treat as "chat".
+  modality?: string;
 };
+
+// Image pools serve /v1/images/generations through Codex (ChatGPT OAuth)
+// providers only; members must name an image model (`gpt-image-*` or
+// `<chat-model>-image`, mirrored from `pools::select::is_image_model`).
+export function isImagePool(pool: Pool) {
+  return pool.modality === "image";
+}
+
+export function isImageModel(model: string) {
+  const m = model.trim();
+  if (!m || /\s/.test(m)) {
+    return false;
+  }
+  return (m.startsWith("gpt-image-") && m.length > "gpt-image-".length) || (m.endsWith("-image") && m.length > "-image".length);
+}
+
+const IMAGE_MODEL_SUGGESTIONS = ["gpt-image-2", "gpt-image-1.5", "gpt-image-2.5", "gpt-5.5-image"];
 
 const STRATEGY_OPTIONS = [
   { value: "priority", label: "Priority (fallback)" },
@@ -136,6 +155,7 @@ export function Pools() {
   const [wireFormat, setWireFormat] = useState("openai");
   const [strategy, setStrategy] = useState("priority");
   const [stickyLimit, setStickyLimit] = useState("");
+  const [modality, setModality] = useState("chat");
   const [addMemberDraft, setAddMemberDraft] = useState<
     Record<
       string,
@@ -211,12 +231,15 @@ export function Pools() {
           id: poolId,
           wire_format: wireFormat,
           strategy,
-          sticky_limit: Number.isFinite(parsedStickyLimit) ? parsedStickyLimit : undefined
+          sticky_limit: Number.isFinite(parsedStickyLimit) ? parsedStickyLimit : undefined,
+          // Omitted for chat: the server defaults it.
+          modality: modality === "image" ? "image" : undefined
         })
       });
       setPoolId("");
       setStrategy("priority");
       setStickyLimit("");
+      setModality("chat");
       setCreateOpen(false);
       await loadPools();
     } catch (err) {
@@ -407,12 +430,13 @@ export function Pools() {
           // model_override above - v1 has no UI for explicitly forcing a
           // member's logging *off* against a provider default of on, only
           // "inherit" or "on".
-          ...(draft.datasetLoggingOverride ? { dataset_logging_override: true } : {}),
+          ...(draft.datasetLoggingOverride && !isImagePool(pool) ? { dataset_logging_override: true } : {}),
           // Same "only sent when explicitly chosen" pattern: blank means
           // inherit the provider's own default_reasoning_effort. Cleared
           // when the provider/model can't carry one at all, so a stale
           // draft value can't produce a rejected write.
-          ...(memberCapability(pool, draft.providerId, draft.modelOverride) !== "unsupported" &&
+          ...(!isImagePool(pool) &&
+          memberCapability(pool, draft.providerId, draft.modelOverride) !== "unsupported" &&
           draft.reasoningEffortOverride
             ? { reasoning_effort_override: draft.reasoningEffortOverride }
             : {})
@@ -483,7 +507,13 @@ export function Pools() {
 
   function renderDetail(pool: Pool) {
     const members = membersByPool[pool.id] ?? [];
-    const eligibleProviders = providers.filter((provider) => provider.wire_format === pool.wire_format);
+    const image = isImagePool(pool);
+    // Image pools match on kind, not wire_format: a Codex provider set to
+    // the anthropic wire can still generate images.
+    const eligibleProviders = providers.filter((provider) =>
+      image ? provider.kind === "oauth_codex" : provider.wire_format === pool.wire_format
+    );
+    const draft = draftFor(pool.id);
     const poolDeleteKey = `pool:${pool.id}`;
     const fetchState = modelFetch[pool.id];
     return (
@@ -491,7 +521,7 @@ export function Pools() {
         <header className="modal-header">
           <div className="pool-identity">
             <h2>{pool.id}</h2>
-            <span className="badge">{pool.wire_format}</span>
+            <span className="badge">{image ? "image" : pool.wire_format}</span>
             <span className="pool-meta">{describeCount(members.length)}</span>
           </div>
           <div className="pool-strategy">
@@ -663,17 +693,19 @@ export function Pools() {
             </select>
           </label>
           <label>
-            Model override <span className="optional">optional</span>
+            {image ? "Image model" : "Model override"} <span className="optional">{image ? "required" : "optional"}</span>
             <div className="model-override-row">
               <input
                 aria-label={`Model override for ${pool.id}`}
-                placeholder="blank = provider's own upstream_model"
+                placeholder={image ? "gpt-image-2 or <chat-model>-image" : "blank = provider's own upstream_model"}
                 list={`model-suggestions-${pool.id}`}
                 value={draftFor(pool.id).modelOverride}
                 onChange={(event) => setDraftFor(pool.id, { modelOverride: event.target.value })}
               />
               <datalist id={`model-suggestions-${pool.id}`}>
-                {(fetchState?.status === "ok"
+                {(image
+                  ? IMAGE_MODEL_SUGGESTIONS
+                  : fetchState?.status === "ok"
                   ? fetchState.models
                   : pool.wire_format === "anthropic"
                     ? ANTHROPIC_MODEL_SUGGESTIONS
@@ -682,6 +714,8 @@ export function Pools() {
                   <option key={model} value={model} />
                 ))}
               </datalist>
+              {image ? null : (
+              <>
               <button
                 type="button"
                 className="btn-ghost"
@@ -700,7 +734,14 @@ export function Pools() {
               >
                 Validate
               </button>
+              </>
+              )}
             </div>
+            {image && draft.modelOverride.trim() && !isImageModel(draft.modelOverride) ? (
+              <span className="validation-result validation-error" role="alert">
+                ✗ Image pools need an image model: gpt-image-* or &lt;chat-model&gt;-image.
+              </span>
+            ) : null}
             {fetchState?.status === "ok" ? (
               <span className="validation-result validation-ok" role="status">
                 ✓ Showing {fetchState.models.length} live model{fetchState.models.length === 1 ? "" : "s"} from the provider.
@@ -729,6 +770,7 @@ export function Pools() {
               </span>
             ) : null}
           </label>
+          {image ? null : (
           <label className="checkbox-row">
             <input
               type="checkbox"
@@ -738,7 +780,9 @@ export function Pools() {
             />
             Log requests/responses for this membership (overrides the provider default)
           </label>
-          {memberCapability(pool, draftFor(pool.id).providerId, draftFor(pool.id).modelOverride) !==
+          )}
+          {!image &&
+          memberCapability(pool, draftFor(pool.id).providerId, draftFor(pool.id).modelOverride) !==
           "unsupported" ? (
             <label>
               Reasoning effort <span className="optional">optional</span>
@@ -756,12 +800,18 @@ export function Pools() {
               </select>
             </label>
           ) : null}
-          <button type="submit" disabled={!draftFor(pool.id).providerId}>
+          <button type="submit" disabled={!draft.providerId || (image && !isImageModel(draft.modelOverride))}>
             Add to pool
           </button>
           {eligibleProviders.length === 0 ? (
             <p className="add-member-hint">
-              No <code>{pool.wire_format}</code> providers exist yet — create one on the Providers page first.
+              {image ? (
+                <>No Codex (ChatGPT OAuth) providers exist yet — create one on the Providers page first.</>
+              ) : (
+                <>
+                  No <code>{pool.wire_format}</code> providers exist yet — create one on the Providers page first.
+                </>
+              )}
             </p>
           ) : null}
         </form>
@@ -803,7 +853,7 @@ export function Pools() {
             <li key={pool.id}>
               <button type="button" className="pool-row" onClick={() => setOpenPoolId(pool.id)} aria-label={`Open pool ${pool.id}`}>
                 <span className="pool-row-id">{pool.id}</span>
-                <span className="badge">{pool.wire_format}</span>
+                <span className="badge">{isImagePool(pool) ? "image" : pool.wire_format}</span>
                 <span className="pool-meta">{describeCount((membersByPool[pool.id] ?? []).length)}</span>
                 <span className="pool-row-chevron" aria-hidden="true">
                   ›
@@ -823,6 +873,13 @@ export function Pools() {
             <label>
               Pool id
               <input value={poolId} onChange={(event) => setPoolId(event.target.value)} />
+            </label>
+            <label>
+              Type
+              <select aria-label="Pool type" value={modality} onChange={(event) => setModality(event.target.value)}>
+                <option value="chat">chat</option>
+                <option value="image">image (Codex providers only)</option>
+              </select>
             </label>
             <label>
               Wire format

@@ -50,8 +50,8 @@ async fn flush(db: &SqlitePool, pending: &mut Vec<LogEntry>) {
     };
     for e in pending.iter() {
         let _ = sqlx::query(
-            "INSERT INTO request_log (pool_id, provider_id, status_code, latency_ms, success, user_id, created_at)
-             VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO request_log (pool_id, provider_id, status_code, latency_ms, success, user_id, modality, units, created_at)
+             VALUES (?,?,?,?,?,?,?,?,?)",
         )
         .bind(&e.pool_id)
         .bind(&e.provider_id)
@@ -59,6 +59,8 @@ async fn flush(db: &SqlitePool, pending: &mut Vec<LogEntry>) {
         .bind(e.latency_ms)
         .bind(e.success)
         .bind(&e.user_id)
+        .bind(e.modality)
+        .bind(e.units)
         .bind(now)
         .execute(&mut *tx)
         .await
@@ -89,6 +91,8 @@ mod tests {
                 latency_ms: 12,
                 success: true,
                 user_id: Some(format!("user{}", i % 2)),
+                modality: None,
+                units: None,
             })
             .await
             .unwrap();

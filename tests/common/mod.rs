@@ -17,6 +17,22 @@ pub async fn spawn_app() -> TestApp {
 // (and its refresh token) survives across separate `cargo test` invocations,
 // instead of requiring a fresh browser login every single run.
 pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp {
+    spawn_app_with(sqlite_path, |_| {}).await
+}
+
+/// `spawn_app` with a hook to adjust the `Config` before boot (e.g. point
+/// `media.codex_responses_url` at wiremock).
+#[allow(dead_code)]
+pub async fn spawn_app_with_config(
+    configure: impl FnOnce(&mut router::core::config::Config),
+) -> TestApp {
+    spawn_app_with(None, configure).await
+}
+
+async fn spawn_app_with(
+    sqlite_path: Option<String>,
+    configure: impl FnOnce(&mut router::core::config::Config),
+) -> TestApp {
     // Build Config directly rather than through Config::from_env() + std::env::set_var.
     // Integration tests within one file run concurrently by default; std::env is
     // process-global, so concurrent spawn_app() calls setting ROUTER_* would race
@@ -41,7 +57,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
     let dataset_log_dir = dataset_log_dir_holder.path().to_path_buf();
     std::mem::forget(dataset_log_dir_holder); // keep it alive for the test process
 
-    let cfg = router::core::config::Config {
+    let mut cfg = router::core::config::Config {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         sqlite_path: db_path,
         shared_secret: secret.clone(),
@@ -52,7 +68,9 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         max_body_bytes: 10 * 1024 * 1024,
         drain_timeout: std::time::Duration::from_secs(30),
         dataset_log_dir: dataset_log_dir.clone(),
+        media: Default::default(),
     };
+    configure(&mut cfg);
     let db = router::core::db::init_pool(&cfg.sqlite_path).await.unwrap();
     let admin_password = "test-admin-password".to_string();
     let admin_password_hash =
@@ -95,6 +113,7 @@ pub async fn spawn_app_with_sqlite_path(sqlite_path: Option<String>) -> TestApp 
         login_attempts: std::sync::Arc::new(dashmap::DashMap::new()),
         discovered_models: std::sync::Arc::new(dashmap::DashMap::new()),
         pool_rotation: std::sync::Arc::new(dashmap::DashMap::new()),
+        media: std::sync::Arc::new(router::media::MediaState::new(&cfg, false)),
     };
 
     let router = router::app::build_router(state);

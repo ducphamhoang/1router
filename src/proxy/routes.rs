@@ -70,9 +70,13 @@ async fn proxy_entry(s: AppState, wire: WireFormat, caller: Caller, body: Body) 
 
 async fn models(State(s): State<AppState>) -> Json<Value> {
     let snap = s.snapshot.load();
+    let images_enabled = s.media.images_enabled();
     let mut data: Vec<Value> = snap
         .pools
         .iter()
+        // Image pools are only callable (and so only listed) while images
+        // are enabled.
+        .filter(|p| p.pool.modality == crate::core::model::Modality::Chat || images_enabled)
         .map(|p| json!({ "id": p.pool.id, "object": "model", "owned_by": "1router" }))
         .collect();
 

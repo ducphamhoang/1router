@@ -190,6 +190,7 @@ mod tests {
             max_body_bytes: 1024,
             drain_timeout: std::time::Duration::from_secs(1),
             dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
+            media: Default::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let (dataset_tx, _dataset_rx) = tokio::sync::mpsc::channel(8);
@@ -213,6 +214,7 @@ mod tests {
             login_attempts: Arc::new(dashmap::DashMap::new()),
             discovered_models: Arc::new(dashmap::DashMap::new()),
             pool_rotation: Arc::new(dashmap::DashMap::new()),
+            media: Default::default(),
             db,
         }
     }

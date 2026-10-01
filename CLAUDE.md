@@ -64,6 +64,15 @@ new work should branch directly off `master`. See:
   1router — never changes upstream credentials. Design:
   `docs/superpowers/specs/2026-08-28-user-credentials-design.md`, overview:
   `docs/ARCHITECTURE.md#users-per-caller-credentials`
+- Image generation (branch `feature/image-generation`) — `POST
+  /v1/images/generations` (+ `/v1/images/edits` for reference images) via Codex (ChatGPT OAuth) providers in image pools
+  (`pools.modality`, migration `0009`), code in `src/media/`, off by default
+  (`PATCH /admin/settings/images`). `pools::select::is_image_model` is
+  mirrored in TS as `isImageModel` in `frontend/src/pages/Pools.tsx` — keep
+  both in sync. Plan: `docs/superpowers/plans/2026-09-25-image-generation-codex-plan.md`,
+  overview: `docs/ARCHITECTURE.md#image-generation`. Upstream fixtures in
+  `tests/fixtures/codex_image_*.sse` are scrubbed of ids/account data —
+  keep it that way when regenerating.
 - Progress ledger (historical, git-ignored scratch, may not exist in a fresh
   checkout): `.superpowers/sdd/progress.md`
 

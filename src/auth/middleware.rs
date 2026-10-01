@@ -351,6 +351,7 @@ mod require_admin_session_tests {
                 max_body_bytes: 1024 * 1024,
                 drain_timeout: Duration::from_secs(30),
                 dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
+                media: Default::default(),
             }),
             snapshot: Arc::new(ArcSwap::from_pointee(ConfigSnapshot {
                 providers: Vec::new(),
@@ -367,6 +368,7 @@ mod require_admin_session_tests {
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
             pool_rotation: Arc::new(DashMap::new()),
+            media: Default::default(),
         }
     }
 

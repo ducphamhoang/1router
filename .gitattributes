@@ -1,1 +1,2 @@
 migrations/*.sql text eol=lf
+tests/fixtures/*.sse text eol=lf

@@ -35,6 +35,7 @@ async fn spawn_app() -> TestApp {
         max_body_bytes: 1024,
         drain_timeout: Duration::from_secs(1),
         dataset_log_dir: dir.path().join("dataset-logs"),
+        media: Default::default(),
     };
     let (log_tx, _log_rx) = tokio::sync::mpsc::channel(8);
     let (dataset_log_tx, _dataset_log_rx) = tokio::sync::mpsc::channel(8);
@@ -56,6 +57,7 @@ async fn spawn_app() -> TestApp {
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),
         pool_rotation: Arc::new(dashmap::DashMap::new()),
+        media: Default::default(),
         db,
     };
     std::mem::forget(dir);

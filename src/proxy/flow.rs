@@ -46,6 +46,8 @@ fn log(
         latency_ms,
         success,
         user_id: caller.user_id.clone(),
+        modality: None,
+        units: None,
     });
 }
 

@@ -768,7 +768,7 @@ export function Providers() {
             {form.kind === "oauth_command_code" && !commandCodeCredentialConfirmed ? (
               <p className="hint">Log in or paste an API key above to fetch the model list.</p>
             ) : null}
-            {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} /> : null}
+            {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} connected={Boolean(editing.credential_configured)} /> : null}
             {error ? <p role="alert">{error}</p> : null}
             <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
               Save provider

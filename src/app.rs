@@ -22,7 +22,9 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin = Router::new().merge(admin_authenticated).merge(admin_public);
 
-    let proxy = crate::proxy::routes::routes().route_layer(axum::middleware::from_fn_with_state(
+    let proxy = crate::proxy::routes::routes()
+        .merge(crate::media::images::routes())
+        .route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
         require_bearer,
     ));
@@ -73,6 +75,7 @@ mod tests {
             max_body_bytes: 1024,
             drain_timeout: Duration::from_secs(1),
             dataset_log_dir: std::path::PathBuf::from("dataset-logs"),
+            media: Default::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let (dataset_tx, _dataset_rx) = tokio::sync::mpsc::channel(8);
@@ -94,6 +97,7 @@ mod tests {
             login_attempts: Arc::new(dashmap::DashMap::new()),
             discovered_models: Arc::new(dashmap::DashMap::new()),
             pool_rotation: Arc::new(dashmap::DashMap::new()),
+            media: Default::default(),
             db,
         }
     }

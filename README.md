@@ -92,6 +92,14 @@ Adding a second provider of the same template (e.g. a second OpenAI key)
 suggests a name that doesn't collide with the first one (`openai-2`,
 `openai-3`, ...) instead of asking you to invent one.
 
+On a headless server, a Codex provider's **Codex OAuth** panel in the admin
+UI has a **Start headless login** button: it shows a one-time code to enter
+at `https://auth.openai.com/codex/device` from any phone or computer, and
+1router polls for the approval and stores the tokens itself (some ChatGPT
+accounts must first enable device code login under Settings → Security).
+The browser flow still works too — paste the whole `localhost:1455` address
+the browser lands on into the **Redirect URL** box.
+
 Here's a real run, picking OpenCode's free tier (no API key needed —
 just press Enter to accept the pre-filled one):
 
@@ -194,6 +202,66 @@ curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"command-code/Qwen/Qwen3.7-Flash","messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,<base64-data>"}}]}]}'
 ```
+
+Image generation (`POST /v1/images/generations`) runs through ChatGPT
+accounts added as Codex providers. It is off by default: create an **image**
+pool on the Pools page, add Codex providers with an image model such as
+`gpt-image-2`, then enable it on the Settings page:
+
+```
+curl http://localhost:8080/v1/images/generations \
+  -H "Authorization: Bearer <client-key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<image-pool-id>","prompt":"a watercolor fox","size":"1536x1024"}'
+```
+
+Any OpenAI SDK works — point it at `http://<host>:8080/v1` and use the image
+pool id as `model`. Give each app its own key from the **Users** page (image
+calls always need a key, even with open access on):
+
+```python
+from openai import OpenAI
+import base64
+
+client = OpenAI(base_url="http://<host>:8080/v1", api_key="1r_...", timeout=300)
+r = client.images.generate(model="<image-pool-id>", prompt="a watercolor fox", size="1536x1024")
+open("out.png", "wb").write(base64.b64decode(r.data[0].b64_json))
+```
+
+Reference images go to `POST /v1/images/edits`: the SDK's
+`images.edit` (multipart `image` / `image[]` files), or JSON with
+`"images": [{"image_url": "data:image/png;base64,..."}]`. Up to 16 PNG, JPEG
+or WebP images (20 MiB each). Each is tagged `image1`, `image2`, ... in the
+order sent, so the prompt can refer to them:
+
+```python
+r = client.images.edit(
+    model="<image-pool-id>",
+    image=[open("subject.png", "rb"), open("style.png", "rb")],
+    prompt="Redraw the character from image1 in the art style of image2, transparent background",
+)
+```
+
+What clients should expect:
+
+- One image per request (`n: 1`), returned as `data[0].b64_json` only — no
+  `response_format: "url"`, no streaming, no masks, and reference images
+  only as uploads or data URLs (no remote URLs or file ids).
+- `background: "transparent"` works, but as a hint like `size`: the model
+  decides, so ask for it in the prompt too, and check the response's
+  `background` field.
+- An image takes roughly 25–40 s; set client and reverse-proxy timeouts to
+  120 s or more.
+- `size`/`quality` are hints: `1536x1024` and `1024x1536` come back exact,
+  a square request comes back 1254×1254, and `high` may be served as
+  `medium`. The response's `size`/`quality` report what was produced.
+- 429 = every account is busy or rate-limited (retry with backoff);
+  404 = image generation is switched off.
+
+The admin UI's **Integration** page shows these examples pre-filled with
+your base URL and pool ids. See
+[Image generation](docs/ARCHITECTURE.md#image-generation) for failover and
+the `ROUTER_MEDIA_*` settings.
 
 ## Admin dashboard
 

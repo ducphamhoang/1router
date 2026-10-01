@@ -128,6 +128,57 @@ and the user's key is never forwarded.
   `api_key`s, so treat the file as a secret either way.
 - Design: [`superpowers/specs/2026-08-28-user-credentials-design.md`](superpowers/specs/2026-08-28-user-credentials-design.md).
 
+## Image generation
+
+`POST /v1/images/generations` (OpenAI Images shape) is served by **image
+pools** (`pools.modality = 'image'`, migration `0009`) whose members are
+Codex (ChatGPT OAuth) providers. Code lives in `src/media/`, not in the chat
+proxy path (`proxy::flow`), because an image call is one long, fully
+buffered request rather than a stream.
+
+- **Off by default**: an image drains Codex subscription quota fast. Enable
+  it in the admin UI Settings page or `PATCH /admin/settings/images
+  {"images_enabled": true}`. While off the route returns 404.
+- **Callers** need a credential (shared secret or user key) even when open
+  access is on — anonymous callers get 401. Direct `<provider_id>/<model>`
+  addressing is admin-only; users must name an image pool.
+- **Request**: `prompt` (≤ 32 KiB), optional `size` (`auto` or `WxH`),
+  `quality`, `background`, `output_format`. Only `n = 1`,
+  `response_format = b64_json` and non-streaming are supported.
+  Size/quality are hints to the upstream tool — the response reports what
+  was actually produced. `background` is sent only as a prompt hint: the
+  tool parameter is rejected upstream (400), but asking in the prompt does
+  yield a transparent RGBA PNG.
+- **Reference images**: `POST /v1/images/edits` takes multipart `image` /
+  `image[]` files (OpenAI SDK `images.edit`) or JSON `images` (data URLs or
+  bare base64, as strings or `{image_url}`), up to 16 PNG/JPEG/WebP of
+  ≤ 20 MiB each (route body cap 50 MiB). They are sent as `input_image`
+  content parts tagged `<image name=imageN>` ahead of the prompt, with the
+  tool's `action: "edit"`. Masks, remote URLs and file ids are rejected
+  with 400 before any upstream call.
+- **Member model** (`model_override`, required) selects the upstream shape:
+  `gpt-image-*` (e.g. `gpt-image-2`) runs the `image_generation` tool with that
+  model, hosted by `ROUTER_CODEX_IMAGE_HOST_MODEL`; `<chat-model>-image`
+  (e.g. `gpt-5.5-image`) lets that chat model call the tool itself. The
+  admin API rejects non-Codex providers and non-image models in image pools
+  (re-checked at request time, since config import bypasses it); image
+  pools are not callable on the chat routes, nor chat pools here, and
+  `/v1/models` lists image pools only while images are enabled.
+- **Failover**: 429/usage limit → cooldown (`resets_in_seconds` honoured, ≤ 6 h),
+  5xx/timeouts/network → backoff, 401 → token refresh then one retry,
+  403/unsupported host model/no image → misconfigured (re-probed after
+  5 min); all fail over to the next member. Moderation refusals, invalid
+  requests and truncated streams are returned as-is (no failover — another
+  account would give the same answer or spend quota again).
+- **Limits**: `ROUTER_MEDIA_MAX_CONCURRENCY` in-flight images (extra → 429),
+  each buffered up to `ROUTER_MEDIA_MAX_RESPONSE_BYTES`, with a whole-request
+  deadline of `ROUTER_MEDIA_REQUEST_TIMEOUT` (→ 504). Set
+  `ROUTER_DRAIN_TIMEOUT` ≥ the request timeout if in-flight images should
+  survive a graceful restart, and raise any reverse proxy's read timeout
+  (nginx defaults to 60 s) above it.
+- `request_log` rows carry `modality = 'image'` and `units = 1`.
+- Plan: [`superpowers/plans/2026-09-25-image-generation-codex-plan.md`](superpowers/plans/2026-09-25-image-generation-codex-plan.md).
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
@@ -142,6 +193,11 @@ and the user's key is never forwarded.
 | `ROUTER_IDLE_TIMEOUT` | `120` (seconds) | Upstream idle timeout |
 | `ROUTER_DRAIN_TIMEOUT` | `30` (seconds) | Graceful shutdown drain window |
 | `ROUTER_DATASET_LOG_DIR` | `<sqlite file's directory>/dataset-logs` | Where opt-in dataset-logging JSONL files are written — see [Dataset logging](#dataset-logging) |
+| `ROUTER_MEDIA_REQUEST_TIMEOUT` | `300` (seconds) | Whole-request deadline for one image call — see [Image generation](#image-generation) |
+| `ROUTER_MEDIA_IDLE_TIMEOUT` | `300` (seconds) | Read idle timeout of the image HTTP client |
+| `ROUTER_MEDIA_MAX_RESPONSE_BYTES` | `67108864` (64 MiB) | Max buffered upstream response per image call |
+| `ROUTER_MEDIA_MAX_CONCURRENCY` | `4` | Concurrent image calls (extra requests get 429) |
+| `ROUTER_CODEX_IMAGE_HOST_MODEL` | `gpt-5.5` | Responses model that hosts the image tool for `gpt-image-*` members |
 
 ## Request path end to end
 
@@ -179,6 +235,21 @@ Everything is one SQLite file, one binary, no external services. Admin
 state (providers/pools/members, OAuth tokens) lives in that same DB; the
 shared admin secret is the only thing that can live outside it (env var or
 the `.router_secret` sidecar).
+
+Codex OAuth tokens get into that DB one of two ways, both from the provider's
+admin panel. **Browser login** (`/admin/providers/:id/oauth/start` +
+`/oauth/complete`) is PKCE with the Codex CLI's fixed
+`http://localhost:1455/auth/callback` redirect: the admin pastes the address
+the browser lands on and the UI extracts `code`/`state`. **Headless login**
+(`/oauth/device/start` + `/oauth/device/status`) is the Codex CLI's device-code
+flow: 1router asks `auth.openai.com/api/accounts/deviceauth/usercode` for a
+user code, a background task polls `deviceauth/token` (403/404 = still
+pending) for up to 15 minutes, then exchanges the returned
+`authorization_code` + server-issued `code_verifier` at `/oauth/token` with
+redirect `https://auth.openai.com/deviceauth/callback`, stores the tokens and
+reloads the snapshot. Login state is in-memory (a restart abandons a pending
+login); a newer start supersedes an older one for the same provider. Tests
+point both endpoints at a mock via `CODEX_DEVICE_AUTH_URL` / `CODEX_TOKEN_URL`.
 
 For the full design rationale — DB schema, the `ProviderAdapter` trait,
 failover/backoff rules, the Codex OAuth token-refresh/locking scheme, and

@@ -20,6 +20,30 @@ pub fn routes() -> Router<AppState> {
             get(get_auth_mode).patch(patch_auth_mode),
         )
         .route("/admin/settings/security-status", get(get_security_status))
+        .route("/admin/settings/images", get(get_images).patch(patch_images))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImagesSettings {
+    images_enabled: bool,
+}
+
+async fn get_images(State(s): State<AppState>) -> Json<ImagesSettings> {
+    Json(ImagesSettings { images_enabled: s.media.images_enabled() })
+}
+
+/// Off by default: image generation drains Codex subscription quota fast.
+async fn patch_images(
+    State(s): State<AppState>,
+    Json(body): Json<ImagesSettings>,
+) -> Result<Json<ImagesSettings>, AppError> {
+    crate::core::settings::set_bool(&s.db, crate::media::IMAGES_ENABLED_SETTING, body.images_enabled)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    s.media
+        .images_enabled
+        .store(body.images_enabled, std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(body))
 }
 
 #[derive(Debug, Deserialize)]

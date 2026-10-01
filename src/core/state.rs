@@ -98,6 +98,7 @@ pub struct AppState {
     pub login_attempts: LoginAttemptMap,
     pub discovered_models: DiscoveredModelsMap,
     pub pool_rotation: PoolRotationMap,
+    pub media: Arc<crate::media::MediaState>,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {

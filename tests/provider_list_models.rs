@@ -131,7 +131,7 @@ async fn list_models_reports_failure_when_upstream_returns_an_error() {
 }
 
 #[tokio::test]
-async fn list_models_reports_unsupported_for_oauth_codex_providers() {
+async fn list_models_reports_not_connected_for_unconnected_oauth_codex_providers() {
     let app = spawn_app().await;
     let client = reqwest::Client::new();
     let (k, v) = auth_header(&app.secret);
@@ -156,7 +156,7 @@ async fn list_models_reports_unsupported_for_oauth_codex_providers() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], false);
-    assert!(body["reason"].as_str().unwrap().contains("no discoverable"));
+    assert!(body["reason"].as_str().unwrap().contains("not connected"));
 }
 
 #[tokio::test]

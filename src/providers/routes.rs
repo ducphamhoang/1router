@@ -477,14 +477,88 @@ pub(crate) async fn fetch_commandcode_models(
     parse_models_body(&body)
 }
 
+const CODEX_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+/// The endpoint is version-gated: newer models only appear for newer
+/// `client_version`s, and the parameter is mandatory (400 without it).
+/// Override with `ROUTER_CODEX_CLIENT_VERSION` instead of waiting for a release.
+const CODEX_CLIENT_VERSION: &str = "0.160.0";
+
+/// Accepts the shapes this endpoint has been reported to return: `{"models":[{"slug"}]}`,
+/// `{"data":[{"id"}]}`, or a bare array of strings/objects. Entries marked
+/// `visibility: "hide"` are internal and skipped.
+fn parse_codex_models_body(body: &Value) -> Result<Vec<String>, String> {
+    let arr = body
+        .as_array()
+        .or_else(|| body.get("models").and_then(Value::as_array))
+        .or_else(|| body.get("data").and_then(Value::as_array));
+    let models: Vec<String> = arr
+        .map(|a| {
+            a.iter()
+                .filter(|m| m.get("visibility").and_then(Value::as_str) != Some("hide"))
+                .filter_map(|m| {
+                    m.as_str()
+                        .or_else(|| m.get("slug").and_then(Value::as_str))
+                        .or_else(|| m.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        return Err("response had no recognizable Codex model list".into());
+    }
+    Ok(models)
+}
+
+/// Uses the stored access token as-is (never refreshes: the background
+/// refresh task owns that, and a second refresher could rotate the token out
+/// from under it).
+pub(crate) async fn fetch_codex_models(
+    http: &reqwest::Client,
+    creds: &Credentials,
+) -> Result<Vec<String>, String> {
+    let access = creds
+        .access_token
+        .as_ref()
+        .ok_or_else(|| "Codex account is not connected yet".to_string())?;
+    let url = std::env::var("ROUTER_CODEX_MODELS_URL").unwrap_or_else(|_| CODEX_MODELS_URL.into());
+    let version = std::env::var("ROUTER_CODEX_CLIENT_VERSION")
+        .unwrap_or_else(|_| CODEX_CLIENT_VERSION.into());
+    let mut builder = http
+        .get(url)
+        .query(&[("client_version", version.as_str())])
+        .bearer_auth(access)
+        .header("originator", "codex_cli_rs")
+        .header("version", &version)
+        .header("User-Agent", format!("codex_cli_rs/{version}"));
+    if let Some(id) = creds.provider_data["chatgpt_account_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        builder = builder.header("ChatGPT-Account-ID", id);
+    }
+    let resp = builder.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("HTTP {}: {snippet}", status.as_u16()));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse response as JSON: {e}"))?;
+    parse_codex_models_body(&body)
+}
+
 /// Fetches and caches a provider's live model list in `state.discovered_models`
 /// so `GET /v1/models` can list `<provider_id>/<model>` entries without a
 /// network call of its own. Called both from the explicit `list-models`
 /// endpoint below and, best-effort, right after a provider is created.
-/// Best-effort only: Codex OAuth has no discoverable models endpoint, while
-/// Command Code uses its fixed unauthenticated provider endpoint; passthrough
-/// mirrors may also omit `/models`. These cases are reported as an `Err`
-/// reason rather than panicking or retrying.
+/// Best-effort only: Command Code uses its fixed unauthenticated provider
+/// endpoint, Codex needs its connected OAuth token, and passthrough mirrors
+/// may omit `/models`. Failures are reported as an `Err` reason rather than
+/// panicking or retrying.
 pub(crate) async fn discover_and_cache_models(
     state: &AppState,
     provider: &Provider,
@@ -493,7 +567,8 @@ pub(crate) async fn discover_and_cache_models(
         ProviderKind::Passthrough => fetch_live_models(&state.http, provider).await?,
         ProviderKind::OauthCommandCode => fetch_commandcode_models(&state.http).await?,
         ProviderKind::OauthCodex => {
-            return Err("this provider kind has no discoverable /models endpoint".into())
+            let creds = credentials_for(state, provider).await;
+            fetch_codex_models(&state.http, &creds).await?
         }
     };
     state
@@ -510,9 +585,6 @@ pub(crate) async fn discover_and_cache_models(
 const BACKGROUND_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn spawn_bounded_discovery(state: AppState, provider: Provider) {
-    if provider.kind == ProviderKind::OauthCodex {
-        return;
-    }
     tokio::spawn(async move {
         let _ = tokio::time::timeout(
             BACKGROUND_DISCOVERY_TIMEOUT,
@@ -615,7 +687,7 @@ async fn state_stub(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_models_url, parse_models_body};
+    use super::{derive_models_url, parse_codex_models_body, parse_models_body};
     use serde_json::json;
 
     #[test]
@@ -651,6 +723,17 @@ mod tests {
             derive_models_url("https://api.example.com"),
             "https://api.example.com/models"
         );
+    }
+
+    #[test]
+    fn codex_models_parse_accepts_reported_shapes_and_skips_hidden() {
+        let a = serde_json::json!({"models":[{"slug":"gpt-6-astra"},{"slug":"internal","visibility":"hide"},{"slug":"gpt-6.1-sol","visibility":"list"}]});
+        assert_eq!(parse_codex_models_body(&a).unwrap(), vec!["gpt-6-astra", "gpt-6.1-sol"]);
+        let b = serde_json::json!(["gpt-5.5", "codex-auto-review"]);
+        assert_eq!(parse_codex_models_body(&b).unwrap(), vec!["gpt-5.5", "codex-auto-review"]);
+        let c = serde_json::json!({"data":[{"id":"x"}]});
+        assert_eq!(parse_codex_models_body(&c).unwrap(), vec!["x"]);
+        assert!(parse_codex_models_body(&serde_json::json!({"models":[]})).is_err());
     }
 
     #[test]

@@ -152,7 +152,6 @@ export function Pools() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [membersByPool, setMembersByPool] = useState<Record<string, PoolMember[]>>({});
   const [poolId, setPoolId] = useState("");
-  const [wireFormat, setWireFormat] = useState("openai");
   const [strategy, setStrategy] = useState("priority");
   const [stickyLimit, setStickyLimit] = useState("");
   const [modality, setModality] = useState("chat");
@@ -229,7 +228,8 @@ export function Pools() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: poolId,
-          wire_format: wireFormat,
+          // New pools answer both client routes; pre-existing pinned pools keep their format.
+          wire_format: "any",
           strategy,
           sticky_limit: Number.isFinite(parsedStickyLimit) ? parsedStickyLimit : undefined,
           // Omitted for chat: the server defaults it.
@@ -511,7 +511,9 @@ export function Pools() {
     // Image pools match on kind, not wire_format: a Codex provider set to
     // the anthropic wire can still generate images.
     const eligibleProviders = providers.filter((provider) =>
-      image ? provider.kind === "oauth_codex" : provider.wire_format === pool.wire_format
+      image
+        ? provider.kind === "oauth_codex"
+        : pool.wire_format === "any" || provider.wire_format === pool.wire_format
     );
     const draft = draftFor(pool.id);
     const poolDeleteKey = `pool:${pool.id}`;
@@ -521,7 +523,9 @@ export function Pools() {
         <header className="modal-header">
           <div className="pool-identity">
             <h2>{pool.id}</h2>
-            <span className="badge">{image ? "image" : pool.wire_format}</span>
+            {image || pool.wire_format !== "any" ? (
+              <span className="badge">{image ? "image" : pool.wire_format}</span>
+            ) : null}
             <span className="pool-meta">{describeCount(members.length)}</span>
           </div>
           <div className="pool-strategy">
@@ -809,7 +813,7 @@ export function Pools() {
                 <>No Codex (ChatGPT OAuth) providers exist yet — create one on the Providers page first.</>
               ) : (
                 <>
-                  No <code>{pool.wire_format}</code> providers exist yet — create one on the Providers page first.
+                  No {pool.wire_format === "any" ? "" : <code>{pool.wire_format}</code>} providers exist yet — create one on the Providers page first.
                 </>
               )}
             </p>
@@ -853,7 +857,9 @@ export function Pools() {
             <li key={pool.id}>
               <button type="button" className="pool-row" onClick={() => setOpenPoolId(pool.id)} aria-label={`Open pool ${pool.id}`}>
                 <span className="pool-row-id">{pool.id}</span>
-                <span className="badge">{isImagePool(pool) ? "image" : pool.wire_format}</span>
+                {isImagePool(pool) || pool.wire_format !== "any" ? (
+                  <span className="badge">{isImagePool(pool) ? "image" : pool.wire_format}</span>
+                ) : null}
                 <span className="pool-meta">{describeCount((membersByPool[pool.id] ?? []).length)}</span>
                 <span className="pool-row-chevron" aria-hidden="true">
                   ›
@@ -879,13 +885,6 @@ export function Pools() {
               <select aria-label="Pool type" value={modality} onChange={(event) => setModality(event.target.value)}>
                 <option value="chat">chat</option>
                 <option value="image">image (Codex providers only)</option>
-              </select>
-            </label>
-            <label>
-              Wire format
-              <select value={wireFormat} onChange={(event) => setWireFormat(event.target.value)}>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
               </select>
             </label>
             <label>

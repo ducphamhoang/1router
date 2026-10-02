@@ -246,7 +246,7 @@ mod tests {
             db,
             &Pool {
                 id: id.into(),
-                wire_format: WireFormat::OpenAi,
+                wire_format: WireFormat::OpenAi.into(),
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
@@ -350,7 +350,7 @@ mod tests {
             &db,
             &Pool {
                 id: "gpt-4o".into(),
-                wire_format: WireFormat::OpenAi,
+                wire_format: WireFormat::OpenAi.into(),
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,
@@ -406,7 +406,7 @@ mod tests {
             &db,
             &Pool {
                 id: "gpt-4o".into(),
-                wire_format: WireFormat::OpenAi,
+                wire_format: WireFormat::OpenAi.into(),
                 created_at: Utc::now(),
                 strategy: Default::default(),
                 sticky_limit: None,

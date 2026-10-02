@@ -117,7 +117,7 @@ pub async fn assign_to_pool(
                     // A pool's wire_format is what clients speak to it; for a
                     // brand-new pool built around one provider, match the
                     // provider so the two can't disagree.
-                    wire_format: provider.wire_format,
+                    wire_format: provider.wire_format.into(),
                     created_at: chrono::Utc::now(),
                     strategy: Default::default(),
                     sticky_limit: None,
@@ -1807,7 +1807,7 @@ mod tests {
         let pool = crate::pools::queries::get_pool(&db, "my-pool")
             .await
             .unwrap();
-        assert_eq!(pool.wire_format, WireFormat::OpenAi);
+        assert_eq!(pool.wire_format, WireFormat::OpenAi.into());
         let members = crate::pools::queries::list_members(&db, "my-pool")
             .await
             .unwrap();
@@ -1827,7 +1827,7 @@ mod tests {
                 .await
                 .unwrap()
                 .wire_format,
-            WireFormat::Anthropic
+            WireFormat::Anthropic.into()
         );
     }
 
@@ -1902,7 +1902,7 @@ mod tests {
             &db,
             &crate::core::model::Pool {
                 id: "pre".into(),
-                wire_format: WireFormat::OpenAi,
+                wire_format: WireFormat::OpenAi.into(),
                 created_at: created,
                 strategy: Default::default(),
                 sticky_limit: None,

@@ -398,6 +398,30 @@ export function Providers() {
     }
   }
 
+  async function fetchCodexModels(providerId: string) {
+    setModelFetch({ state: "checking" });
+    try {
+      const result = await apiJson<{ ok: boolean; models?: string[]; reason?: string }>(
+        `/admin/providers/${encodeURIComponent(providerId)}/list-models`
+      );
+      if (result.ok && result.models?.length) {
+        setPreviewModels(result.models);
+        setModelFetch(null);
+        setForm((current) =>
+          current.upstream_model.trim() && current.upstream_model !== "pending"
+            ? current
+            : { ...current, upstream_model: result.models![0] }
+        );
+      } else {
+        setPreviewModels([]);
+        setModelFetch({ state: "error", message: result.reason || "No models returned." });
+      }
+    } catch (err) {
+      setPreviewModels([]);
+      setModelFetch({ state: "error", message: err instanceof Error ? err.message : "Fetch failed." });
+    }
+  }
+
   async function fetchPreviewModels() {
     setModelFetch({ state: "checking" });
     try {
@@ -746,12 +770,16 @@ export function Providers() {
                     </option>
                   ))}
                 </select>
-              ) : !editing && form.kind === "passthrough" && previewModels.length > 0 ? (
+              ) : previewModels.length > 0 &&
+                ((!editing && form.kind === "passthrough") || (editing && form.kind === "oauth_codex")) ? (
                 <select
                   value={form.upstream_model}
                   onChange={(event) => setForm({ ...form, upstream_model: event.target.value })}
                 >
-                  {previewModels.map((model) => (
+                  {(previewModels.includes(form.upstream_model) || !form.upstream_model
+                    ? previewModels
+                    : [form.upstream_model, ...previewModels]
+                  ).map((model) => (
                     <option key={model} value={model}>
                       {model}
                     </option>
@@ -769,6 +797,29 @@ export function Providers() {
               <p className="hint">Log in or paste an API key above to fetch the model list.</p>
             ) : null}
             {editing && form.kind === "oauth_codex" ? <CodexOAuthPanel providerId={editing.id} connected={Boolean(editing.credential_configured)} /> : null}
+            {editing && form.kind === "oauth_codex" && editing.credential_configured ? (
+              <>
+                <div className="model-override-row">
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => void fetchCodexModels(editing.id)}
+                    disabled={modelFetch?.state === "checking"}
+                    title="Ask ChatGPT which Codex models this account can use"
+                  >
+                    Fetch models
+                  </button>
+                </div>
+                {modelFetch ? (
+                  <span
+                    className={modelFetch.state === "error" ? "validation-result validation-error" : "validation-result"}
+                    role={modelFetch.state === "error" ? "alert" : "status"}
+                  >
+                    {modelFetch.state === "checking" ? "Fetching models…" : `✗ ${modelFetch.message}`}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
             {error ? <p role="alert">{error}</p> : null}
             <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
               Save provider

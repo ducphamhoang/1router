@@ -22,15 +22,16 @@ Codex/ChatGPT-OAuth and Command Code adapters translate the same way, just
 against their own proprietary upstream shapes instead of a second wire
 format.
 
-One thing this does *not* change: a **pool**'s own `wire_format` still pins
-it to one client-facing route, set at creation - a pool created with
-`wire_format: anthropic` only ever answers `/v1/messages`, regardless of
-what any of its member providers' own formats are. Serving both client
-routes from one credential still means either direct `<provider_id>/<model>`
-addressing (works from either route now, for every provider kind) or two
-separate pool rows for the same provider - e.g. one Codex OAuth login
-backing an `openai`-format pool for OpenCode and an `anthropic`-format pool
-for Claude Code simultaneously, no duplicate provider/OAuth needed.
+A **pool**'s own `wire_format` is `any` by default (the admin UI no longer
+asks): an `any` pool answers both `/v1/chat/completions` and `/v1/messages`,
+and its members may mix provider wire formats freely - each request is
+translated to the member it lands on, so round-robin across an OpenAI and
+an Anthropic provider just works. A pool can still be pinned to `openai` or
+`anthropic` (API / config import, and pools created before this change keep
+their value); a pinned pool only ever answers its own route, regardless of
+its members' formats, and only accepts providers of that format in the UI.
+Direct `<provider_id>/<model>` addressing also works from either route for
+every provider kind.
 
 ## Addressing: pools vs. direct `<provider_id>/<model>`
 

@@ -9,6 +9,37 @@ pub enum WireFormat {
     Anthropic,
 }
 
+/// Which client-facing route(s) a pool answers. `Any` serves both
+/// `/v1/chat/completions` and `/v1/messages`: members whose own
+/// `WireFormat` differs from the route are translated per request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(rename_all = "lowercase")]
+pub enum PoolWire {
+    OpenAi,
+    Anthropic,
+    Any,
+}
+
+impl PoolWire {
+    pub fn accepts(self, wire: WireFormat) -> bool {
+        match self {
+            PoolWire::Any => true,
+            PoolWire::OpenAi => wire == WireFormat::OpenAi,
+            PoolWire::Anthropic => wire == WireFormat::Anthropic,
+        }
+    }
+}
+
+impl From<WireFormat> for PoolWire {
+    fn from(w: WireFormat) -> Self {
+        match w {
+            WireFormat::OpenAi => PoolWire::OpenAi,
+            WireFormat::Anthropic => PoolWire::Anthropic,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
@@ -103,7 +134,7 @@ impl Modality {
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Pool {
     pub id: String,
-    pub wire_format: WireFormat,
+    pub wire_format: PoolWire,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub strategy: PoolStrategy,

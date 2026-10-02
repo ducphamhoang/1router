@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::core::error::AppError;
-use crate::core::model::{EffortLevel, Modality, Pool, PoolMember, PoolStrategy, WireFormat};
+use crate::core::model::{EffortLevel, Modality, Pool, PoolMember, PoolStrategy, PoolWire};
 use crate::core::state::{reload_snapshot, AppState};
 use crate::pools::queries;
 use crate::providers::queries as pq;
@@ -36,7 +36,9 @@ async fn list(State(s): State<AppState>) -> Result<Json<Vec<Pool>>, AppError> {
 #[derive(Deserialize)]
 struct CreatePool {
     id: String,
-    wire_format: WireFormat,
+    /// Omitted -> `any`: the pool answers both client routes.
+    #[serde(default = "default_pool_wire")]
+    wire_format: PoolWire,
     #[serde(default)]
     strategy: PoolStrategy,
     #[serde(default)]
@@ -44,6 +46,10 @@ struct CreatePool {
     /// Fixed at creation (no PATCH path), like `wire_format`.
     #[serde(default)]
     modality: Modality,
+}
+
+fn default_pool_wire() -> PoolWire {
+    PoolWire::Any
 }
 
 async fn create(

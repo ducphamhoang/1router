@@ -200,14 +200,13 @@ describe("Pools", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Create pool" }));
     const dialog = screen.getByRole("dialog", { name: "Create pool" });
     await userEvent.type(within(dialog).getByLabelText("Pool id"), "extra");
-    await userEvent.selectOptions(within(dialog).getByLabelText("Wire format"), "anthropic");
     await userEvent.click(within(dialog).getByRole("button", { name: "Submit new pool" }));
 
     expect(fetch).toHaveBeenCalledWith(
       "/admin/pools",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ id: "extra", wire_format: "anthropic", strategy: "priority" })
+        body: JSON.stringify({ id: "extra", wire_format: "any", strategy: "priority" })
       })
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -237,7 +236,7 @@ describe("Pools", () => {
       "/admin/pools",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ id: "extra", wire_format: "openai", strategy: "round_robin", sticky_limit: 3 })
+        body: JSON.stringify({ id: "extra", wire_format: "any", strategy: "round_robin", sticky_limit: 3 })
       })
     );
   });

@@ -114,7 +114,7 @@ describe("Pools (image)", () => {
       "/admin/pools",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ id: "img2", wire_format: "openai", strategy: "priority", modality: "image" })
+        body: JSON.stringify({ id: "img2", wire_format: "any", strategy: "priority", modality: "image" })
       })
     );
   });

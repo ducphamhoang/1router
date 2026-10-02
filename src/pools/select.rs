@@ -62,7 +62,8 @@ pub fn resolve_reasoning_effort(
 /// Resolution is a two-step process:
 ///
 /// 1. Look up `model` as a real pool id. If a pool with that id exists,
-///    use it only if `pool.wire_format ==` the requested wire format;
+///    use it only if the pool accepts the requested wire format (a pinned
+///    pool must match it; an `any` pool accepts both);
 ///    otherwise return `None`. There is **no** fallback to step 2 in that
 ///    case.
 ///
@@ -86,7 +87,7 @@ pub fn select<'a>(
     if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
         // Checked before `rotate_from_cursor`, so a rejected request never
         // advances the pool's rotation cursor.
-        if pwm.pool.wire_format != wire || pwm.pool.modality != Modality::Chat {
+        if !pwm.pool.wire_format.accepts(wire) || pwm.pool.modality != Modality::Chat {
             return None;
         }
 
@@ -341,7 +342,7 @@ mod tests {
             providers: vec![prov("a"), prov("b")],
             pools: vec![PoolWithMembers {
                 pool: Pool {
-                    id: "gpt-4o".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now(),
+                    id: "gpt-4o".into(), wire_format: WireFormat::OpenAi.into(), created_at: Utc::now(),
                     strategy, sticky_limit, modality: Modality::Chat,
                 },
                 members: vec![
@@ -385,6 +386,15 @@ mod tests {
     #[test]
     fn wrong_wire_format_returns_none() {
         assert!(select(&snap(), "gpt-4o", WireFormat::Anthropic, &empty_rotation()).is_none());
+    }
+
+    #[test]
+    fn any_pool_accepts_both_wire_formats() {
+        let mut s = snap();
+        s.pools[0].pool.wire_format = crate::core::model::PoolWire::Any;
+        let rot = empty_rotation();
+        assert!(select(&s, "gpt-4o", WireFormat::OpenAi, &rot).is_some());
+        assert!(select(&s, "gpt-4o", WireFormat::Anthropic, &rot).is_some());
     }
 
     #[test]
@@ -628,7 +638,7 @@ mod tests {
         };
         s.pools.push(PoolWithMembers {
             pool: Pool {
-                id: "img".into(), wire_format: WireFormat::OpenAi, created_at: Utc::now(),
+                id: "img".into(), wire_format: WireFormat::OpenAi.into(), created_at: Utc::now(),
                 strategy: PoolStrategy::RoundRobin, sticky_limit: None, modality: Modality::Image,
             },
             members: vec![

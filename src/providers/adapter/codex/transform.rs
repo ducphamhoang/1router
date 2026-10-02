@@ -48,6 +48,45 @@ fn message_text(message: &Value) -> String {
     }
 }
 
+/// Chat-Completions content -> Responses content parts. Text becomes
+/// `input_text`/`output_text`; user image parts (`image_url` as a string or
+/// `{url, detail}`, or an already-Responses `input_image`) become
+/// `input_image`. The old text-only join silently dropped every image, so the
+/// model answered "please upload the image". Assistant turns can't carry
+/// images in the Responses API, so only their text is kept.
+fn message_content_parts(message: &Value, text_type: &str, allow_images: bool) -> Vec<Value> {
+    let parts = match message.get("content") {
+        Some(Value::Array(parts)) => parts,
+        _ => return vec![json!({ "type": text_type, "text": message_text(message) })],
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for p in parts {
+        let kind = p.get("type").and_then(Value::as_str).unwrap_or("");
+        if matches!(kind, "image_url" | "input_image") {
+            if !allow_images {
+                continue;
+            }
+            let img = p.get("image_url");
+            let url = img
+                .and_then(Value::as_str)
+                .or_else(|| img.and_then(|i| i.get("url")).and_then(Value::as_str));
+            let Some(url) = url else { continue };
+            let detail = p
+                .get("detail")
+                .or_else(|| img.and_then(|i| i.get("detail")))
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            out.push(json!({ "type": "input_image", "image_url": url, "detail": detail }));
+        } else if let Some(t) = p.get("text").and_then(Value::as_str) {
+            out.push(json!({ "type": text_type, "text": t }));
+        }
+    }
+    if out.is_empty() {
+        out.push(json!({ "type": text_type, "text": "" }));
+    }
+    out
+}
+
 fn strip_ids(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -180,7 +219,6 @@ pub fn transform_request(
                         "output": output
                     }));
                 } else {
-                    let text = message_text(&m);
                     let part_type = if role == "assistant" {
                         "output_text"
                     } else {
@@ -189,7 +227,7 @@ pub fn transform_request(
                     input.push(json!({
                         "type": "message",
                         "role": role,
-                        "content": [{ "type": part_type, "text": text }]
+                        "content": message_content_parts(&m, part_type, role != "assistant")
                     }));
                 }
             }
@@ -511,6 +549,31 @@ mod tests {
     use super::*;
     use crate::core::model::EffortLevel;
     use serde_json::json;
+
+    #[test]
+    fn user_images_are_forwarded_as_input_image_parts() {
+        let body = json!({"model":"m","messages":[{"role":"user","content":[
+            {"type":"text","text":"what is this?"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,AAA","detail":"high"}},
+            {"type":"image_url","image_url":"https://x/y.png"},
+            {"type":"input_image","image_url":"data:image/png;base64,BBB"}
+        ]}]});
+        let out = transform_request(&body, "s", None);
+        let c = &out["input"][0]["content"];
+        assert_eq!(c[0], json!({"type":"input_text","text":"what is this?"}));
+        assert_eq!(c[1], json!({"type":"input_image","image_url":"data:image/png;base64,AAA","detail":"high"}));
+        assert_eq!(c[2], json!({"type":"input_image","image_url":"https://x/y.png","detail":"auto"}));
+        assert_eq!(c[3]["image_url"], "data:image/png;base64,BBB");
+        assert_eq!(c.as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn assistant_turns_keep_text_only() {
+        let body = json!({"model":"m","messages":[{"role":"assistant","content":[
+            {"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"u"}}]}]});
+        let out = transform_request(&body, "s", None);
+        assert_eq!(out["input"][0]["content"], json!([{"type":"output_text","text":"hi"}]));
+    }
 
     #[test]
     fn allowlist_deletes_disallowed_fields() {

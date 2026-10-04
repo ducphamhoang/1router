@@ -133,6 +133,7 @@ async fn complete(
     Json(b): Json<CompleteBody>,
 ) -> Result<Json<Value>, AppError> {
     complete_oauth_exchange(&s.db, &s.http, &id, &b.code, &b.state).await?;
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
     reload_snapshot(&s).await?;
     Ok(Json(json!({ "status": "ok" })))
 }

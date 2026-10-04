@@ -489,3 +489,35 @@ async fn client_rejected_request_does_not_take_the_pool_offline() {
         );
     }
 }
+
+#[tokio::test]
+async fn unready_member_is_skipped_and_next_member_serves() {
+    let good = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&good)
+        .await;
+
+    let app = spawn_app().await;
+    create_pool(&app).await;
+    // Pre-created provider without an endpoint: not ready.
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "id": "draft", "name": "draft", "wire_format": "openai",
+                       "upstream_model": "m" }))
+        .send().await.unwrap();
+    add_provider(&app, "good", &format!("{}/v1/chat/completions", good.uri())).await;
+    add_pool_member(&app, "draft", 1).await;
+    add_pool_member(&app, "good", 2).await;
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", app.base_url))
+        .header(k, v)
+        .json(&json!({ "model": "gpt-4o", "messages": [] }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-1router-tried").map(|h| h.to_str().unwrap()), None);
+}

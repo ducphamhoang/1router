@@ -295,7 +295,7 @@ pub(crate) fn build_passthrough_row(
         // The spec deliberately doubles the name as the id: one prompt fewer,
         // and the id is what shows up in logs/stats where the name would
         // otherwise be redundant.
-        id: name.to_string(),
+        id: provider_queries::id_from_name(name),
         name: name.to_string(),
         wire_format,
         kind: ProviderKind::Passthrough,
@@ -414,6 +414,7 @@ pub async fn add_passthrough_provider(
         api_key.trim(),
         upstream_model.trim(),
     );
+    provider_queries::normalize_new(&mut p).map_err(|e| anyhow::anyhow!("invalid provider: {e}"))?;
     confirm_upstream_model(http, &mut p).await?;
     provider_queries::insert_provider(db, &p)
         .await
@@ -878,7 +879,7 @@ pub async fn add_codex_provider(
 
     let now = chrono::Utc::now();
     let mut provider = Provider {
-        id: name.clone(),
+        id: provider_queries::id_from_name(&name),
         name,
         wire_format,
         kind: ProviderKind::OauthCodex,
@@ -891,6 +892,8 @@ pub async fn add_codex_provider(
         created_at: now,
         updated_at: now,
     };
+    provider_queries::normalize_new(&mut provider)
+        .map_err(|e| anyhow::anyhow!("invalid provider: {e}"))?;
     provider_queries::insert_provider(db, &provider)
         .await
         .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", provider.id))?;

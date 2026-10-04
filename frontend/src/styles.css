@@ -406,6 +406,12 @@ button.modal-close {
   background: var(--bg);
 }
 
+.badge-warn {
+  color: var(--text);
+  border-color: #d19a1e;
+  background: rgba(209, 154, 30, 0.15);
+}
+
 .pool-meta {
   font-size: 0.8rem;
   color: var(--muted);

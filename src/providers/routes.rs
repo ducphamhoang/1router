@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete as delete_route, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
@@ -24,7 +24,9 @@ pub fn routes() -> Router<AppState> {
             "/admin/providers/:id",
             get(get_one).patch(patch).delete(delete),
         )
+        .route("/admin/provider-test", post(test_draft))
         .route("/admin/providers/:id/test", post(test_stub))
+        .route("/admin/providers/:id/oauth", delete_route(disconnect_oauth))
         .route("/admin/providers/:id/state", get(state_stub))
         .route("/admin/providers/:id/validate-model", post(validate_model))
         .route(
@@ -38,33 +40,41 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/providers/:id/list-models", get(list_models))
 }
 
-/// For OAuth-kind providers `p.api_key` is always empty - the real
-/// credential lives in `provider_oauth_state.access_token` - so
-/// `credential_configured` is what the admin UI checks to know a key/login
-/// is already on file, distinct from whatever's masked below.
-fn mask(p: &Provider, credential_configured: bool) -> Value {
-    let masked = p.api_key.as_ref().map(|k| {
-        let tail = k
-            .chars()
-            .rev()
-            .take(4)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
+/// Never reveal more than the last 4 chars, and nothing at all for short keys.
+fn mask_key(k: &str) -> String {
+    let n = k.chars().count();
+    if n <= 8 {
+        "***".to_string()
+    } else {
+        let tail: String = k.chars().skip(n - 4).collect();
         format!("***{tail}")
-    });
+    }
+}
+
+/// For OAuth-kind providers `p.api_key` is always empty - the real
+/// credential lives in `provider_oauth_state` - so `credential_configured`
+/// is what the admin UI checks to know a key/login is already on file,
+/// distinct from whatever's masked below.
+fn mask(p: &Provider, credential_configured: bool) -> Value {
+    let credential_status = match (p.kind, credential_configured) {
+        (ProviderKind::Passthrough, true) => "set",
+        (ProviderKind::Passthrough, false) => "none",
+        (_, true) => "connected",
+        (_, false) => "not_connected",
+    };
     json!({
         "id": &p.id,
         "name": &p.name,
         "wire_format": p.wire_format,
         "kind": p.kind,
         "base_url": &p.base_url,
-        "api_key": masked,
+        "api_key": p.api_key.as_deref().map(mask_key),
         "upstream_model": &p.upstream_model,
         "credential_configured": credential_configured,
         "dataset_logging": p.dataset_logging,
         "default_reasoning_effort": p.default_reasoning_effort,
+        "ready": queries::is_ready(p, credential_configured),
+        "credential_status": credential_status,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     })
@@ -72,6 +82,17 @@ fn mask(p: &Provider, credential_configured: bool) -> Value {
 
 fn is_oauth_kind(kind: ProviderKind) -> bool {
     matches!(kind, ProviderKind::OauthCodex | ProviderKind::OauthCommandCode)
+}
+
+/// Build the admin JSON for one provider, looking up its OAuth credential
+/// state when the kind needs one.
+async fn masked(s: &AppState, p: &Provider) -> Result<Value, AppError> {
+    let credential_configured = if is_oauth_kind(p.kind) {
+        queries::oauth_credential_configured(&s.db, &p.id).await?
+    } else {
+        p.api_key.is_some()
+    };
+    Ok(mask(p, credential_configured))
 }
 
 async fn list(State(s): State<AppState>) -> Result<Json<Value>, AppError> {
@@ -96,12 +117,7 @@ async fn get_one(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let p = queries::get_provider(&s.db, &id).await?;
-    let credential_configured = if is_oauth_kind(p.kind) {
-        queries::oauth_credential_configured(&s.db, &id).await?
-    } else {
-        p.api_key.is_some()
-    };
-    Ok(Json(mask(&p, credential_configured)))
+    Ok(Json(masked(&s, &p).await?))
 }
 
 #[derive(Deserialize)]
@@ -130,7 +146,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     crate::core::error::validate_path_id(&b.id)?;
     let now = Utc::now();
-    let p = Provider {
+    let mut p = Provider {
         id: b.id,
         name: b.name,
         wire_format: b.wire_format,
@@ -143,7 +159,10 @@ async fn create(
         created_at: now,
         updated_at: now,
     };
+    queries::normalize_new(&mut p)?;
     queries::insert_provider(&s.db, &p).await?;
+    // A previous provider with the same id may have left runtime state behind.
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, &p.id);
     reload_snapshot(&s).await?;
 
     // Best-effort and non-blocking: the create response shouldn't wait on
@@ -155,8 +174,7 @@ async fn create(
     // A brand-new provider never has a credential on file yet - OAuth-kind
     // ones need a follow-up Connect/browser-login/paste step, passthrough
     // ones already reflect `p.api_key` directly.
-    let credential_configured = !is_oauth_kind(p.kind) && p.api_key.is_some();
-    Ok((StatusCode::CREATED, Json(mask(&p, credential_configured))))
+    Ok((StatusCode::CREATED, Json(masked(&s, &p).await?)))
 }
 
 async fn patch(
@@ -165,24 +183,162 @@ async fn patch(
     Json(patch): Json<queries::ProviderPatch>,
 ) -> Result<Json<Value>, AppError> {
     let p = queries::update_provider(&s.db, &id, &patch).await?;
-    reload_snapshot(&s).await?;
     // An edit to the provider (key, base_url, model, ...) means its previous
     // runtime flags no longer describe the current config - clear them.
     // A provider can back several models (each its own runtime_key), so
     // reset every entry belonging to it, not just one lookup by bare id.
     crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
-    let credential_configured = if is_oauth_kind(p.kind) {
-        queries::oauth_credential_configured(&s.db, &id).await?
-    } else {
-        p.api_key.is_some()
-    };
-    Ok(Json(mask(&p, credential_configured)))
+    reload_snapshot(&s).await?;
+    Ok(Json(masked(&s, &p).await?))
 }
 
 async fn delete(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     queries::delete_provider(&s.db, &id).await?;
+    s.runtime.remove(&id);
     reload_snapshot(&s).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Forget stored OAuth tokens (disconnect). Reconnect via oauth/start + complete.
+async fn disconnect_oauth(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let p = queries::get_provider(&s.db, &id).await?;
+    if !is_oauth_kind(p.kind) {
+        return Err(AppError::BadRequest("provider does not use OAuth".into()));
+    }
+    queries::clear_oauth_tokens(&s.db, &id).await?;
+    crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
+    reload_snapshot(&s).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Result of a connectivity probe. `category` is stable for the UI; `message` is human text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProbeResult {
+    pub ok: bool,
+    pub category: &'static str,
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl ProbeResult {
+    fn to_json(&self) -> Value {
+        json!({
+            "ok": self.ok,
+            "category": self.category,
+            "status": self.status,
+            "message": self.message,
+        })
+    }
+}
+
+pub fn classify_probe(status: u16, body: &str) -> ProbeResult {
+    let snippet: String = body.chars().take(300).collect();
+    let (ok, category, message) = match status {
+        200..=299 => (true, "ok", "Endpoint reachable and accepted the request.".to_string()),
+        401 | 403 => (false, "auth", "The endpoint rejected the API key (401/403).".to_string()),
+        404 | 405 => (
+            false,
+            "wrong_path",
+            "Endpoint path not found (404/405). Check the URL ends with the right path, e.g. /chat/completions or /messages.".to_string(),
+        ),
+        400 | 422 => (
+            false,
+            "bad_request",
+            format!("Reachable, but the endpoint rejected the test request (check the upstream model name): {snippet}"),
+        ),
+        429 => (
+            true,
+            "rate_limited",
+            "Reachable and authenticated, but rate limited (429).".to_string(),
+        ),
+        500..=599 => (false, "upstream_error", format!("Upstream error {status}: {snippet}")),
+        _ => (false, "unexpected", format!("Unexpected status {status}: {snippet}")),
+    };
+    ProbeResult { ok, category, status: Some(status), message }
+}
+
+async fn probe_provider(provider: &Provider, creds: &Credentials) -> ProbeResult {
+    if is_oauth_kind(provider.kind) {
+        let connected = creds.access_token.is_some() || creds.refresh_token.is_some();
+        return ProbeResult {
+            ok: connected,
+            category: if connected { "ok" } else { "not_connected" },
+            status: None,
+            message: if connected {
+                "Account connected (live probe skipped to avoid consuming quota).".into()
+            } else {
+                "Account not connected yet.".into()
+            },
+        };
+    }
+    match provider.base_url.as_deref() {
+        Some(u) if !u.is_empty() => {}
+        _ => {
+            return ProbeResult {
+                ok: false,
+                category: "no_endpoint",
+                status: None,
+                message: "No endpoint URL configured.".into(),
+            }
+        }
+    }
+    // Dedicated client: no redirects (don't follow a probe to elsewhere), short timeout.
+    let http = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ProbeResult {
+                ok: false,
+                category: "internal",
+                status: None,
+                message: e.to_string(),
+            }
+        }
+    };
+    // OpenAI reasoning models reject `max_tokens`, so only the anthropic format
+    // (where it is mandatory) gets a cap.
+    let mut probe = json!({ "messages": [{ "role": "user", "content": "ping" }] });
+    if matches!(provider.wire_format, WireFormat::Anthropic) {
+        probe["max_tokens"] = json!(1);
+    }
+    let body = bytes::Bytes::from(probe.to_string());
+    let adapter = adapter_for(provider, http.clone());
+    let req = match adapter.build_request(&body, creds).await {
+        Ok(r) => r,
+        Err(e) => {
+            return ProbeResult {
+                ok: false,
+                category: "invalid_url",
+                status: None,
+                message: format!("Could not build request: {e}"),
+            }
+        }
+    };
+    match http.execute(req).await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            classify_probe(status, &text)
+        }
+        Err(e) if e.is_timeout() => ProbeResult {
+            ok: false,
+            category: "unreachable",
+            status: None,
+            message: "Timed out after 10s.".into(),
+        },
+        Err(e) => ProbeResult {
+            ok: false,
+            category: "unreachable",
+            status: None,
+            message: format!("Could not connect: {e}"),
+        },
+    }
 }
 
 async fn test_stub(
@@ -190,19 +346,51 @@ async fn test_stub(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let provider = queries::get_provider(&s.db, &id).await?;
-    let url = match &provider.base_url {
-        Some(u) => u.clone(),
-        None => {
-            return Ok(Json(
-                json!({ "ok": false, "reason": "no base_url (oauth provider)" }),
-            ))
-        }
-    };
-    let res = s.http.get(&url).send().await;
-    match res {
-        Ok(r) => Ok(Json(json!({ "ok": true, "status": r.status().as_u16() }))),
-        Err(e) => Ok(Json(json!({ "ok": false, "reason": e.to_string() }))),
+    let mut creds = Credentials { api_key: provider.api_key.clone(), ..Default::default() };
+    if let Ok(Some(os)) = queries::get_oauth_state(&s.db, &id).await {
+        creds.access_token = os.access_token;
+        creds.refresh_token = os.refresh_token;
     }
+    let result = probe_provider(&provider, &creds).await;
+    // Only a real 2xx from a passthrough endpoint proves recovery; a 429 must not
+    // cancel a cooldown, and the codex probe never contacts upstream.
+    if result.category == "ok" && result.status.is_some() {
+        crate::core::runtime::reset_provider_to_healthy(&s.runtime, &id);
+    }
+    Ok(Json(result.to_json()))
+}
+
+#[derive(Deserialize)]
+struct DraftBody {
+    wire_format: WireFormat,
+    #[serde(default = "default_kind")]
+    kind: ProviderKind,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    #[serde(default)]
+    upstream_model: String,
+}
+
+/// Probe an unsaved draft. Uses ONLY the key supplied in the body - never a stored
+/// one - so a draft pointing at a different URL cannot exfiltrate a saved key.
+async fn test_draft(Json(b): Json<DraftBody>) -> Result<Json<Value>, AppError> {
+    let now = Utc::now();
+    let mut p = Provider {
+        id: "draft".into(),
+        name: "draft".into(),
+        wire_format: b.wire_format,
+        kind: b.kind,
+        base_url: b.base_url,
+        api_key: b.api_key,
+        upstream_model: if b.upstream_model.trim().is_empty() { "draft-model".into() } else { b.upstream_model },
+        dataset_logging: false,
+        default_reasoning_effort: None,
+        created_at: now,
+        updated_at: now,
+    };
+    queries::normalize_new(&mut p)?;
+    let creds = Credentials { api_key: p.api_key.clone(), ..Default::default() };
+    Ok(Json(probe_provider(&p, &creds).await.to_json()))
 }
 
 #[derive(Deserialize)]
@@ -687,7 +875,7 @@ async fn state_stub(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_models_url, parse_codex_models_body, parse_models_body};
+    use super::*;
     use serde_json::json;
 
     #[test]
@@ -741,5 +929,23 @@ mod tests {
         let body =
             json!({"object":"list","data":[{"id":"cc-1","name":"CC One","context_length":200000}]});
         assert_eq!(parse_models_body(&body).unwrap(), vec!["cc-1"]);
+    }
+
+    #[test]
+    fn short_keys_are_fully_masked() {
+        assert_eq!(mask_key("abcd"), "***");
+        assert_eq!(mask_key("12345678"), "***");
+        assert_eq!(mask_key("sk-1234567890"), "***7890");
+    }
+
+    #[test]
+    fn probe_classification() {
+        assert!(classify_probe(200, "").ok);
+        assert_eq!(classify_probe(401, "").category, "auth");
+        assert_eq!(classify_probe(404, "").category, "wrong_path");
+        assert_eq!(classify_probe(405, "").category, "wrong_path");
+        assert_eq!(classify_probe(400, "bad model").category, "bad_request");
+        assert!(classify_probe(429, "").ok);
+        assert_eq!(classify_probe(502, "x").category, "upstream_error");
     }
 }

@@ -548,3 +548,227 @@ async fn commandcode_browser_login_completes_end_to_end() {
         .unwrap();
     assert_eq!(followup["status"], "not_started");
 }
+
+async fn post_provider(
+    app: &common::TestApp,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let (k, v) = auth_header(&app.secret);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(k, v)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn precreated_providers_report_readiness_and_credential_status() {
+    let app = spawn_app().await;
+
+    let (st, codex) = post_provider(
+        &app,
+        json!({ "id": "cx", "name": "Codex", "wire_format": "openai",
+                "kind": "oauth_codex", "base_url": "", "api_key": "", "upstream_model": "gpt-5" }),
+    )
+    .await;
+    assert_eq!(st, 201);
+    assert_eq!(codex["ready"], false);
+    assert_eq!(codex["credential_status"], "not_connected");
+    assert!(codex["base_url"].is_null(), "empty string must normalize to null");
+
+    let (_, keyless) = post_provider(
+        &app,
+        json!({ "id": "k", "name": "Keyless", "wire_format": "openai",
+                "base_url": "https://x.test/v1/chat/completions/", "upstream_model": "m" }),
+    )
+    .await;
+    assert_eq!(keyless["ready"], true);
+    assert_eq!(keyless["credential_status"], "none");
+    assert_eq!(keyless["base_url"], "https://x.test/v1/chat/completions");
+}
+
+#[tokio::test]
+async fn create_validates_input_and_distinguishes_duplicates() {
+    let app = spawn_app().await;
+    let ok = json!({ "id": "p1", "name": "P1", "wire_format": "openai",
+                     "base_url": "https://x.test", "upstream_model": "m" });
+    assert_eq!(post_provider(&app, ok.clone()).await.0, 201);
+
+    let mut bad_id = ok.clone();
+    bad_id["id"] = json!("has space/slash");
+    assert_eq!(post_provider(&app, bad_id).await.0, 400);
+
+    let mut bad_url = ok.clone();
+    bad_url["id"] = json!("p2");
+    bad_url["name"] = json!("P2");
+    bad_url["base_url"] = json!("ftp://x");
+    assert_eq!(post_provider(&app, bad_url).await.0, 400);
+
+    let mut dup_id = ok.clone();
+    dup_id["name"] = json!("Other");
+    let (st, body) = post_provider(&app, dup_id).await;
+    assert_eq!(st, 409);
+    assert!(body["error"]["message"].as_str().unwrap().contains("id"));
+
+    let mut dup_name = ok.clone();
+    dup_name["id"] = json!("p9");
+    let (st, body) = post_provider(&app, dup_name).await;
+    assert_eq!(st, 409);
+    assert!(body["error"]["message"].as_str().unwrap().contains("name"));
+}
+
+#[tokio::test]
+async fn patch_null_clears_api_key_and_blank_leaves_via_omission() {
+    let app = spawn_app().await;
+    let (k, v) = auth_header(&app.secret);
+    let client = reqwest::Client::new();
+    post_provider(
+        &app,
+        json!({ "id": "p1", "name": "P1", "wire_format": "openai",
+                "base_url": "https://x.test", "api_key": "sk-long-secret-1234", "upstream_model": "m" }),
+    )
+    .await;
+    let patch = |body: serde_json::Value| {
+        client
+            .patch(format!("{}/admin/providers/p1", app.base_url))
+            .header(&k, &v)
+            .json(&body)
+            .send()
+    };
+    let kept: serde_json::Value = patch(json!({ "name": "P1b" })).await.unwrap().json().await.unwrap();
+    assert_eq!(kept["credential_status"], "set");
+    assert_eq!(kept["api_key"], "***1234");
+    let cleared: serde_json::Value =
+        patch(json!({ "api_key": null })).await.unwrap().json().await.unwrap();
+    assert_eq!(cleared["credential_status"], "none");
+    assert!(cleared["api_key"].is_null());
+}
+
+#[tokio::test]
+async fn disconnect_oauth_only_for_codex() {
+    let app = spawn_app().await;
+    let (k, v) = auth_header(&app.secret);
+    let client = reqwest::Client::new();
+    post_provider(
+        &app,
+        json!({ "id": "cx", "name": "Codex", "wire_format": "openai",
+                "kind": "oauth_codex", "upstream_model": "gpt-5" }),
+    )
+    .await;
+    post_provider(
+        &app,
+        json!({ "id": "p1", "name": "P1", "wire_format": "openai",
+                "base_url": "https://x.test", "upstream_model": "m" }),
+    )
+    .await;
+    let del = |id: &str| {
+        client
+            .delete(format!("{}/admin/providers/{id}/oauth", app.base_url))
+            .header(&k, &v)
+            .send()
+    };
+    assert_eq!(del("cx").await.unwrap().status(), 204);
+    assert_eq!(del("p1").await.unwrap().status(), 400);
+    assert_eq!(del("nope").await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn draft_test_classifies_upstream_responses() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/ok"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/denied"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&upstream)
+        .await;
+
+    let app = spawn_app().await;
+    let (k, v) = auth_header(&app.secret);
+    let client = reqwest::Client::new();
+    let probe = |p: &str| {
+        client
+            .post(format!("{}/admin/provider-test", app.base_url))
+            .header(&k, &v)
+            .json(&json!({ "wire_format": "openai", "base_url": format!("{}{p}", upstream.uri()),
+                           "api_key": "sk-x", "upstream_model": "m" }))
+            .send()
+    };
+    let ok: serde_json::Value = probe("/ok").await.unwrap().json().await.unwrap();
+    assert_eq!(ok["ok"], true);
+    let denied: serde_json::Value = probe("/denied").await.unwrap().json().await.unwrap();
+    assert_eq!(denied["category"], "auth");
+    let missing: serde_json::Value = probe("/nowhere").await.unwrap().json().await.unwrap();
+    assert_eq!(missing["category"], "wrong_path");
+}
+
+#[tokio::test]
+async fn provider_with_id_test_is_still_addressable() {
+    let app = spawn_app().await;
+    let (k, v) = auth_header(&app.secret);
+    post_provider(
+        &app,
+        json!({ "id": "test", "name": "T", "wire_format": "openai",
+                "base_url": "https://x.test", "upstream_model": "m" }),
+    )
+    .await;
+    let get = reqwest::Client::new()
+        .get(format!("{}/admin/providers/test", app.base_url))
+        .header(k, v)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+}
+
+#[tokio::test]
+async fn disconnect_oauth_really_removes_tokens() {
+    let app = spawn_app().await;
+    let (k, v) = auth_header(&app.secret);
+    let client = reqwest::Client::new();
+    post_provider(
+        &app,
+        json!({ "id": "cx", "name": "Codex", "wire_format": "openai",
+                "kind": "oauth_codex", "upstream_model": "gpt-5" }),
+    )
+    .await;
+    router::providers::queries::upsert_oauth_tokens(
+        &app.db, "cx", Some("at"), Some("rt"), None, None, &json!({}),
+    )
+    .await
+    .unwrap();
+    let get = || async {
+        client
+            .get(format!("{}/admin/providers/cx", app.base_url))
+            .header(&k, &v)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let before = get().await;
+    assert_eq!(before["credential_status"], "connected");
+    assert_eq!(before["ready"], true);
+    let del = client
+        .delete(format!("{}/admin/providers/cx/oauth", app.base_url))
+        .header(&k, &v)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 204);
+    let after = get().await;
+    assert_eq!(after["credential_status"], "not_connected");
+    assert_eq!(after["ready"], false);
+}

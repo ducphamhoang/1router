@@ -66,11 +66,14 @@ async fn check_member_reasoning_overrides(
     Ok(())
 }
 
+
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ProviderPatch {
     pub name: Option<String>,
     // Option<Option<T>>: outer None = leave alone, inner None = set NULL.
+    #[serde(default, deserialize_with = "double_option")]
     pub base_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub api_key: Option<Option<String>>,
     pub upstream_model: Option<String>,
     // Lets an existing oauth_codex provider switch which client-facing route
@@ -100,6 +103,94 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
+/// Trim; empty -> None.
+pub fn clean_opt(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub fn clean_endpoint(v: Option<String>) -> Option<String> {
+    clean_opt(v).map(|s| s.trim_end_matches('/').to_string())
+}
+
+/// Derive a valid provider id from a free-form name (used by the CLI wizard,
+/// which doubles the typed name as the id): keep it if already valid, else slugify.
+pub fn id_from_name(name: &str) -> String {
+    let name = name.trim();
+    if validate_id(name).is_ok() {
+        return name.to_string();
+    }
+    let mut slug = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_end_matches('-').chars().take(64).collect();
+    if slug.is_empty() { "provider".to_string() } else { slug }
+}
+
+fn validate_id(id: &str) -> Result<(), AppError> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "provider id must be 1-64 chars of letters, digits, '.', '_' or '-', starting with a letter or digit".into(),
+        ))
+    }
+}
+
+fn validate_endpoint(url: &Option<String>) -> Result<(), AppError> {
+    match url {
+        Some(u) if !(u.starts_with("http://") || u.starts_with("https://")) => Err(
+            AppError::BadRequest("endpoint URL must start with http:// or https://".into()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Normalize + validate a provider about to be inserted.
+pub fn normalize_new(p: &mut Provider) -> Result<(), AppError> {
+    p.id = p.id.trim().to_string();
+    p.name = p.name.trim().to_string();
+    p.upstream_model = p.upstream_model.trim().to_string();
+    p.base_url = clean_endpoint(p.base_url.take());
+    p.api_key = clean_opt(p.api_key.take());
+    validate_id(&p.id)?;
+    if p.name.is_empty() {
+        return Err(AppError::BadRequest("name must not be empty".into()));
+    }
+    if p.upstream_model.is_empty() {
+        return Err(AppError::BadRequest("upstream_model must not be empty".into()));
+    }
+    validate_endpoint(&p.base_url)
+}
+
+/// True when the provider has what it needs to serve traffic, given whether
+/// an OAuth access/refresh token is stored. A passthrough provider needs an
+/// endpoint (the key is optional: keyless upstreams exist); codex needs a token.
+pub fn is_ready(p: &Provider, has_oauth_token: bool) -> bool {
+    match p.kind {
+        ProviderKind::Passthrough => p.base_url.as_deref().is_some_and(|u| !u.is_empty()),
+        ProviderKind::OauthCodex | ProviderKind::OauthCommandCode => has_oauth_token,
+    }
+}
+
+pub async fn clear_oauth_tokens(db: &SqlitePool, provider_id: &str) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM provider_oauth_state WHERE provider_id = ?")
+        .bind(provider_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_providers(db: &SqlitePool) -> Result<Vec<Provider>, AppError> {
     Ok(
         sqlx::query_as::<_, Provider>("SELECT * FROM providers ORDER BY name")
@@ -118,6 +209,13 @@ pub async fn get_provider(db: &SqlitePool, id: &str) -> Result<Provider, AppErro
 
 pub async fn insert_provider(db: &SqlitePool, p: &Provider) -> Result<(), AppError> {
     check_provider_reasoning_effort(p)?;
+    let id_taken: Option<(String,)> = sqlx::query_as("SELECT id FROM providers WHERE id = ?")
+        .bind(&p.id)
+        .fetch_optional(db)
+        .await?;
+    if id_taken.is_some() {
+        return Err(AppError::Conflict(format!("provider id '{}' already exists", p.id)));
+    }
     let res = sqlx::query(
         "INSERT INTO providers (id,name,wire_format,kind,base_url,api_key,upstream_model,dataset_logging,default_reasoning_effort,created_at,updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -152,16 +250,25 @@ pub async fn update_provider(
 ) -> Result<Provider, AppError> {
     let mut p = get_provider(db, id).await?;
     if let Some(n) = &patch.name {
-        p.name = n.clone();
+        p.name = n.trim().to_string();
+        if p.name.is_empty() {
+            return Err(AppError::BadRequest("name must not be empty".into()));
+        }
     }
-    if let Some(b) = &patch.base_url {
-        p.base_url = b.clone();
+    // Codex providers authenticate via OAuth; endpoint/key patches are meaningless.
+    let is_codex = matches!(p.kind, ProviderKind::OauthCodex);
+    if let Some(b) = patch.base_url.as_ref().filter(|_| !is_codex) {
+        p.base_url = clean_endpoint(b.clone());
+        validate_endpoint(&p.base_url)?;
     }
-    if let Some(k) = &patch.api_key {
-        p.api_key = k.clone();
+    if let Some(k) = patch.api_key.as_ref().filter(|_| !is_codex) {
+        p.api_key = clean_opt(k.clone());
     }
     if let Some(m) = &patch.upstream_model {
-        p.upstream_model = m.clone();
+        p.upstream_model = m.trim().to_string();
+        if p.upstream_model.is_empty() {
+            return Err(AppError::BadRequest("upstream_model must not be empty".into()));
+        }
     }
     if let Some(v) = patch.dataset_logging {
         p.dataset_logging = v;
@@ -227,7 +334,7 @@ pub async fn update_provider(
     match res {
         Ok(_) => Ok(p),
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            Err(AppError::Conflict("provider name already exists".into()))
+            Err(AppError::Conflict(format!("provider name '{}' already exists", p.name)))
         }
         Err(e) => Err(AppError::Db(e)),
     }
@@ -254,8 +361,7 @@ pub async fn delete_provider(db: &SqlitePool, id: &str) -> Result<(), AppError> 
 pub async fn oauth_credential_configured(db: &SqlitePool, provider_id: &str) -> Result<bool, AppError> {
     Ok(get_oauth_state(db, provider_id)
         .await?
-        .and_then(|s| s.access_token)
-        .is_some())
+        .is_some_and(|s| s.access_token.is_some() || s.refresh_token.is_some()))
 }
 
 /// Batch form of [`oauth_credential_configured`], for `GET /admin/providers`
@@ -265,7 +371,7 @@ pub async fn oauth_configured_provider_ids(
     db: &SqlitePool,
 ) -> Result<std::collections::HashSet<String>, AppError> {
     Ok(sqlx::query_scalar::<_, String>(
-        "SELECT provider_id FROM provider_oauth_state WHERE access_token IS NOT NULL",
+        "SELECT provider_id FROM provider_oauth_state WHERE access_token IS NOT NULL OR refresh_token IS NOT NULL",
     )
     .fetch_all(db)
     .await?
@@ -663,6 +769,81 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ok.upstream_model, "gpt-4o");
+    }
+
+    #[test]
+    fn patch_null_clears_and_absent_leaves() {
+        let p: ProviderPatch = serde_json::from_str(r#"{"api_key": null}"#).unwrap();
+        assert_eq!(p.api_key, Some(None));
+        assert_eq!(p.base_url, None);
+        let p: ProviderPatch = serde_json::from_str(r#"{"api_key": "k"}"#).unwrap();
+        assert_eq!(p.api_key, Some(Some("k".into())));
+    }
+
+    #[test]
+    fn normalize_new_cleans_and_validates() {
+        let mut p = sample();
+        p.base_url = Some("  https://x.test/v1/chat/completions/ ".into());
+        p.api_key = Some("   ".into());
+        normalize_new(&mut p).unwrap();
+        assert_eq!(p.base_url.as_deref(), Some("https://x.test/v1/chat/completions"));
+        assert_eq!(p.api_key, None);
+
+        let mut bad = sample();
+        bad.id = "has space".into();
+        assert!(matches!(normalize_new(&mut bad), Err(AppError::BadRequest(_))));
+        let mut bad = sample();
+        bad.id = "".into();
+        assert!(normalize_new(&mut bad).is_err());
+        let mut bad = sample();
+        bad.base_url = Some("ftp://x".into());
+        assert!(normalize_new(&mut bad).is_err());
+    }
+
+    #[test]
+    fn id_from_name_slugifies_only_when_needed() {
+        assert_eq!(id_from_name("my-openai"), "my-openai");
+        assert_eq!(id_from_name("My OpenAI!"), "my-openai");
+        assert_eq!(id_from_name("***"), "provider");
+    }
+
+    #[test]
+    fn readiness_rules() {
+        let mut p = sample();
+        assert!(is_ready(&p, false));
+        p.base_url = None;
+        assert!(!is_ready(&p, false));
+        p.kind = ProviderKind::OauthCodex;
+        assert!(!is_ready(&p, false));
+        assert!(is_ready(&p, true));
+    }
+
+    #[tokio::test]
+    async fn duplicate_id_and_name_have_distinct_messages() {
+        let db = init_pool(":memory:").await.unwrap();
+        insert_provider(&db, &sample()).await.unwrap();
+        let mut same_id = sample();
+        same_id.name = "Other".into();
+        match insert_provider(&db, &same_id).await {
+            Err(AppError::Conflict(m)) => assert!(m.contains("id"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let mut same_name = sample();
+        same_name.id = "p2".into();
+        match insert_provider(&db, &same_name).await {
+            Err(AppError::Conflict(m)) => assert!(m.contains("name"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_null_api_key_clears_it() {
+        let db = init_pool(":memory:").await.unwrap();
+        insert_provider(&db, &sample()).await.unwrap();
+        let patch: ProviderPatch = serde_json::from_str(r#"{"api_key": null, "base_url": ""}"#).unwrap();
+        let up = update_provider(&db, "p1", &patch).await.unwrap();
+        assert_eq!(up.api_key, None);
+        assert_eq!(up.base_url, None);
     }
 
     #[tokio::test]

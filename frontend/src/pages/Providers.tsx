@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { apiJson } from "../lib/apiClient";
 import { CodexOAuthPanel } from "../components/CodexOAuthPanel";
 import { CommandCodeKeyPanel } from "../components/CommandCodeKeyPanel";
@@ -9,10 +9,15 @@ type Provider = {
   name: string;
   wire_format: string;
   kind: string;
-  base_url?: string;
-  api_key?: string;
+  base_url?: string | null;
+  api_key?: string | null;
   upstream_model: string;
   credential_configured?: boolean;
+  // `ready`: the router could actually use this provider right now (an
+  // endpoint is set / the OAuth account is connected). `credential_status`
+  // is one of set | none | connected | not_connected.
+  ready?: boolean;
+  credential_status?: string;
   dataset_logging?: boolean;
   default_reasoning_effort?: string | null;
 };
@@ -20,9 +25,13 @@ type Provider = {
 // The form keeps `default_reasoning_effort` as a plain string ("" = no
 // default) rather than `string | null`, so the <select> below is always a
 // controlled component; `saveProvider` normalizes "" back to null.
-type ProviderForm = Omit<Provider, "default_reasoning_effort"> & {
+type ProviderForm = Omit<Provider, "default_reasoning_effort" | "base_url" | "api_key"> & {
+  base_url: string;
+  api_key: string;
   default_reasoning_effort: string;
 };
+
+type PoolRef = { id: string };
 
 // Hand-mirrored from `capability_for` in src/core/reasoning.rs - keep the
 // two in sync. Dispatch is by `kind` FIRST, then by wire_format, and only
@@ -75,6 +84,63 @@ const WIRE_FORMAT_LABELS: Record<string, string> = {
   openai: "OpenAI-compatible",
   anthropic: "Anthropic-compatible"
 };
+
+// The base URL is the FULL endpoint the router POSTs to - it is never
+// rewritten - so a URL missing the usual path suffix is almost always a typo.
+export function endpointWarning(wireFormat: string, rawUrl: string): { message: string; fixed: string } | null {
+  const url = rawUrl.trim().replace(/\/+$/, "");
+  if (!url) {
+    return null;
+  }
+  if (url.includes("/v1/v1")) {
+    return { message: "The URL contains a duplicated /v1.", fixed: url.replace("/v1/v1", "/v1") };
+  }
+  const suffix = wireFormat === "anthropic" ? "/messages" : "/chat/completions";
+  if (!url.endsWith(suffix)) {
+    return {
+      message: `The router POSTs to this exact URL. It usually ends with ${suffix}.`,
+      fixed: `${url}${suffix}`
+    };
+  }
+  return null;
+}
+
+function credentialLabel(provider: Provider) {
+  switch (provider.credential_status) {
+    case "set":
+      return "API key set";
+    case "none":
+      return "No API key";
+    case "connected":
+      return "Connected";
+    case "not_connected":
+      return "Not connected";
+    default:
+      return "—";
+  }
+}
+
+function validateForm(form: ProviderForm, creating: boolean): string | null {
+  if (!form.name.trim()) {
+    return "Name is required.";
+  }
+  if (creating && !form.id.trim()) {
+    return "Provider ID is required.";
+  }
+  if (!form.upstream_model.trim()) {
+    return "Upstream model is required.";
+  }
+  if (form.kind === "passthrough") {
+    const url = form.base_url.trim();
+    if (!url) {
+      return "Base URL is required.";
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      return "Base URL must start with http:// or https://.";
+    }
+  }
+  return null;
+}
 
 const emptyForm: ProviderForm = {
   id: "",
@@ -206,6 +272,15 @@ export function Providers() {
   const [form, setForm] = useState<ProviderForm>(emptyForm);
   const [modalOpen, setModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  // Edit modal: send `api_key: null` on save to clear the stored key.
+  const [removeKey, setRemoveKey] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ provider: Provider; pools: string[] | null } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  // Bumped whenever the modal opens/closes so late async results are dropped.
+  const session = useRef(0);
   const [preset, setPreset] = useState("custom");
   // Tracks whether the user has typed their own id/name since the modal
   // opened, so applying a template never clobbers something they already
@@ -244,14 +319,17 @@ export function Providers() {
   }, []);
 
   useEffect(() => {
-    if (providers.length === 0) {
+    // A provider that isn't ready yet (no endpoint / account not connected)
+    // has no meaningful runtime state - the table shows "Needs setup".
+    const active = providers.filter((provider) => provider.ready !== false);
+    if (active.length === 0) {
       return;
     }
 
     let cancelled = false;
     async function loadStates() {
       const entries = await Promise.all(
-        providers.map(async (provider) => {
+        active.map(async (provider) => {
           try {
             const body = await apiJson<{ status: string }>(`/admin/providers/${encodeURIComponent(provider.id)}/state`);
             return [provider.id, body.status] as const;
@@ -288,7 +366,16 @@ export function Providers() {
     return `${base}-${n}`;
   }
 
+  function resetFormFeedback() {
+    session.current += 1;
+    setSaving(false);
+    setError(null);
+    setRemoveKey(false);
+  }
+
   function openNew() {
+    resetFormFeedback();
+    setNotice(null);
     setEditing(null);
     setForm(emptyForm);
     // "Custom" (no template applied) stays the default here - the operator
@@ -339,6 +426,8 @@ export function Providers() {
   }
 
   function openEdit(provider: Provider) {
+    resetFormFeedback();
+    setNotice(null);
     setEditing(provider);
     setForm({
       id: provider.id,
@@ -455,7 +544,17 @@ export function Providers() {
 
   async function saveProvider(event: FormEvent) {
     event.preventDefault();
+    if (saving) {
+      return;
+    }
     setError(null);
+    const invalid = validateForm(form, !editing);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    setSaving(true);
+    const mine = session.current;
     try {
       // A stale effort left in form state after the operator changed
       // kind/wire_format/model to something that can't carry one would be
@@ -472,7 +571,7 @@ export function Providers() {
             upstream_model: form.upstream_model,
             dataset_logging: form.dataset_logging,
             default_reasoning_effort: effort,
-            ...(form.api_key?.trim() ? { api_key: form.api_key } : {})
+            ...(removeKey ? { api_key: null } : form.api_key.trim() ? { api_key: form.api_key } : {})
           }
         : { ...form, default_reasoning_effort: effort };
       const saved = await apiJson<Provider>(
@@ -488,24 +587,78 @@ export function Providers() {
       // or a pasted key (Command Code). Rather than closing the modal and
       // making the operator find it again via Edit, flip straight into edit
       // mode so that panel appears immediately.
+      if (mine !== session.current) {
+        await loadProviders();
+        return;
+      }
       if (!editing && saved.kind !== "passthrough") {
         setEditing(saved);
-        setForm({ ...saved, api_key: "", default_reasoning_effort: saved.default_reasoning_effort ?? "" });
+        setForm({
+          ...saved,
+          base_url: saved.base_url ?? "",
+          api_key: "",
+          default_reasoning_effort: saved.default_reasoning_effort ?? ""
+        });
+        setNotice(`Created ${saved.name}. Connect the account below, or close this dialog and do it later.`);
       } else {
         setModalOpen(false);
+        setNotice(
+          editing
+            ? `Saved ${form.name.trim()}.`
+            : form.api_key.trim()
+              ? `Created ${form.name.trim()}.`
+              : `Created ${form.name.trim()}. It has no API key yet - add one later if the endpoint requires it.`
+        );
       }
       await loadProviders();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Provider save failed.");
+      if (mine === session.current) {
+        setError(error instanceof Error ? error.message : "Provider save failed.");
+      }
+    } finally {
+      if (mine === session.current) {
+        setSaving(false);
+      }
     }
   }
 
-  async function deleteProvider(provider: Provider) {
+  async function askDelete(provider: Provider) {
+    setPageError(null);
+    setDeleteTarget({ provider, pools: null });
+    try {
+      const pools = await apiJson<PoolRef[]>("/admin/pools");
+      const names: string[] = [];
+      await Promise.all(
+        pools.map(async (pool) => {
+          const members = await apiJson<{ provider_id: string }[]>(
+            `/admin/pools/${encodeURIComponent(pool.id)}/members`
+          );
+          if (members.some((member) => member.provider_id === provider.id)) {
+            names.push(pool.id);
+          }
+        })
+      );
+      setDeleteTarget((current) => (current?.provider.id === provider.id ? { provider, pools: names.sort() } : current));
+    } catch {
+      // Leave `pools` null: the confirmation still works, it just can't list pools.
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) {
+      return;
+    }
+    const { provider } = deleteTarget;
+    setDeleting(true);
     try {
       await apiJson(`/admin/providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
       setProviders((current) => current.filter((item) => item.id !== provider.id));
+      setNotice(`Deleted ${provider.name}.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Deleting provider failed.");
+      setPageError(err instanceof Error ? err.message : "Deleting provider failed.");
+    } finally {
+      setDeleting(false);
+      setDeleteTarget(null);
     }
   }
 
@@ -515,6 +668,8 @@ export function Providers() {
       <button type="button" onClick={openNew}>
         New provider
       </button>
+      {notice ? <p role="status">{notice}</p> : null}
+      {pageError ? <p role="alert">{pageError}</p> : null}
       <table>
         <thead>
           <tr>
@@ -522,6 +677,7 @@ export function Providers() {
             <th>Wire format</th>
             <th>Kind</th>
             <th>Model</th>
+            <th>Credentials</th>
             <th>State</th>
             <th>Actions</th>
           </tr>
@@ -533,12 +689,19 @@ export function Providers() {
               <td>{WIRE_FORMAT_LABELS[provider.wire_format] ?? provider.wire_format}</td>
               <td>{KIND_LABELS[provider.kind] ?? provider.kind}</td>
               <td>{provider.upstream_model}</td>
-              <td>{states[provider.id] ?? "checking"}</td>
+              <td>{credentialLabel(provider)}</td>
+              <td>
+                {provider.ready === false ? (
+                  <span className="badge badge-warn">Needs setup</span>
+                ) : (
+                  (states[provider.id] ?? "checking")
+                )}
+              </td>
               <td>
                 <button type="button" onClick={() => openEdit(provider)} aria-label={`Edit ${provider.name}`}>
                   Edit
                 </button>
-                <button type="button" onClick={() => deleteProvider(provider)} aria-label={`Delete ${provider.name}`}>
+                <button type="button" onClick={() => void askDelete(provider)} aria-label={`Delete ${provider.name}`}>
                   Delete
                 </button>
               </td>
@@ -587,11 +750,16 @@ export function Providers() {
             </label>
             <label>
               Kind
-              <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
+              <select
+                value={form.kind}
+                disabled={Boolean(editing)}
+                onChange={(event) => setForm({ ...form, kind: event.target.value })}
+              >
                 <option value="passthrough">{KIND_LABELS.passthrough}</option>
                 <option value="oauth_codex">{KIND_LABELS.oauth_codex}</option>
                 <option value="oauth_command_code">{KIND_LABELS.oauth_command_code}</option>
               </select>
+              {editing ? <span className="hint">Kind and API format can't be changed - recreate the provider to change them.</span> : null}
             </label>
             <label className="checkbox-row">
               <input
@@ -640,6 +808,7 @@ export function Providers() {
                   API format
                   <select
                     value={form.wire_format}
+                    disabled={Boolean(editing)}
                     onChange={(event) => setForm({ ...form, wire_format: event.target.value })}
                   >
                     <option value="openai">{WIRE_FORMAT_LABELS.openai}</option>
@@ -650,6 +819,21 @@ export function Providers() {
                   Base URL
                   <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
                 </label>
+                {(() => {
+                  const warning = endpointWarning(form.wire_format, form.base_url);
+                  return warning ? (
+                    <p className="hint" role="note">
+                      {warning.message}{" "}
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        onClick={() => setForm({ ...form, base_url: warning.fixed })}
+                      >
+                        Use {warning.fixed}
+                      </button>
+                    </p>
+                  ) : null;
+                })()}
                 <label>
                   API key
                   <div className="model-override-row">
@@ -657,8 +841,26 @@ export function Providers() {
                       type="password"
                       autoComplete="off"
                       value={form.api_key}
+                      disabled={removeKey}
+                      placeholder={
+                        editing
+                          ? editing.api_key
+                            ? `Leave blank to keep ${editing.api_key}`
+                            : "No key stored"
+                          : "Optional - can be added later"
+                      }
                       onChange={(event) => setForm({ ...form, api_key: event.target.value })}
                     />
+                    {editing && editing.credential_status === "set" ? (
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        aria-pressed={removeKey}
+                        onClick={() => setRemoveKey((current) => !current)}
+                      >
+                        {removeKey ? "Keep key" : "Remove key"}
+                      </button>
+                    ) : null}
                     {!editing ? (
                       <button
                         type="button"
@@ -820,11 +1022,49 @@ export function Providers() {
                 ) : null}
               </>
             ) : null}
+            {editing && form.kind === "oauth_codex" && editing.credential_configured ? (
+              <div className="model-override-row">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={async () => {
+                    try {
+                      await apiJson(`/admin/providers/${encodeURIComponent(editing.id)}/oauth`, { method: "DELETE" });
+                      setNotice("Account disconnected.");
+                      setModalOpen(false);
+                      await loadProviders();
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "Disconnect failed.");
+                    }
+                  }}
+                >
+                  Disconnect account
+                </button>
+              </div>
+            ) : null}
             {error ? <p role="alert">{error}</p> : null}
-            <button type="submit" disabled={!editing && (!form.id.trim() || form.id.includes("/"))}>
-              Save provider
+            <button type="submit" disabled={saving || (!editing && (!form.id.trim() || form.id.includes("/")))}>
+              {saving ? "Saving…" : "Save provider"}
             </button>
           </form>
+        </Modal>
+      ) : null}
+      {deleteTarget ? (
+        <Modal label={`Delete ${deleteTarget.provider.name}`} onClose={() => setDeleteTarget(null)}>
+          <h2>Delete {deleteTarget.provider.name}?</h2>
+          {deleteTarget.pools && deleteTarget.pools.length > 0 ? (
+            <p>It will also be removed from these pools: {deleteTarget.pools.join(", ")}.</p>
+          ) : (
+            <p>This cannot be undone.</p>
+          )}
+          <div className="model-override-row">
+            <button type="button" className="btn-ghost" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </button>
+            <button type="button" className="btn-danger" onClick={() => void confirmDelete()} disabled={deleting}>
+              Confirm delete
+            </button>
+          </div>
         </Modal>
       ) : null}
     </section>

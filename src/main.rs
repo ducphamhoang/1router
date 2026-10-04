@@ -23,8 +23,50 @@ async fn seed_if_configured_first(db: &sqlx::SqlitePool) -> Result<()> {
     seed_if_configured(db, &cfg).await
 }
 
+const HELP: &str = "\
+1router - LLM API gateway
+
+USAGE:
+    1router            Start the gateway
+    1router setup      Interactive setup wizard (needs a terminal)
+    1router --version  Print the version and exit
+    1router --help     Print this help and exit
+
+ENVIRONMENT:
+    ROUTER_LISTEN_ADDR      Address to bind (default 0.0.0.0:8080)
+    ROUTER_SQLITE_PATH      SQLite database file (default 1router.db)
+    ROUTER_SHARED_SECRET    API/admin bearer secret (else sidecar file / generated)
+    ROUTER_SEED_PATH        Config JSON imported on first boot
+    ROUTER_MAX_BODY_BYTES   Max request body size
+    ROUTER_CONNECT_TIMEOUT  Upstream connect timeout, seconds
+    ROUTER_TTFB_TIMEOUT     Upstream time-to-first-byte timeout, seconds
+    ROUTER_IDLE_TIMEOUT     Streaming idle timeout, seconds
+    ROUTER_DRAIN_TIMEOUT    Graceful shutdown drain, seconds
+";
+
+/// Handle `--help`/`--version`/unknown arguments before any startup work
+/// (no DB, no port) so they can never boot a server by accident.
+fn handle_cli_flags() {
+    match std::env::args().nth(1).as_deref() {
+        None | Some("setup") => {}
+        Some("--version" | "-V") => {
+            println!("1router {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        Some("--help" | "-h" | "help") => {
+            print!("{HELP}");
+            std::process::exit(0);
+        }
+        Some(other) => {
+            eprintln!("1router: unknown argument '{other}'\nTry '1router --help'.");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    handle_cli_flags();
     init_tracing();
 
     let sqlite_path = config::sqlite_path_from_env();

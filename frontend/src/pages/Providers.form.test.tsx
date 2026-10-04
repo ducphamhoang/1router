@@ -329,7 +329,10 @@ describe("Providers", () => {
     });
 
     await userEvent.click(screen.getByRole("button", { name: "Delete openai" }));
-    expect(fetch).toHaveBeenCalledWith("/admin/providers/prov_1", expect.objectContaining({ method: "DELETE" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Confirm delete" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/admin/providers/prov_1", expect.objectContaining({ method: "DELETE" }));
+    });
   });
 
   it("validates_an_existing_passthrough_providers_saved_credentials", async () => {
@@ -586,5 +589,64 @@ describe("Providers", () => {
         })
       )
     );
+  });
+
+  it("shows_needs_setup_for_an_unready_provider_and_does_not_poll_its_state", async () => {
+    providers.push({
+      id: "cx",
+      name: "codex",
+      wire_format: "openai",
+      kind: "oauth_codex",
+      base_url: "",
+      api_key: "",
+      upstream_model: "gpt-5",
+      ready: false,
+      credential_status: "not_connected"
+    } as never);
+    try {
+      render(<Providers />);
+      expect(await screen.findByText("Needs setup")).toBeInTheDocument();
+      expect(screen.getByText("Not connected")).toBeInTheDocument();
+      const polled = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+      expect(polled).not.toContain("/admin/providers/cx/state");
+    } finally {
+      providers.pop();
+    }
+  });
+
+  it("warns_about_an_endpoint_without_the_expected_path_and_offers_a_fix", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.example.com");
+    await userEvent.click(screen.getByRole("button", { name: /Use https:\/\/api\.example\.com\/chat\/completions/ }));
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.example.com/chat/completions");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("rejects_a_missing_name_or_non_http_url_before_sending", async () => {
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "New provider" }));
+    await userEvent.type(screen.getByLabelText("Provider ID"), "p2");
+    await userEvent.type(screen.getByLabelText("Name"), "p2");
+    await userEvent.type(screen.getByLabelText("Base URL"), "ftp://x");
+    await userEvent.type(screen.getByLabelText("Upstream model"), "m");
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    expect(await screen.findByText("Base URL must start with http:// or https://.")).toBeInTheDocument();
+    const posted = vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST");
+    expect(posted).toBe(false);
+  });
+
+  it("remove_key_sends_a_null_api_key", async () => {
+    providers[0] = { ...providers[0], credential_status: "set" } as never;
+    render(<Providers />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit openai" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove key" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() => {
+      const patch = vi.mocked(fetch).mock.calls.find(
+        ([url, init]) => String(url) === "/admin/providers/prov_1" && init?.method === "PATCH"
+      );
+      expect(JSON.parse(String(patch?.[1]?.body)).api_key).toBeNull();
+    });
   });
 });

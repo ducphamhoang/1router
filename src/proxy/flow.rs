@@ -15,7 +15,7 @@ use crate::providers::adapter::commandcode::{
     current_transport, is_upgrade_required, remember_transport, Transport,
 };
 use crate::providers::adapter::{adapter_for_wire, Credentials};
-use crate::providers::queries::get_oauth_state;
+use crate::providers::queries::{get_oauth_state, is_ready};
 use crate::providers::refresh_lock::refresh_and_persist_detached;
 use crate::proxy::backoff;
 use crate::proxy::dataset_tee;
@@ -192,6 +192,14 @@ async fn handle_proxy_inner(
                 continue;
             }
         }
+        let creds = credentials_for(&state, provider).await;
+        let has_token = creds.access_token.is_some() || creds.refresh_token.is_some();
+        if !is_ready(provider, has_token) {
+            // Pre-created but not yet configured (no endpoint / OAuth not connected):
+            // skip silently so the next pool member can serve the request.
+            last_error_body = format!("provider '{}' is not configured yet", provider.id);
+            continue;
+        }
         tried.push(provider.id.clone());
         last_provider = provider.id.clone();
 
@@ -213,7 +221,6 @@ async fn handle_proxy_inner(
 
         let adapter: std::sync::Arc<dyn crate::providers::adapter::ProviderAdapter> =
             adapter_for_wire(provider, state.http.clone(), wire).into();
-        let creds = credentials_for(&state, provider).await;
 
         let req = match adapter.build_request(&body, &creds).await {
             Ok(r) => r,

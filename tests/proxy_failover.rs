@@ -521,3 +521,35 @@ async fn unready_member_is_skipped_and_next_member_serves() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.headers().get("x-1router-tried").map(|h| h.to_str().unwrap()), None);
 }
+
+#[tokio::test]
+async fn unready_member_does_not_mask_an_earlier_upstream_error() {
+    let bad = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("real upstream failure"))
+        .mount(&bad)
+        .await;
+
+    let app = spawn_app().await;
+    create_pool(&app).await;
+    let client = reqwest::Client::new();
+    let (k, v) = auth_header(&app.secret);
+    client
+        .post(format!("{}/admin/providers", app.base_url))
+        .header(&k, &v)
+        .json(&json!({ "id": "draft", "name": "draft", "wire_format": "openai",
+                       "upstream_model": "m" }))
+        .send().await.unwrap();
+    add_provider(&app, "bad", &format!("{}/v1/chat/completions", bad.uri())).await;
+    add_pool_member(&app, "bad", 1).await;
+    add_pool_member(&app, "draft", 2).await;
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", app.base_url))
+        .header(k, v)
+        .json(&json!({ "model": "gpt-4o", "messages": [] }))
+        .send().await.unwrap();
+    assert!(resp.status().is_server_error());
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains("not configured yet"), "masked real error: {body}");
+}

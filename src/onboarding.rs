@@ -666,7 +666,7 @@ pub async fn add_commandcode_provider(
     let wire_format = WireFormat::Anthropic;
     let now = chrono::Utc::now();
     let mut provider = Provider {
-        id: name.clone(),
+        id: provider_queries::id_from_name(&name),
         name,
         wire_format,
         kind: ProviderKind::OauthCommandCode,
@@ -678,6 +678,8 @@ pub async fn add_commandcode_provider(
         created_at: now,
         updated_at: now,
     };
+    provider_queries::normalize_new(&mut provider)
+        .map_err(|e| anyhow::anyhow!("invalid provider: {e}"))?;
     provider_queries::insert_provider(db, &provider)
         .await
         .map_err(|e| anyhow::anyhow!("failed to create provider '{}': {e}", provider.id))?;

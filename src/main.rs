@@ -29,6 +29,8 @@ const HELP: &str = "\
 USAGE:
     1router            Start the gateway
     1router setup      Interactive setup wizard (needs a terminal)
+    1router setup --reset-admin-password
+                       Reset the admin password (recovery) and exit
     1router --version  Print the version and exit
     1router --help     Print this help and exit
 

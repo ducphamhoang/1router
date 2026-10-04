@@ -197,7 +197,11 @@ async fn handle_proxy_inner(
         if !is_ready(provider, has_token) {
             // Pre-created but not yet configured (no endpoint / OAuth not connected):
             // skip silently so the next pool member can serve the request.
-            last_error_body = format!("provider '{}' is not configured yet", provider.id);
+            // Only when nothing was attempted: otherwise keep the real upstream
+            // error from an earlier member instead of masking it.
+            if tried.is_empty() {
+                last_error_body = format!("provider '{}' is not configured yet", provider.id);
+            }
             continue;
         }
         tried.push(provider.id.clone());

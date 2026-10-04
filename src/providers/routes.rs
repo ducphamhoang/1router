@@ -194,7 +194,9 @@ async fn patch(
 
 async fn delete(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     queries::delete_provider(&s.db, &id).await?;
-    s.runtime.remove(&id);
+    // Runtime keys are `provider\u{1f}model`, so drop every entry by prefix.
+    let prefix = crate::core::runtime::runtime_key_prefix(&id);
+    s.runtime.retain(|k, _| !k.starts_with(&prefix));
     reload_snapshot(&s).await?;
     Ok(StatusCode::NO_CONTENT)
 }

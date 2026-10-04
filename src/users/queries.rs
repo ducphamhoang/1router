@@ -80,6 +80,9 @@ fn validate_id(id: &str) -> Result<(), AppError> {
             "id must not have leading/trailing whitespace".into(),
         ));
     }
+    if id.chars().any(char::is_whitespace) {
+        return Err(AppError::BadRequest("id must not contain spaces".into()));
+    }
     // Reserved: this is what request logs show for the shared secret, and
     // what "anonymous" would naturally be read as.
     if id.eq_ignore_ascii_case(ADMIN_USER_ID) || id.eq_ignore_ascii_case("anonymous") {

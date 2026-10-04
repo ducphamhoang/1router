@@ -92,4 +92,20 @@ describe("Users", () => {
     expect(await screen.findByText(/^Revoked/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Revoke alice" })).not.toBeInTheDocument();
   });
+
+  it("clears_the_previous_key_banner_when_a_new_create_fails", async () => {
+    render(<Users />);
+    await screen.findByRole("cell", { name: "alice" });
+    await userEvent.type(screen.getByLabelText("User id"), "bob");
+    await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+    await screen.findByText(/Copy it now/);
+
+    vi.mocked(fetch).mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: { message: "user 'bob' already exists" } }), { status: 409 })
+    );
+    await userEvent.type(screen.getByLabelText("User id"), "bob");
+    await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+    expect(await screen.findByText("user 'bob' already exists")).toBeInTheDocument();
+    expect(screen.queryByText(/Copy it now/)).toBeNull();
+  });
 });

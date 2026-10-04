@@ -169,6 +169,7 @@ export function Pools() {
   const [validation, setValidation] = useState<Record<string, ValidationState>>({});
   const [modelFetch, setModelFetch] = useState<Record<string, ModelFetchState>>({});
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // The page is list-and-modal: the list identifies pools, everything you can
   // *do* to a pool happens inside a dialog so the list stays scannable.
   const [createOpen, setCreateOpen] = useState(false);
@@ -217,6 +218,8 @@ export function Pools() {
   function closeDetail() {
     setOpenPoolId(null);
     setPendingDelete(null);
+    setNotice(null);
+    setError(null);
   }
 
   async function createPool(event: FormEvent) {
@@ -415,6 +418,7 @@ export function Pools() {
     if (!draft.providerId) {
       return;
     }
+    setNotice(null);
     const existing = membersByPool[pool.id] ?? [];
     const priority = existing.reduce((max, m) => Math.max(max, m.priority), 0) + 1;
     try {
@@ -448,6 +452,8 @@ export function Pools() {
       // pick-model-per-add instead of re-selecting the provider every time.
       setDraftFor(pool.id, { modelOverride: "", datasetLoggingOverride: false, reasoningEffortOverride: "" });
       await loadMembers([pool.id]);
+      const added = providers.find((p) => p.id === draft.providerId);
+      setNotice(`Added ${added?.name ?? draft.providerId} to ${pool.id}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adding pool member failed.");
     }
@@ -562,6 +568,10 @@ export function Pools() {
             ) : null}
           </div>
         </header>
+
+        {/* The page-level error sits behind this modal's overlay, so surface it here. */}
+        {error ? <p role="alert">{error}</p> : null}
+        {notice ? <p role="status">{notice}</p> : null}
 
         {pendingDelete === poolDeleteKey ? (
           <div className="confirm-bar" role="group" aria-label={`Confirm deleting ${pool.id}`}>
@@ -848,7 +858,7 @@ export function Pools() {
           + Create Pool
         </button>
       </div>
-      {error ? <p role="alert">{error}</p> : null}
+      {error && !openPool ? <p role="alert">{error}</p> : null}
       {pools.length === 0 ? (
         <p className="empty-state">No pools yet. Use “Create Pool”, then add providers to it.</p>
       ) : (
@@ -860,7 +870,12 @@ export function Pools() {
                 {isImagePool(pool) || pool.wire_format !== "any" ? (
                   <span className="badge">{isImagePool(pool) ? "image" : pool.wire_format}</span>
                 ) : null}
-                <span className="pool-meta">{describeCount((membersByPool[pool.id] ?? []).length)}</span>
+                <span
+                  className={(membersByPool[pool.id] ?? []).length === 0 ? "pool-meta pool-meta-empty" : "pool-meta"}
+                  title={(membersByPool[pool.id] ?? []).length === 0 ? "Empty pools can't serve traffic" : undefined}
+                >
+                  {describeCount((membersByPool[pool.id] ?? []).length)}
+                </span>
                 <span className="pool-row-chevron" aria-hidden="true">
                   ›
                 </span>

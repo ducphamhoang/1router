@@ -73,6 +73,8 @@ export function Users() {
   async function createUser(event: FormEvent) {
     event.preventDefault();
     setError(null);
+    // A previous "key created" banner must not sit next to a new failure.
+    setIssued(null);
     try {
       const body = await apiJson<UserWithKey>("/admin/users", {
         method: "POST",

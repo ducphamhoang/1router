@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
-import { apiJson } from "./lib/apiClient";
+import { apiFetch, apiJson } from "./lib/apiClient";
 import { Login } from "./pages/Login";
 import { Pools } from "./pages/Pools";
 import { Providers } from "./pages/Providers";
@@ -75,7 +75,7 @@ export function SecurityBanner() {
         </p>
       ) : null}
       {warnings.length > 0 ? (
-        <p role="alert">
+        <p role="alert" className="security-warning">
           Still using onboarding defaults: {warnings.join(" and ")} — change{" "}
           {warnings.length > 1 ? "them" : "it"} on the{" "}
           <NavLink to="/ui/settings">Settings</NavLink> page (or via <code>1router setup</code>)
@@ -86,7 +86,24 @@ export function SecurityBanner() {
   );
 }
 
+function LogoutButton() {
+  async function logout() {
+    try {
+      await apiFetch("/admin/auth/logout", { method: "POST", skipAuthRedirect: true });
+    } finally {
+      // Even if the request failed, the login page is the safe place to land.
+      window.location.assign("/ui/login");
+    }
+  }
+  return (
+    <button type="button" className="nav-logout btn-ghost" onClick={() => void logout()}>
+      Log out
+    </button>
+  );
+}
+
 export function App() {
+  const onLogin = useLocation().pathname === "/ui/login";
   return (
     <main>
       <nav aria-label="Admin sections">
@@ -95,6 +112,7 @@ export function App() {
         <NavLink to="/ui/integration">Integration</NavLink>
         <NavLink to="/ui/users">Users</NavLink>
         <NavLink to="/ui/settings">Settings</NavLink>
+        {onLogin ? null : <LogoutButton />}
       </nav>
       <SecurityBanner />
       <Routes>

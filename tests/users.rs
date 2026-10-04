@@ -258,7 +258,7 @@ async fn create_rejects_duplicate_and_reserved_ids() {
     create_user(&app, "hank").await;
     let (k, v) = auth_header(&app.secret);
     let client = reqwest::Client::new();
-    for (id, status) in [("hank", 409), ("admin", 400), ("a/b", 400)] {
+    for (id, status) in [("hank", 409), ("admin", 400), ("a/b", 400), ("Alice Smith", 400)] {
         let resp = client
             .post(format!("{}/admin/users", app.base_url))
             .header(&k, &v)

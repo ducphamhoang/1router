@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { SecurityBanner } from "./App";
+import { App, SecurityBanner } from "./App";
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -32,4 +32,27 @@ it("shows the critical banner for open non-loopback access", async () => {
   expect(
     await screen.findByText(/Open access is on and this gateway isn't bound to localhost/)
   ).toBeInTheDocument();
+});
+
+it("shows_a_log_out_button_that_posts_to_logout", async () => {
+  const assign = vi.fn();
+  vi.stubGlobal("location", { ...window.location, pathname: "/ui/providers", assign });
+  render(
+    <MemoryRouter initialEntries={["/ui/providers"]}>
+      <App />
+    </MemoryRouter>
+  );
+  const { default: userEvent } = await import("@testing-library/user-event");
+  await userEvent.click(screen.getByRole("button", { name: "Log out" }));
+  expect(fetch).toHaveBeenCalledWith("/admin/auth/logout", expect.objectContaining({ method: "POST" }));
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith("/ui/login"));
+});
+
+it("hides_log_out_on_the_login_page", () => {
+  render(
+    <MemoryRouter initialEntries={["/ui/login"]}>
+      <App />
+    </MemoryRouter>
+  );
+  expect(screen.queryByRole("button", { name: "Log out" })).toBeNull();
 });

@@ -64,8 +64,9 @@ export function Settings() {
         </label>
         <label>
           New password
-          <input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+          <input type="password" minLength={8} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
         </label>
+        <p className="optional">At least 8 characters.</p>
         <button type="submit">Change password</button>
       </form>
 

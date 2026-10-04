@@ -12,6 +12,8 @@ use crate::admin::auth::{password, rate_limit, session};
 use crate::core::error::AppError;
 use crate::core::state::AppState;
 
+const MIN_PASSWORD_LEN: usize = 8;
+
 pub fn public_routes() -> Router<AppState> {
     Router::new().route("/admin/auth/login", post(login))
 }
@@ -124,11 +126,17 @@ async fn change_password(
         row.ok_or_else(|| AppError::Internal("admin_users row missing".into()))?;
 
     if !password::verify_password_async(Some(hash), req.current_password).await {
-        return Err(AppError::Unauthorized);
+        // 400, not 401: the caller is authenticated, just mistyped the field.
+        return Err(AppError::BadRequest("current password is incorrect".into()));
     }
 
     if req.new_password.trim().is_empty() {
         return Err(AppError::BadRequest("new_password cannot be empty".into()));
+    }
+    if req.new_password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(AppError::BadRequest(format!(
+            "new password must be at least {MIN_PASSWORD_LEN} characters"
+        )));
     }
 
     let new_hash = password::hash_password(&req.new_password)
@@ -373,8 +381,47 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(password::verify_password(&stored, "old-password"));
+    }
+
+    #[tokio::test]
+    async fn password_change_rejects_short_new_password() {
+        let state = state().await;
+        seed_admin(&state.db, "old-password").await;
+
+        let app = routes()
+            .route_layer(middleware::from_fn(
+                |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    req.extensions_mut().insert(session::AdminSession {
+                        token_hash: "current".to_string(),
+                    });
+                    next.run(req).await
+                },
+            ))
+            .with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/admin/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"current_password":"old-password","new_password":"abc"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let stored: String =
             sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = 1")
                 .fetch_one(&state.db)

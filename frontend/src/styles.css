@@ -65,6 +65,14 @@ nav[aria-label="Admin sections"] a.active {
   color: var(--accent-fg);
 }
 
+nav[aria-label="Admin sections"] .nav-logout {
+  margin-left: auto;
+}
+
+.pool-meta-empty {
+  color: var(--danger);
+}
+
 section {
   background: var(--surface);
   border: 1px solid var(--border);

@@ -62,10 +62,10 @@ pub fn resolve_reasoning_effort(
 /// Resolution is a two-step process:
 ///
 /// 1. Look up `model` as a real pool id. If a pool with that id exists,
-///    use it only if the pool accepts the requested wire format (a pinned
-///    pool must match it; an `any` pool accepts both);
-///    otherwise return `None`. There is **no** fallback to step 2 in that
-///    case.
+///    use it for any client wire format (members are translated per
+///    request, so a legacy `wire_format` pin on the pool is ignored);
+///    return `None` only for non-chat pools. There is **no** fallback to
+///    step 2 in that case.
 ///
 /// 2. If no real pool matches by id, fall back to `<provider_id>/<model>`
 ///    direct addressing in `select_direct_provider`, which splits on the
@@ -87,7 +87,7 @@ pub fn select<'a>(
     if let Some(pwm) = snapshot.pools.iter().find(|p| p.pool.id == pool_id) {
         // Checked before `rotate_from_cursor`, so a rejected request never
         // advances the pool's rotation cursor.
-        if !pwm.pool.wire_format.accepts(wire) || pwm.pool.modality != Modality::Chat {
+        if pwm.pool.modality != Modality::Chat {
             return None;
         }
 
@@ -384,8 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn wrong_wire_format_returns_none() {
-        assert!(select(&snap(), "gpt-4o", WireFormat::Anthropic, &empty_rotation()).is_none());
+    fn legacy_pinned_pool_still_serves_every_client_wire() {
+        let rot = empty_rotation();
+        assert!(select(&snap(), "gpt-4o", WireFormat::Anthropic, &rot).is_some());
+        assert!(select(&snap(), "gpt-4o", WireFormat::OpenAi, &rot).is_some());
     }
 
     #[test]

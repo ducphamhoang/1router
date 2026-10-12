@@ -283,8 +283,7 @@ env_http_headers = { "CF-Access-Client-Id" = "CF_ID", "CF-Access-Client-Secret" 
 - Supported: text and image input, `instructions`, function tools and their
   outputs, streaming, usage. Reasoning items and non-function tools (web
   search, freeform/custom tools) are dropped.
-- The pool must accept the OpenAI route (`any` or `openai`); an
-  Anthropic-only pool answers "unknown model or pool".
+- Any chat pool works, whatever wire format its providers speak.
 - Run `codex exec` with stdin redirected (`< /dev/null`) in scripts.
 
 ## Try it

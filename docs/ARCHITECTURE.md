@@ -30,8 +30,9 @@ and its members may mix provider wire formats freely - each request is
 translated to the member it lands on, so round-robin across an OpenAI and
 an Anthropic provider just works. A pool can still be pinned to `openai` or
 `anthropic` (API / config import, and pools created before this change keep
-their value); a pinned pool only ever answers its own route, regardless of
-its members' formats, and only accepts providers of that format in the UI.
+their value); the pin only restricts which providers the UI offers as
+members. It no longer gates client routes: every pool answers
+`/v1/chat/completions`, `/v1/messages` and `/v1/responses`.
 Direct `<provider_id>/<model>` addressing also works from either route for
 every provider kind.
 

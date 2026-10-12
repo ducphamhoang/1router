@@ -11,7 +11,7 @@
 //! non-function tools (web search, local shell, custom/freeform tools) are
 //! dropped; the model can still use function tools.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 
 use axum::body::Body;
@@ -28,6 +28,44 @@ const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
 
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+// ------------------------------------------------------------- namespaces
+
+/// Flattened chat tool name -> (namespace, tool name).
+pub type NamespaceMap = HashMap<String, (String, String)>;
+
+fn flat_name(ns: &str, name: &str) -> String {
+    format!("{ns}__{name}")
+}
+
+/// Codex groups some tools under `{"type":"namespace","tools":[...]}`. Chat
+/// has no such thing, so each member becomes a plain function named
+/// `<namespace>__<tool>`; this records how to undo that on the way back.
+pub fn namespaces_of(req: &Value) -> NamespaceMap {
+    let mut m = NamespaceMap::new();
+    for t in req.get("tools").and_then(|t| t.as_array()).into_iter().flatten() {
+        if t["type"] != "namespace" {
+            continue;
+        }
+        let Some(ns) = t["name"].as_str() else { continue };
+        for inner in t["tools"].as_array().into_iter().flatten() {
+            if let (true, Some(n)) = (inner["type"] == "function", inner["name"].as_str()) {
+                m.insert(flat_name(ns, n), (ns.to_string(), n.to_string()));
+            }
+        }
+    }
+    m
+}
+
+/// Apply the namespace split to a `function_call` output item.
+fn with_namespace(mut item: Value, map: &NamespaceMap) -> Value {
+    let hit = item["name"].as_str().and_then(|n| map.get(n)).cloned();
+    if let Some((ns, name)) = hit {
+        item["namespace"] = json!(ns);
+        item["name"] = json!(name);
+    }
+    item
 }
 
 // ---------------------------------------------------------------- request
@@ -126,7 +164,10 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
                                 "id": call_id,
                                 "type": "function",
                                 "function": {
-                                    "name": item.get("name").cloned().unwrap_or(Value::Null),
+                                    "name": match (item["namespace"].as_str(), item["name"].as_str()) {
+                                        (Some(ns), Some(n)) => json!(flat_name(ns, n)),
+                                        _ => item.get("name").cloned().unwrap_or(Value::Null),
+                                    },
                                     "arguments": item.get("arguments").cloned()
                                         .unwrap_or_else(|| Value::String("{}".into())),
                                 }
@@ -180,14 +221,32 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
     }
 
     if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
-        let tools: Vec<Value> = tools
-            .iter()
-            .filter(|t| t["type"] == "function")
-            .map(|t| {
+        let mut flat: Vec<(Option<&str>, &Value)> = Vec::new();
+        for t in tools {
+            match t["type"].as_str() {
+                Some("function") => flat.push((None, t)),
+                Some("namespace") => {
+                    let ns = t["name"].as_str();
+                    for inner in t["tools"].as_array().into_iter().flatten() {
+                        if inner["type"] == "function" {
+                            flat.push((ns, inner));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let tools: Vec<Value> = flat
+            .into_iter()
+            .map(|(ns, t)| {
+                let name = match (ns, t["name"].as_str()) {
+                    (Some(ns), Some(n)) => json!(flat_name(ns, n)),
+                    _ => t["name"].clone(),
+                };
                 json!({
                     "type": "function",
                     "function": {
-                        "name": t["name"],
+                        "name": name,
                         "description": t.get("description").cloned().unwrap_or(Value::Null),
                         "parameters": t.get("parameters")
                             .cloned()
@@ -205,7 +264,10 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
                 Some(v) if v["type"] == "function" => {
                     out.insert(
                         "tool_choice".into(),
-                        json!({ "type": "function", "function": { "name": v["name"] } }),
+                        json!({ "type": "function", "function": { "name": match (v["namespace"].as_str(), v["name"].as_str()) {
+                            (Some(ns), Some(n)) => json!(flat_name(ns, n)),
+                            _ => v["name"].clone(),
+                        } } }),
                     );
                 }
                 _ => {}
@@ -241,7 +303,7 @@ fn usage_of(chat: &Value) -> Value {
 }
 
 /// Chat Completions JSON reply -> Responses object.
-pub fn chat_to_response(chat: &Value, model: &str) -> Value {
+pub fn chat_to_response(chat: &Value, model: &str, ns: &NamespaceMap) -> Value {
     let choice = &chat["choices"][0];
     let msg = &choice["message"];
     let mut output = Vec::new();
@@ -256,12 +318,12 @@ pub fn chat_to_response(chat: &Value, model: &str) -> Value {
     if let Some(calls) = msg["tool_calls"].as_array() {
         for c in calls {
             let id = c["id"].as_str().map(str::to_string).unwrap_or_else(|| new_id("call"));
-            output.push(json!({
+            output.push(with_namespace(json!({
                 "type": "function_call", "id": new_id("fc"), "status": "completed",
                 "call_id": id,
                 "name": c["function"]["name"],
                 "arguments": c["function"]["arguments"].as_str().unwrap_or("{}"),
-            }));
+            }), ns));
         }
     }
 
@@ -305,6 +367,7 @@ pub struct StreamState {
     usage: Value,
     truncated: bool,
     finished: bool,
+    ns: NamespaceMap,
 }
 
 fn sse(ev: &str, data: &Value) -> Bytes {
@@ -312,7 +375,7 @@ fn sse(ev: &str, data: &Value) -> Bytes {
 }
 
 impl StreamState {
-    pub fn new(model: &str) -> Self {
+    pub fn new(model: &str, ns: NamespaceMap) -> Self {
         StreamState {
             seq: 0,
             resp_id: new_id("resp"),
@@ -326,6 +389,7 @@ impl StreamState {
             usage: json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
             truncated: false,
             finished: false,
+            ns,
         }
     }
 
@@ -372,8 +436,8 @@ impl StreamState {
     fn close_call(&mut self, out: &mut Vec<Bytes>, c: OpenItem) {
         self.emit(out, "response.function_call_arguments.done", json!({
             "item_id": c.item_id, "output_index": c.output_index, "arguments": c.buf }));
-        let item = json!({ "type": "function_call", "id": c.item_id, "status": "completed",
-            "call_id": c.call_id, "name": c.name, "arguments": c.buf });
+        let item = with_namespace(json!({ "type": "function_call", "id": c.item_id, "status": "completed",
+            "call_id": c.call_id, "name": c.name, "arguments": c.buf }), &self.ns);
         self.emit(out, "response.output_item.done", json!({ "output_index": c.output_index, "item": item.clone() }));
         self.finished_items.push(item);
     }
@@ -430,8 +494,8 @@ impl StreamState {
                         let name = c["function"]["name"].as_str().unwrap_or("").to_string();
                         self.emit(out, "response.output_item.added", json!({
                             "output_index": idx,
-                            "item": { "type": "function_call", "id": id, "status": "in_progress",
-                                      "call_id": call_id, "name": name, "arguments": "" } }));
+                            "item": with_namespace(json!({ "type": "function_call", "id": id, "status": "in_progress",
+                                      "call_id": call_id, "name": name, "arguments": "" }), &self.ns) }));
                         self.calls.push(OpenItem {
                             output_index: idx, item_id: id, tool_index: Some(ti),
                             call_id, name, buf: String::new(),
@@ -489,7 +553,7 @@ fn feed_block(st: &mut StreamState, block: &str, out: &mut Vec<Bytes>) {
     }
 }
 
-fn translate_stream(upstream: Body, model: String) -> Body {
+fn translate_stream(upstream: Body, model: String, ns: NamespaceMap) -> Body {
     struct Tx {
         up: axum::body::BodyDataStream,
         framer: SseFramer,
@@ -500,7 +564,7 @@ fn translate_stream(upstream: Body, model: String) -> Body {
     let tx = Tx {
         up: upstream.into_data_stream(),
         framer: SseFramer::default(),
-        st: StreamState::new(&model),
+        st: StreamState::new(&model, ns),
         queue: VecDeque::new(),
         done: false,
     };
@@ -544,7 +608,12 @@ fn responses_error(status: StatusCode, msg: &str) -> Response {
 }
 
 /// Translate an OpenAI-wire reply from the proxy flow into Responses form.
-async fn translate_reply(resp: Response, model: &str, wanted_stream: bool) -> Response {
+async fn translate_reply(
+    resp: Response,
+    model: &str,
+    wanted_stream: bool,
+    ns: NamespaceMap,
+) -> Response {
     if !resp.status().is_success() {
         // The chat error envelope is already what Responses clients expect.
         return resp;
@@ -561,7 +630,7 @@ async fn translate_reply(resp: Response, model: &str, wanted_stream: bool) -> Re
     parts.headers.remove(header::CONTENT_LENGTH);
 
     if is_sse {
-        return Response::from_parts(parts, translate_stream(body, model.to_string()));
+        return Response::from_parts(parts, translate_stream(body, model.to_string(), ns));
     }
     let bytes = match crate::proxy::body::buffer_body(body, MAX_REPLY_BYTES).await {
         Ok(b) => b,
@@ -570,11 +639,11 @@ async fn translate_reply(resp: Response, model: &str, wanted_stream: bool) -> Re
     let Ok(chat) = serde_json::from_slice::<Value>(&bytes) else {
         return responses_error(StatusCode::BAD_GATEWAY, "upstream returned non-JSON reply");
     };
-    let r = chat_to_response(&chat, model);
+    let r = chat_to_response(&chat, model, &ns);
     if wanted_stream {
         // Upstream answered a streaming request with plain JSON; replay it
         // as a one-shot event sequence so the client still gets SSE.
-        let mut st = StreamState::new(model);
+        let mut st = StreamState::new(model, ns);
         let mut out = Vec::new();
         let choice = &chat["choices"][0];
         st.feed(&json!({
@@ -613,6 +682,7 @@ pub async fn entry(
         Ok(c) => c,
         Err(m) => return responses_error(StatusCode::BAD_REQUEST, &m),
     };
+    let ns = namespaces_of(&req);
     let model = chat["model"].as_str().unwrap_or_default().to_string();
     let wanted_stream = chat.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
     let resp = crate::proxy::flow::handle_proxy(
@@ -623,7 +693,7 @@ pub async fn entry(
         Bytes::from(chat.to_string()),
     )
     .await;
-    translate_reply(resp, &model, wanted_stream).await
+    translate_reply(resp, &model, wanted_stream, ns).await
 }
 
 #[cfg(test)]
@@ -673,6 +743,34 @@ mod tests {
     }
 
     #[test]
+    fn namespace_tools_are_flattened_and_restored() {
+        let req = json!({
+            "model": "m", "input": [
+                {"type": "function_call", "call_id": "c", "namespace": "agents", "name": "spawn", "arguments": "{}"}],
+            "tools": [{"type": "namespace", "name": "agents", "tools": [
+                {"type": "function", "name": "spawn", "parameters": {"type": "object"}}]}]
+        });
+        let c = request_to_chat(&req).unwrap();
+        assert_eq!(c["tools"][0]["function"]["name"], "agents__spawn");
+        assert_eq!(c["messages"][0]["tool_calls"][0]["function"]["name"], "agents__spawn");
+        let ns = namespaces_of(&req);
+        let chat = json!({"choices": [{"message": {"tool_calls": [
+            {"id": "t", "function": {"name": "agents__spawn", "arguments": "{}"}}]}}]});
+        let r = chat_to_response(&chat, "m", &ns);
+        assert_eq!(r["output"][0]["name"], "spawn");
+        assert_eq!(r["output"][0]["namespace"], "agents");
+        let mut st = StreamState::new("m", ns);
+        let mut out = Vec::new();
+        st.feed(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "t", "function": {"name": "agents__spawn", "arguments": "{}"}}]}}]}), &mut out);
+        st.finish(&mut out);
+        let last = events(&out).pop().unwrap().1;
+        let done = &last["response"]["output"][0];
+        assert_eq!(done["namespace"], "agents");
+        assert_eq!(done["name"], "spawn");
+    }
+
+    #[test]
     fn string_input_and_missing_input() {
         let c = request_to_chat(&json!({"model": "m", "input": "yo"})).unwrap();
         assert_eq!(c["messages"][0], json!({"role": "user", "content": "yo"}));
@@ -689,7 +787,7 @@ mod tests {
                 "content": "hello",
                 "tool_calls": [{"id": "t1", "function": {"name": "sh", "arguments": "{\"x\":1}"}}]}}]
         });
-        let r = chat_to_response(&chat, "m");
+        let r = chat_to_response(&chat, "m", &NamespaceMap::new());
         assert_eq!(r["object"], "response");
         assert_eq!(r["status"], "completed");
         assert_eq!(r["model"], "up");
@@ -702,7 +800,7 @@ mod tests {
     #[test]
     fn truncated_reply_is_incomplete() {
         let chat = json!({"choices": [{"finish_reason": "length", "message": {"content": "x"}}]});
-        assert_eq!(chat_to_response(&chat, "m")["status"], "incomplete");
+        assert_eq!(chat_to_response(&chat, "m", &NamespaceMap::new())["status"], "incomplete");
     }
 
     fn events(out: &[Bytes]) -> Vec<(String, Value)> {
@@ -718,7 +816,7 @@ mod tests {
 
     #[test]
     fn stream_text_then_tool_call_emits_ordered_events() {
-        let mut st = StreamState::new("m");
+        let mut st = StreamState::new("m", NamespaceMap::new());
         let mut out = Vec::new();
         st.feed(&json!({"choices": [{"delta": {"content": "He"}}]}), &mut out);
         st.feed(&json!({"choices": [{"delta": {"content": "llo"}}]}), &mut out);
@@ -749,7 +847,7 @@ mod tests {
 
     #[test]
     fn finish_without_any_chunk_still_completes() {
-        let mut st = StreamState::new("m");
+        let mut st = StreamState::new("m", NamespaceMap::new());
         let mut out = Vec::new();
         st.finish(&mut out);
         let ev = events(&out);

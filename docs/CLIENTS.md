@@ -89,8 +89,9 @@ env_http_headers = { "CF-Access-Client-Id" = "CF_ID", "CF-Access-Client-Secret" 
 ```
 
 - Supported: text and image input, `instructions`, function tools and their
-  outputs, streaming, usage. Reasoning items and non-function tools (web
-  search, freeform/custom tools) are dropped.
+  outputs, namespaced tools (flattened to `<namespace>__<tool>` upstream and
+  restored on the way back), streaming, usage. Reasoning items and
+  non-function tools (`web_search`, freeform/custom tools) are dropped.
 - Any chat pool works, whatever wire format its providers speak.
 - Run `codex exec` with stdin redirected (`< /dev/null`) in scripts.
 - Tested end to end through the Cloudflare hostname with a service token.

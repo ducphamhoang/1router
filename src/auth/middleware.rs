@@ -36,6 +36,20 @@ pub async fn require_bearer(State(state): State<AppState>, mut req: Request, nex
             }),
     };
 
+    // A valid Cloudflare Access token is one more way to be recognised; it
+    // never overrides a 1router credential that already matched.
+    let caller = match caller {
+        Some(c) => Some(c),
+        None => match &state.cf_access {
+            Some(cf) => cf
+                .identity(req.headers())
+                .await
+                .and_then(|id| id.caller_id())
+                .map(Caller::cf),
+            None => None,
+        },
+    };
+
     let caller = match caller {
         Some(c) => c,
         None if !require => Caller::anonymous(),
@@ -81,6 +95,21 @@ pub async fn require_admin_session(
         }
     }
 
+    // Cloudflare Access identity on the admin allowlist. The edge turns the
+    // browser's CF_Authorization cookie into this header, so a cross-site
+    // request still arrives with a valid token: it needs the same CSRF header
+    // as a session cookie.
+    if let Some(cf) = &state.cf_access {
+        if let Some(id) = cf.identity(req.headers()).await {
+            if cf.is_admin(&id) {
+                if !csrf_header_ok(req.method(), req.headers()) {
+                    return missing_csrf_response();
+                }
+                return next.run(req).await;
+            }
+        }
+    }
+
     let bearer = req
         .headers()
         .get("authorization")
@@ -94,7 +123,13 @@ pub async fn require_admin_session(
         let ip = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|ci| ci.0.ip());
+            .map(|ci| {
+                super::cf_access::effective_ip(
+                    state.cf_access.as_deref(),
+                    ci.0.ip(),
+                    req.headers(),
+                )
+            });
         if let Some(ip) = ip {
             if rate_limit::is_locked_out(&state.login_attempts, ip, Instant::now()) {
                 return (
@@ -368,6 +403,7 @@ mod require_admin_session_tests {
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
             pool_rotation: Arc::new(DashMap::new()),
+            cf_access: None,
             media: Default::default(),
         }
     }
@@ -526,5 +562,136 @@ mod require_admin_session_tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod cf_access_tests {
+    use super::*;
+    use crate::auth::cf_access::test_support::*;
+    use axum::body::Body;
+    use axum::extract::Extension;
+    use axum::http::{header, Request, StatusCode};
+    use axum::middleware;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    async fn app(admins: &str, enabled: bool) -> (Router, TestKey) {
+        let mut state = super::require_admin_session_tests::state().await;
+        let (cf, key) = cf_with_key(admins);
+        if enabled {
+            state.cf_access = Some(cf);
+        }
+        let proxy = Router::new()
+            .route(
+                "/v1",
+                get(|Extension(c): Extension<Caller>| async move { c.user_id.unwrap_or_default() }),
+            )
+            .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer));
+        let admin = Router::new()
+            .route("/admin", get(|| async { "ok" }).post(|| async { "ok" }))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_admin_session,
+            ));
+        (proxy.merge(admin).with_state(state), key)
+    }
+
+    fn req(method: Method, uri: &str, token: Option<&str>, extra: &[(&str, &str)]) -> Request<Body> {
+        let mut b = Request::builder().method(method).uri(uri);
+        if let Some(t) = token {
+            b = b.header("cf-access-jwt-assertion", t);
+        }
+        for (k, v) in extra {
+            b = b.header(*k, *v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    async fn status(app: &Router, r: Request<Body>) -> (StatusCode, String) {
+        let res = app.clone().oneshot(r).await.unwrap();
+        let st = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        (st, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn v1_accepts_cf_token_and_records_cf_identity() {
+        let (app, key) = app("", true).await;
+        let t = key.sign(claims(Some("Alice@x.com"), 300), KID, "RS256");
+        let (st, body) = status(&app, req(Method::GET, "/v1", Some(&t), &[])).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body, "cf:alice@x.com");
+    }
+
+    #[tokio::test]
+    async fn v1_rejects_forged_cf_token_but_still_accepts_secret() {
+        let (app, key) = app("", true).await;
+        let mut t = key.sign(claims(Some("a@x.com"), 300), KID, "RS256");
+        t.push('x'); // corrupt signature
+        assert_eq!(status(&app, req(Method::GET, "/v1", Some(&t), &[])).await.0, StatusCode::UNAUTHORIZED);
+        let (st, body) = status(
+            &app,
+            req(Method::GET, "/v1", None, &[(header::AUTHORIZATION.as_str(), "Bearer test-secret")]),
+        )
+        .await;
+        assert_eq!((st, body.as_str()), (StatusCode::OK, "admin"));
+    }
+
+    #[tokio::test]
+    async fn v1_bearer_wins_over_cf_identity() {
+        let (app, key) = app("", true).await;
+        let t = key.sign(claims(Some("a@x.com"), 300), KID, "RS256");
+        let (_, body) = status(
+            &app,
+            req(Method::GET, "/v1", Some(&t), &[(header::AUTHORIZATION.as_str(), "Bearer test-secret")]),
+        )
+        .await;
+        assert_eq!(body, "admin");
+    }
+
+    #[tokio::test]
+    async fn v1_ignores_cf_token_when_feature_off() {
+        let (app, key) = app("", false).await;
+        let t = key.sign(claims(Some("a@x.com"), 300), KID, "RS256");
+        assert_eq!(status(&app, req(Method::GET, "/v1", Some(&t), &[])).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_allows_allowlisted_email_and_enforces_csrf_on_writes() {
+        let (app, key) = app("boss@x.com", true).await;
+        let t = key.sign(claims(Some("boss@x.com"), 300), KID, "RS256");
+        assert_eq!(status(&app, req(Method::GET, "/admin", Some(&t), &[])).await.0, StatusCode::OK);
+        assert_eq!(status(&app, req(Method::POST, "/admin", Some(&t), &[])).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            status(&app, req(Method::POST, "/admin", Some(&t), &[("x-requested-with", "1router-ui")])).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_rejects_other_emails_and_service_tokens() {
+        let (app, key) = app("boss@x.com", true).await;
+        let t = key.sign(claims(Some("other@x.com"), 300), KID, "RS256");
+        assert_eq!(status(&app, req(Method::GET, "/admin", Some(&t), &[])).await.0, StatusCode::UNAUTHORIZED);
+        let mut c = claims(None, 300);
+        c["common_name"] = "svc".into();
+        let t = key.sign(c, KID, "RS256");
+        assert_eq!(status(&app, req(Method::GET, "/admin", Some(&t), &[])).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_local_credentials_still_work_with_cf_enabled() {
+        let (app, _) = app("boss@x.com", true).await;
+        let r = req(Method::GET, "/admin", None, &[(header::AUTHORIZATION.as_str(), "Bearer test-secret")]);
+        assert_eq!(status(&app, r).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_ignores_cf_token_when_feature_off() {
+        let (app, key) = app("boss@x.com", false).await;
+        let t = key.sign(claims(Some("boss@x.com"), 300), KID, "RS256");
+        assert_eq!(status(&app, req(Method::GET, "/admin", Some(&t), &[])).await.0, StatusCode::UNAUTHORIZED);
     }
 }

@@ -57,6 +57,7 @@ async fn spawn_app() -> TestApp {
         login_attempts: Arc::new(dashmap::DashMap::new()),
         discovered_models: Arc::new(dashmap::DashMap::new()),
         pool_rotation: Arc::new(dashmap::DashMap::new()),
+        cf_access: None,
         media: Default::default(),
         db,
     };

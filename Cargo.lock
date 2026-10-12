@@ -1680,6 +1680,7 @@ dependencies = [
  "http-body-util",
  "rand 0.8.7",
  "reqwest",
+ "ring",
  "rust-embed",
  "serde",
  "serde_json",

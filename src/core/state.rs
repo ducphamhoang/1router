@@ -99,6 +99,8 @@ pub struct AppState {
     pub discovered_models: DiscoveredModelsMap,
     pub pool_rotation: PoolRotationMap,
     pub media: Arc<crate::media::MediaState>,
+    /// Cloudflare Access credential support; `None` = feature off.
+    pub cf_access: Option<Arc<crate::auth::cf_access::CfAccess>>,
 }
 
 pub async fn load_snapshot(db: &SqlitePool) -> Result<ConfigSnapshot, AppError> {

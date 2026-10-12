@@ -164,6 +164,19 @@ boot in that case; bind to `127.0.0.1:8080` or set
 not add rate limiting or any other protection against request volume; it only
 removes the client API-key requirement.
 
+### Cloudflare Access (optional)
+
+If 1router sits behind a Cloudflare tunnel with an Access application, it can
+accept Access credentials in addition to its own. Set
+`ROUTER_CF_ACCESS_TEAM_DOMAIN` (e.g. `myteam.cloudflareaccess.com`) and
+`ROUTER_CF_ACCESS_AUD` (the application's AUD tag); add
+`ROUTER_CF_ACCESS_ADMIN_EMAILS=you@example.com` to let those emails into the
+admin UI without the 1router password. Service tokens
+(`CF-Access-Client-Id` / `CF-Access-Client-Secret`) can call `/v1/*` and are
+logged as `cf:<client id>`; they cannot use `/admin/*`. 1router keys, the
+shared secret and the admin password keep working as before. Details:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#cloudflare-access-credentials).
+
 ### Client keys (users)
 
 Give every person or app that calls `/v1/*` its own key: **Users** page in

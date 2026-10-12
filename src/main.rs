@@ -44,6 +44,9 @@ ENVIRONMENT:
     ROUTER_TTFB_TIMEOUT     Upstream time-to-first-byte timeout, seconds
     ROUTER_IDLE_TIMEOUT     Streaming idle timeout, seconds
     ROUTER_DRAIN_TIMEOUT    Graceful shutdown drain, seconds
+    ROUTER_CF_ACCESS_TEAM_DOMAIN  Cloudflare Access team domain (enables CF credentials)
+    ROUTER_CF_ACCESS_AUD          Access application AUD tag (required with the above)
+    ROUTER_CF_ACCESS_ADMIN_EMAILS Comma-separated emails allowed into /admin
 ";
 
 /// Handle `--help`/`--version`/unknown arguments before any startup work
@@ -223,6 +226,15 @@ async fn main() -> Result<()> {
         .await?
         .unwrap_or(false);
 
+    let cf_access = router::auth::cf_access::CfAccess::from_env(http.clone())?;
+    if let Some(cf) = &cf_access {
+        tracing::info!(
+            team = %cf.config().team_domain,
+            admin_emails = cf.config().admin_emails.len(),
+            "Cloudflare Access credentials are accepted alongside 1router credentials"
+        );
+    }
+
     let state = AppState {
         db,
         http,
@@ -240,6 +252,7 @@ async fn main() -> Result<()> {
         discovered_models: Arc::new(dashmap::DashMap::new()),
         pool_rotation: Arc::new(dashmap::DashMap::new()),
         media: Arc::new(router::media::MediaState::new(&cfg, images_enabled)),
+        cf_access,
     };
 
     if let Err(e) = router::admin::auth::session::delete_expired(&state.db).await {

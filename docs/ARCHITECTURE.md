@@ -129,6 +129,47 @@ and the user's key is never forwarded.
   `api_key`s, so treat the file as a secret either way.
 - Design: [`superpowers/specs/2026-08-28-user-credentials-design.md`](superpowers/specs/2026-08-28-user-credentials-design.md).
 
+## Cloudflare Access credentials
+
+1router can accept [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+as an **additional** way to authenticate; every 1router credential (shared
+secret, user keys, admin password/session) keeps working unchanged. It is off
+unless `ROUTER_CF_ACCESS_TEAM_DOMAIN` **and** `ROUTER_CF_ACCESS_AUD` are set
+(setting only one is a startup error).
+
+- Access (at the Cloudflare edge) authenticates the caller and forwards a
+  signed JWT in `Cf-Access-Jwt-Assertion`. `auth::cf_access` verifies it
+  itself — RS256 signature against the team's JWKS
+  (`https://<team>/cdn-cgi/access/certs`, cached, refreshed on an unknown
+  `kid` at most every 30 s), plus `iss`, `aud`, `exp`, `nbf`. The gateway
+  never trusts the header without verifying it.
+- **`/v1/*`** (`require_bearer`): a matched 1router key always wins; only
+  when none matched is the CF JWT tried. The caller is recorded as
+  `cf:<email>` (people) or `cf:<common_name>` (service tokens) in
+  `request_log.user_id` / dataset logs. There is no `users` row, so these ids
+  show in `GET /admin/stats/users` but not on the Users page.
+- **`/admin/*`** (`require_admin_session`): session cookie, then CF, then
+  Bearer secret. CF admits only emails in `ROUTER_CF_ACCESS_ADMIN_EMAILS`;
+  service tokens never reach admin. The CSRF header (`x-requested-with:
+  1router-ui`) is still required on non-GET requests, because the edge turns
+  the browser's `CF_Authorization` cookie into this header.
+- With CF on and a loopback peer (cloudflared), rate limiting keys on
+  `CF-Connecting-IP` instead of `127.0.0.1`.
+- Access only protects traffic that goes through the Cloudflare hostname.
+  Direct access to the listen address (LAN, localhost) is governed by the
+  normal 1router rules, including open access.
+- A request that carries a CF token that fails verification is treated as
+  having no CF credential (so 401 unless open access is on); it never
+  weakens another check.
+- `GET /` serves a static landing page telling visitors to ask the admin for
+  a credential (`src/landing.html`, always on, no auth).
+
+Setup: create a self-hosted Access application for the hostname, copy its
+**AUD tag**, add an *Allow* policy for people and a *Service Auth* policy for
+service tokens, then set the three variables below. Callers use a browser
+login (email) or `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers
+(service token).
+
 ## Image generation
 
 `POST /v1/images/generations` (OpenAI Images shape) is served by **image
@@ -187,6 +228,9 @@ buffered request rather than a stream.
 | `ROUTER_LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address |
 | `ROUTER_SQLITE_PATH` | `1router.db` | SQLite database file |
 | `ROUTER_SHARED_SECRET` | (none) | Admin secret, used as `Authorization: Bearer <secret>` on `/v1/*` and `/admin/*` |
+| `ROUTER_CF_ACCESS_TEAM_DOMAIN` | (none) | Cloudflare Access team domain, e.g. `myteam.cloudflareaccess.com` (or just `myteam`). Enables [CF Access auth](#cloudflare-access-credentials) together with `_AUD` |
+| `ROUTER_CF_ACCESS_AUD` | (none) | The Access application's AUD tag; JWTs for other applications are rejected |
+| `ROUTER_CF_ACCESS_ADMIN_EMAILS` | (none) | Comma-separated emails allowed into `/admin/*` via CF. Empty = CF never grants admin |
 | `ROUTER_SEED_PATH` | (none) | Path to a JSON config file applied on first boot (providers/pools/members) |
 | `ROUTER_MAX_BODY_BYTES` | `10485760` (10 MiB) | Max request body size |
 | `ROUTER_CONNECT_TIMEOUT` | `10` (seconds) | Upstream connect timeout |

@@ -36,6 +36,11 @@ impl Caller {
         }
     }
 
+    /// Authenticated by Cloudflare Access; `id` is `cf:<email|token name>`.
+    pub fn cf(id: String) -> Self {
+        Caller { user_id: Some(id) }
+    }
+
     pub fn anonymous() -> Self {
         Caller::default()
     }

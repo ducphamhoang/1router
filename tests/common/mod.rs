@@ -113,6 +113,7 @@ async fn spawn_app_with(
         login_attempts: std::sync::Arc::new(dashmap::DashMap::new()),
         discovered_models: std::sync::Arc::new(dashmap::DashMap::new()),
         pool_rotation: std::sync::Arc::new(dashmap::DashMap::new()),
+        cf_access: None,
         media: std::sync::Arc::new(router::media::MediaState::new(&cfg, false)),
     };
 

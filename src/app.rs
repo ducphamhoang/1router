@@ -31,6 +31,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let router = Router::new()
         .merge(crate::telemetry::health::routes())
+        .route("/", axum::routing::get(landing))
         .merge(admin)
         .merge(proxy);
 
@@ -40,6 +41,12 @@ pub fn build_router(state: AppState) -> Router {
     router
         .with_state(state)
         .layer(axum::middleware::from_fn(crate::security_headers::security_headers))
+}
+
+/// Public landing page at `/`: tells a visitor this is an API gateway and to
+/// ask the admin for a credential. Static, no secrets, always on.
+async fn landing() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("landing.html"))
 }
 
 #[cfg(test)]
@@ -97,6 +104,7 @@ mod tests {
             login_attempts: Arc::new(dashmap::DashMap::new()),
             discovered_models: Arc::new(dashmap::DashMap::new()),
             pool_rotation: Arc::new(dashmap::DashMap::new()),
+            cf_access: None,
             media: Default::default(),
             db,
         }
@@ -131,6 +139,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn landing_page_is_public_html() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers()[header::CONTENT_TYPE].to_str().unwrap().to_string();
+        assert!(ct.starts_with("text/html"), "{ct}");
     }
 
     #[tokio::test]

@@ -34,7 +34,7 @@ async fn login(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Response {
-    let ip = addr.ip();
+    let ip = crate::auth::cf_access::effective_ip(state.cf_access.as_deref(), addr.ip(), &headers);
     let now = Instant::now();
 
     let Some(_attempt) = rate_limit::try_begin_attempt(&state.login_attempts, ip, now) else {
@@ -205,6 +205,7 @@ mod tests {
             login_attempts: Arc::new(DashMap::new()),
             discovered_models: Arc::new(DashMap::new()),
             pool_rotation: Arc::new(DashMap::new()),
+            cf_access: None,
             media: Default::default(),
         }
     }

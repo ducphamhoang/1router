@@ -64,6 +64,12 @@ new work should branch directly off `master`. See:
   1router — never changes upstream credentials. Design:
   `docs/superpowers/specs/2026-08-28-user-credentials-design.md`, overview:
   `docs/ARCHITECTURE.md#users-per-caller-credentials`
+- Cloudflare Access credentials — optional extra auth for `/v1/*` and
+  `/admin/*` (`src/auth/cf_access.rs`, wired in `auth::middleware`), enabled by
+  `ROUTER_CF_ACCESS_TEAM_DOMAIN` + `ROUTER_CF_ACCESS_AUD`; callers logged as
+  `cf:<email|client id>` with no `users` row; `GET /` is a static landing page
+  (`src/landing.html`). Overview: `docs/ARCHITECTURE.md#cloudflare-access-credentials`.
+  `tests/fixtures/cf_test_rsa.der` is a throwaway test signing key — not a secret.
 - Image generation (branch `feature/image-generation`) — `POST
   /v1/images/generations` (+ `/v1/images/edits` for reference images) via Codex (ChatGPT OAuth) providers in image pools
   (`pools.modality`, migration `0009`), code in `src/media/`, off by default

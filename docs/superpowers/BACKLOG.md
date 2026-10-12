@@ -338,3 +338,27 @@ by the operator. It also covers `*.bak` and `dataset-logs/`.
 no inherited ACEs and grant only the running account. The gateway still
 restarts cleanly, including when it runs under a different account than the
 env vars name.
+
+---
+
+## BL-09: Expose per-caller activity to the hub portal (`activity:` endpoint)
+
+**Status:** idea, deferred (decision 2026-10-12), no code yet.
+
+**What:** the hub portal (`D:\Work\hub`, `services.yaml` entry `1router`)
+shows a "Usage theo người" table for every service that declares an
+`activity:` URL. 1router has none, so its usage (including the new
+`cf:<email|client id>` callers) is invisible there. The only per-caller
+aggregate today is `GET /admin/stats/users`, which needs admin
+credentials.
+
+**Suggested shape:** a read-only summary endpoint the hub can reach without
+admin auth (e.g. loopback-only), returning the same JSON the hub reads from
+sensor-tower's `/api/v1/meta/activity/summary?days=7`: per caller
+`caller_name`, `caller_kind`, `requests`, `errors`, `last_seen`. Read the
+hub's `status.py` for the exact contract before building. Map `admin`,
+user ids and `cf:*` to a `caller_kind`; service-token names can come from
+the hub's `cloudflare/service-tokens.json` as sensor-tower does.
+
+**Why it matters:** with Cloudflare Access on, most callers are `cf:*` ids
+that have no `users` row, so the Users page doesn't show them either.

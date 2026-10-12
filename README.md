@@ -190,6 +190,53 @@ from the provider's fetched model list). Revoke or rotate a key from the
 same page. Calls to upstream providers still use the provider's own
 credentials, whatever key the client presented.
 
+### Calling 1router from a client or AI agent
+
+Base URL is `https://1router.hbstudio.space` (or `http://<host>:8080` on the
+local network). The API is OpenAI-compatible (`/v1/chat/completions`,
+`/v1/models`, `/v1/images/generations`) and Anthropic-compatible
+(`/v1/messages`). Use a **pool id** (`GET /v1/models`) as `model`; chat pools
+and image pools are separate, so a chat call to an image pool fails with
+"unknown model or pool".
+
+Pick the credential you were given:
+
+1. **1router key** (`1r_...`, from the admin's Users page): send
+   `Authorization: Bearer 1r_...` (OpenAI-style) or `x-api-key: 1r_...`
+   (Anthropic-style).
+2. **Cloudflare Access service token** (a Client ID ending in `.access` plus
+   a secret): send both headers on every request, in addition to a normal
+   body:
+   `CF-Access-Client-Id: <id>` and `CF-Access-Client-Secret: <secret>`.
+   Requests are logged as `cf:<client id>`. Behind the Cloudflare hostname
+   the tunnel will reject a request that lacks them (302 to a login page),
+   so a client that only sends an API key can't get through there unless
+   it also sends these headers.
+3. **A person in a browser** signs in through Cloudflare Access with their
+   email; this is for the admin UI, not for programs.
+
+```
+curl https://1router.hbstudio.space/v1/chat/completions   -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET"   -H 'Content-Type: application/json'   -d '{"model":"vision","messages":[{"role":"user","content":"hi"}]}'
+```
+
+OpenAI Python SDK (any client that lets you set a base URL and extra headers
+works the same way):
+
+```python
+from openai import OpenAI
+client = OpenAI(
+    base_url="https://1router.hbstudio.space/v1",
+    api_key="unused-or-1r_key",          # required by the SDK; 1router ignores it when CF headers are valid
+    default_headers={"CF-Access-Client-Id": CF_ID, "CF-Access-Client-Secret": CF_SECRET},
+)
+print(client.chat.completions.create(model="vision", messages=[{"role": "user", "content": "hi"}]))
+```
+
+Anthropic SDK / Claude-style agents: `Anthropic(base_url="https://1router.hbstudio.space", auth_token=..., default_headers={...})`
+and `model="command-code"` (a pool with the Anthropic wire format). Treat the
+service-token secret like a password: keep it in an environment variable or
+secret store, never in a repo, and ask the admin to revoke it if it leaks.
+
 ## Try it
 
 ```

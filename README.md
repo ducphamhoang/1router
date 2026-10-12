@@ -237,6 +237,32 @@ and `model="command-code"` (a pool with the Anthropic wire format). Treat the
 service-token secret like a password: keep it in an environment variable or
 secret store, never in a repo, and ask the admin to revoke it if it leaks.
 
+#### Claude Code
+
+Claude Code only takes a base URL and a token, so pass the Cloudflare Access
+service-token headers through `ANTHROPIC_CUSTOM_HEADERS` (one `Name: Value`
+per line):
+
+```
+export ANTHROPIC_BASE_URL=https://1router.hbstudio.space
+export ANTHROPIC_AUTH_TOKEN=unused          # or your 1r_ key; any value works when the CF headers are valid
+export ANTHROPIC_CUSTOM_HEADERS=$'CF-Access-Client-Id: <id>.access
+CF-Access-Client-Secret: <secret>'
+claude --model <chat-pool-id>               # e.g. command-code
+```
+
+- `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer ...`;
+  `ANTHROPIC_API_KEY` as `x-api-key`. 1router reads both. A real `1r_` key,
+  if you set one, wins over the Cloudflare identity.
+- Setting either one (or `ANTHROPIC_BASE_URL` with its own credential)
+  replaces the claude.ai login for that session, so the claude.ai
+  **connectors** (the account-level MCP servers such as Gmail or Drive) are
+  disabled in it. MCP servers you configured yourself are unaffected. Use a
+  separate terminal or profile for 1router sessions.
+- Claude Code prints `unrecognized_model` for a pool id it doesn't know.
+  It is only a warning; the request still goes through.
+- Tested end to end: the request is logged as `cf:<client id>`.
+
 ## Try it
 
 ```

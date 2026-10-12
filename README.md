@@ -194,8 +194,8 @@ credentials, whatever key the client presented.
 
 Base URL is `https://1router.hbstudio.space` (or `http://<host>:8080` on the
 local network). The API is OpenAI-compatible (`/v1/chat/completions`,
-`/v1/models`, `/v1/images/generations`) and Anthropic-compatible
-(`/v1/messages`). Use a **pool id** (`GET /v1/models`) as `model`; chat pools
+`/v1/responses`, `/v1/models`, `/v1/images/generations`) and
+Anthropic-compatible (`/v1/messages`). Use a **pool id** (`GET /v1/models`) as `model`; chat pools
 and image pools are separate, so a chat call to an image pool fails with
 "unknown model or pool".
 
@@ -262,6 +262,30 @@ claude --model <chat-pool-id>               # e.g. command-code
 - Claude Code prints `unrecognized_model` for a pool id it doesn't know.
   It is only a warning; the request still goes through.
 - Tested end to end: the request is logged as `cf:<client id>`.
+
+#### Codex CLI
+
+Codex CLI only speaks the Responses API, which 1router serves at
+`POST /v1/responses`. In `~/.codex/config.toml` (or a separate `CODEX_HOME`):
+
+```toml
+model = "<chat-pool-id>"
+model_provider = "r1"
+
+[model_providers.r1]
+name = "1router"
+base_url = "https://1router.hbstudio.space/v1"
+wire_api = "responses"
+env_key = "R1_KEY"                      # any value if open access is on
+env_http_headers = { "CF-Access-Client-Id" = "CF_ID", "CF-Access-Client-Secret" = "CF_SECRET" }
+```
+
+- Supported: text and image input, `instructions`, function tools and their
+  outputs, streaming, usage. Reasoning items and non-function tools (web
+  search, freeform/custom tools) are dropped.
+- The pool must accept the OpenAI route (`any` or `openai`); an
+  Anthropic-only pool answers "unknown model or pool".
+- Run `codex exec` with stdin redirected (`< /dev/null`) in scripts.
 
 ## Try it
 

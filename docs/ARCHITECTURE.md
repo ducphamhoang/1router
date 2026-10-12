@@ -9,7 +9,9 @@ want to run it, the README is enough.
 ## Wire formats
 
 Two client-facing routes: `POST /v1/chat/completions` (OpenAI Chat
-Completions shape) and `POST /v1/messages` (Anthropic Messages shape, what
+Completions shape), `POST /v1/responses` (OpenAI Responses shape, for Codex
+CLI; translated to a chat request in `proxy/responses.rs` and back, so pools
+and failover are unchanged) and `POST /v1/messages` (Anthropic Messages shape, what
 Claude Code speaks). Every provider kind can serve either route: a
 provider's own `wire_format` describes what its *upstream* speaks, not what
 clients are limited to. If a client's request shape doesn't match the

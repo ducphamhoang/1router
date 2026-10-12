@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1/responses", post(responses))
         .route("/v1/models", get(models))
 }
 
@@ -43,6 +44,14 @@ async fn messages(
     body: Body,
 ) -> Response {
     proxy_entry(s, WireFormat::Anthropic, caller_of(caller), body).await
+}
+
+async fn responses(
+    State(s): State<AppState>,
+    caller: Option<Extension<Caller>>,
+    body: Body,
+) -> Response {
+    crate::proxy::responses::entry(s, caller_of(caller), body).await
 }
 
 fn caller_of(caller: Option<Extension<Caller>>) -> Caller {

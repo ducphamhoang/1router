@@ -51,6 +51,14 @@ fn log(
     });
 }
 
+/// A client-caused upstream rejection (e.g. 400 invalid_request_error): the
+/// body is relayed to the client but would otherwise leave no server-side
+/// trace of why the upstream refused.
+fn log_rejection(provider_id: &str, model: &str, status: StatusCode, body: &str) {
+    let snippet: String = body.chars().take(600).collect();
+    tracing::warn!(provider = %provider_id, model = %model, status = status.as_u16(), body = %snippet, "upstream rejected request");
+}
+
 /// The dataset-logging tap. When `enabled` is `false` (the common case),
 /// this is a no-op: `resp` is returned untouched, no accumulator is
 /// allocated, no body clone happens. When `enabled`, wraps `resp`'s body
@@ -343,6 +351,7 @@ async fn handle_proxy_inner(
                 // Client-caused rejection: no runtime-state change (SEC-01).
                 let content_type = headers.get(axum::http::header::CONTENT_TYPE).cloned();
                 let text = crate::core::http_client::read_text_truncated(upstream, crate::core::http_client::MAX_ERROR_BODY).await;
+                log_rejection(&provider.id, effective_model, status, &text);
                 log(
                     &state,
                     &caller,
@@ -488,6 +497,7 @@ async fn handle_proxy_inner(
                             ErrorClass::NonRetryable => {
                                 // Client-caused rejection: no runtime-state change (SEC-01).
                                 let text = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
+                                log_rejection(&provider.id, effective_model, retry_status, &text);
                                 log(
                                     &state,
                                     &caller,
@@ -682,6 +692,7 @@ async fn handle_proxy_inner(
                         ErrorClass::NonRetryable => {
                             // Client-caused rejection: no runtime-state change (SEC-01).
                             last_error_body = crate::core::http_client::read_text_truncated(resp2, crate::core::http_client::MAX_ERROR_BODY).await;
+                            log_rejection(&provider.id, effective_model, retry_status, &last_error_body);
                             log(
                                 &state,
                                 &caller,

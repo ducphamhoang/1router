@@ -95,3 +95,18 @@ env_http_headers = { "CF-Access-Client-Id" = "CF_ID", "CF-Access-Client-Secret" 
 - Any chat pool works, whatever wire format its providers speak.
 - Run `codex exec` with stdin redirected (`< /dev/null`) in scripts.
 - Tested end to end through the Cloudflare hostname with a service token.
+
+## Reasoning effort
+
+A client's own effort choice is forwarded to the provider and beats the
+provider's configured `default_reasoning_effort`:
+
+- Codex CLI: `model_reasoning_effort = "high"` in `config.toml` (sent as
+  `reasoning.effort`).
+- Claude Code: its effort setting (`output_config.effort`, `max` maps to
+  `xhigh`) or a thinking budget (`MAX_THINKING_TOKENS`; up to 4096 tokens is
+  `low`, up to 16384 `medium`, above that `high`).
+- Chat Completions: `reasoning_effort` in the body.
+
+With none of these, the provider default applies (Codex providers fall back
+to `medium`). Models that take no reasoning parameter ignore the setting.

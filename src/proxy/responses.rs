@@ -286,6 +286,9 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
             out.insert(k.into(), v.clone());
         }
     }
+    if let Some(e) = crate::core::reasoning::effort_from_responses(req) {
+        out.insert("reasoning_effort".into(), json!(e));
+    }
     Ok(Value::Object(out))
 }
 
@@ -740,6 +743,14 @@ mod tests {
         assert_eq!(m[3]["tool_calls"][1]["id"], "c2");
         assert_eq!(m[4], json!({"role": "tool", "tool_call_id": "c1", "content": "done"}));
         assert_eq!(m.len(), 5);
+    }
+
+    #[test]
+    fn reasoning_effort_is_forwarded_as_chat_reasoning_effort() {
+        let req = json!({"model": "m", "input": "hi", "reasoning": {"effort": "high", "summary": "auto"}});
+        assert_eq!(request_to_chat(&req).unwrap()["reasoning_effort"], "high");
+        let req = json!({"model": "m", "input": "hi"});
+        assert!(request_to_chat(&req).unwrap().get("reasoning_effort").is_none());
     }
 
     #[test]

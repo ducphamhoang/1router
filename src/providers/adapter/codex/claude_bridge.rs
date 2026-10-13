@@ -81,6 +81,9 @@ pub fn claude_to_openai_request(body: &Value) -> Value {
     if let Some(tool_choice) = body.get("tool_choice") {
         out["tool_choice"] = convert_tool_choice(tool_choice);
     }
+    if let Some(e) = crate::core::reasoning::effort_from_anthropic(body) {
+        out["reasoning_effort"] = json!(e);
+    }
 
     out
 }

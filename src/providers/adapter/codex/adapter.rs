@@ -304,11 +304,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_lets_an_anthropic_clients_thinking_block_the_configured_default() {
-        // An Anthropic-wire client that asked for `thinking` made its own
-        // choice; `claude_to_openai_request` has no equivalent to carry it
-        // into the Responses API, so the conservative outcome is the
-        // historical "medium" rather than silently applying our default.
+    async fn build_request_maps_an_anthropic_clients_thinking_budget_to_effort() {
+        // An Anthropic-wire client's `thinking` budget is its own choice: it
+        // is bucketed into a reasoning effort and beats the configured default.
         use crate::core::model::EffortLevel;
         let mut p = prov();
         p.default_reasoning_effort = Some(EffortLevel::High);
@@ -324,7 +322,7 @@ mod tests {
         let req = a.build_request(&body, &creds()).await.unwrap();
         let sent: serde_json::Value =
             serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
-        assert_eq!(sent["reasoning"]["effort"], "medium");
+        assert_eq!(sent["reasoning"]["effort"], "low");
     }
 
     #[tokio::test]

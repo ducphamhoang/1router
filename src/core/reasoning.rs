@@ -152,6 +152,47 @@ pub fn client_specified_effort(client_json: &serde_json::Value) -> bool {
         .is_null()
 }
 
+/// The client's reasoning effort from a Responses API body
+/// (`reasoning.effort`, what Codex CLI sends), as a chat `reasoning_effort`
+/// value. Passed through verbatim: the client's own level wins, including
+/// ones wider than our three-level menu (`minimal`, `xhigh`).
+pub fn effort_from_responses(req: &serde_json::Value) -> Option<String> {
+    req.get("reasoning")?
+        .get("effort")?
+        .as_str()
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+}
+
+/// The client's reasoning effort from an Anthropic Messages body, as a chat
+/// `reasoning_effort` value. Claude Code sends either `output_config.effort`
+/// (`low|medium|high|xhigh|max`; `max` is spelled `xhigh` in OpenAI terms) or
+/// `thinking: {"type":"enabled","budget_tokens":N}`, which is bucketed like
+/// the inverse of `ReasoningCapability::anthropic_budget_tokens`. An adaptive
+/// or disabled `thinking` carries no level, so it maps to nothing.
+pub fn effort_from_anthropic(body: &serde_json::Value) -> Option<String> {
+    if let Some(e) = body
+        .get("output_config")
+        .and_then(|o| o.get("effort"))
+        .and_then(|e| e.as_str())
+    {
+        return Some(if e == "max" { "xhigh" } else { e }.to_string());
+    }
+    let t = body.get("thinking")?;
+    if t.get("type").and_then(|v| v.as_str()) != Some("enabled") {
+        return None;
+    }
+    let budget = t.get("budget_tokens").and_then(|b| b.as_i64())?;
+    Some(
+        match budget {
+            ..=4096 => "low",
+            4097..=16384 => "medium",
+            _ => "high",
+        }
+        .to_string(),
+    )
+}
+
 /// Set OpenAI's top-level `reasoning_effort` on an outgoing Chat
 /// Completions body. (The Responses API's nested `reasoning.effort` shape
 /// is handled by `codex::transform` instead.)
@@ -545,5 +586,30 @@ mod tests {
                 EffortLevel::Low
             ))
         );
+    }
+
+    #[test]
+    fn effort_is_read_from_responses_and_anthropic_bodies() {
+        use super::{effort_from_anthropic, effort_from_responses};
+        use serde_json::json;
+        assert_eq!(
+            effort_from_responses(&json!({"reasoning": {"effort": "xhigh"}})).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(effort_from_responses(&json!({"reasoning": {}})), None);
+        assert_eq!(
+            effort_from_anthropic(&json!({"output_config": {"effort": "max"}})).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            effort_from_anthropic(&json!({"output_config": {"effort": "low"}})).as_deref(),
+            Some("low")
+        );
+        let t = |n| json!({"thinking": {"type": "enabled", "budget_tokens": n}});
+        assert_eq!(effort_from_anthropic(&t(1024)).as_deref(), Some("low"));
+        assert_eq!(effort_from_anthropic(&t(8192)).as_deref(), Some("medium"));
+        assert_eq!(effort_from_anthropic(&t(31999)).as_deref(), Some("high"));
+        assert_eq!(effort_from_anthropic(&json!({"thinking": {"type": "adaptive"}})), None);
+        assert_eq!(effort_from_anthropic(&json!({})), None);
     }
 }

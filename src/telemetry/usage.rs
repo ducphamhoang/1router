@@ -539,7 +539,7 @@ mod tests {
         rec("cf:dev@x.com", "gpt-5.6-sol", 1_000_000, 0, 0).await;
         rec("cf:dev@x.com", "mystery", 10, 10, 0).await;
         sqlx::query("INSERT INTO usage_people VALUES ('cf:abc.access', 'dev@x.com')").execute(&db).await.unwrap();
-        sqlx::query("INSERT INTO model_prices VALUES ('gpt-5', 100.0, 100.0, NULL), ('gpt-5.6', 2.0, 10.0, 0.5)")
+        sqlx::query("INSERT OR REPLACE INTO model_prices VALUES ('gpt-5', 100.0, 100.0, NULL), ('gpt-5.6-sol', 2.0, 10.0, 0.5)")
             .execute(&db).await.unwrap();
 
         let r = build_report(&db, None, None, None).await.unwrap();

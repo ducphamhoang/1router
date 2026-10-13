@@ -6,6 +6,7 @@ use crate::core::state::AppState;
 pub fn build_router(state: AppState) -> Router {
     let admin_authenticated = Router::new()
         .merge(crate::telemetry::stats::routes())
+        .merge(crate::telemetry::usage::routes())
         .merge(crate::providers::routes())
         .merge(crate::providers::oauth_routes::routes())
         .merge(crate::pools::routes::routes())

@@ -75,6 +75,26 @@ fn maybe_log_dataset(
     total_start: Instant,
     ttfb_ms: Option<i64>,
 ) -> Response {
+    // Token accounting: always on, independent of dataset logging.
+    let resp = {
+        let db = state.db.clone();
+        let (uid, pid, prov, mdl) = (
+            caller.user_id.clone(),
+            pool_id.clone(),
+            provider_id.clone(),
+            model.clone(),
+        );
+        let (parts, b) = resp.into_parts();
+        let b = crate::telemetry::usage::tap(b, move |u| {
+            if u.is_empty() {
+                return;
+            }
+            tokio::spawn(async move {
+                crate::telemetry::usage::record(&db, uid.as_deref(), pid.as_deref(), &prov, &mdl, u).await;
+            });
+        });
+        Response::from_parts(parts, b)
+    };
     if !enabled {
         return resp;
     }

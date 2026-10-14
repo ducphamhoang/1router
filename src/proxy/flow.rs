@@ -14,7 +14,7 @@ use crate::pools::select::{
 use crate::providers::adapter::commandcode::{
     current_transport, is_upgrade_required, remember_transport, Transport,
 };
-use crate::providers::adapter::{adapter_for_wire, Credentials};
+use crate::providers::adapter::{adapter_for_caller, Credentials};
 use crate::providers::queries::{get_oauth_state, is_ready};
 use crate::providers::refresh_lock::refresh_and_persist_detached;
 use crate::proxy::backoff;
@@ -252,7 +252,7 @@ async fn handle_proxy_inner(
         };
 
         let adapter: std::sync::Arc<dyn crate::providers::adapter::ProviderAdapter> =
-            adapter_for_wire(provider, state.http.clone(), wire).into();
+            adapter_for_caller(provider, state.http.clone(), wire, caller.user_id.as_deref()).into();
 
         let req = match adapter.build_request(&body, &creds).await {
             Ok(r) => r,

@@ -20,11 +20,56 @@ pub struct CodexAdapter {
     provider: Provider,
     http: reqwest::Client,
     client_wire: WireFormat,
+    /// Caller id, folded into `prompt_cache_key` so two credentials never
+    /// share a cache scope. Empty when unknown.
+    cache_scope: String,
+}
+
+/// A short stable id for the conversation a Chat-shaped body belongs to: the
+/// client's own `prompt_cache_key` if it sent one (Codex CLI sends a per-
+/// session id), else a hash of the leading system/developer message and the
+/// first user message, which stay identical for every turn of a conversation
+/// (and differ between conversations and between a subagent and its parent).
+fn conversation_key(body: &serde_json::Value, scope: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(scope.as_bytes());
+    h.update(b"|");
+    if let Some(k) = body.get("prompt_cache_key").and_then(|k| k.as_str()).filter(|k| !k.is_empty()) {
+        h.update(k.as_bytes());
+    } else {
+        let first = |roles: &[&str]| {
+            body.get("messages")?
+                .as_array()?
+                .iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()).is_some_and(|r| roles.contains(&r)))
+                .and_then(|m| m.get("content"))
+        };
+        match first(&["user"]) {
+            Some(user) => {
+                if let Some(sys) = first(&["system", "developer"]) {
+                    h.update(sys.to_string().as_bytes());
+                }
+                h.update(b"|");
+                h.update(user.to_string().as_bytes());
+            }
+            // No conversation to tell apart: still keep callers apart.
+            None if scope.is_empty() => return None,
+            None => {}
+        }
+    }
+    Some(h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect())
 }
 
 impl CodexAdapter {
     pub fn new(provider: Provider, http: reqwest::Client, client_wire: WireFormat) -> Self {
-        Self { provider, http, client_wire }
+        Self { provider, http, client_wire, cache_scope: String::new() }
+    }
+
+    /// Keep this caller's prompt cache apart from every other caller's.
+    pub fn with_cache_scope(mut self, scope: impl Into<String>) -> Self {
+        self.cache_scope = scope.into();
+        self
     }
 }
 
@@ -60,10 +105,17 @@ impl ProviderAdapter for CodexAdapter {
             WireFormat::OpenAi => "openai",
             WireFormat::Anthropic => "anthropic",
         };
-        let session_id = format!(
+        let base_key = format!(
             "1router-{}-{}-{}",
             self.provider.id, self.provider.upstream_model, wire_tag
         );
+        // ...and per conversation within that scope. One key for everything
+        // made parallel conversations/subagents evict each other's prefix
+        // cache (hit rate fell to ~55% on 120k-token agent turns).
+        let session_id = match conversation_key(&client_json, &self.cache_scope) {
+            Some(c) => format!("{base_key}-{c}"),
+            None => base_key,
+        };
         // Resolve the configured reasoning-effort default (already folded
         // into this per-request `Provider` clone by `proxy::flow`) against
         // the client's ORIGINAL body - `claude_to_openai_request` above can
@@ -198,6 +250,27 @@ impl ProviderAdapter for CodexAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::conversation_key;
+
+    #[test]
+    fn conversation_key_separates_conversations_and_is_stable_across_turns() {
+        use serde_json::json;
+        let sys = json!({"role":"system","content":"S"});
+        let a1 = json!({"messages":[sys.clone(), {"role":"user","content":"task A"}]});
+        let a2 = json!({"messages":[sys.clone(), {"role":"user","content":"task A"},
+            {"role":"assistant","content":"ok"}, {"role":"user","content":"more"}]});
+        let b = json!({"messages":[sys, {"role":"user","content":"task B"}]});
+        assert_eq!(conversation_key(&a1, "u"), conversation_key(&a2, "u"));
+        assert_ne!(conversation_key(&a1, "u"), conversation_key(&b, "u"));
+        // The client's own key wins over the content hash.
+        let k = json!({"prompt_cache_key":"sess-1","messages":[{"role":"user","content":"x"}]});
+        let k2 = json!({"prompt_cache_key":"sess-1","messages":[{"role":"user","content":"y"}]});
+        assert_eq!(conversation_key(&k, "u"), conversation_key(&k2, "u"));
+        assert_eq!(conversation_key(&json!({"messages":[]}), ""), None);
+        // Same conversation text from two different callers never shares a key.
+        assert_ne!(conversation_key(&a1, "alice"), conversation_key(&a1, "bob"));
+    }
+
     use super::*;
     use crate::core::model::{Provider, ProviderKind, WireFormat};
     use crate::providers::adapter::{Credentials, ProviderAdapter};

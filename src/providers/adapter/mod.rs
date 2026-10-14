@@ -64,6 +64,23 @@ pub fn adapter_for(provider: &Provider, http: reqwest::Client) -> Box<dyn Provid
     adapter_for_wire(provider, http, provider.wire_format)
 }
 
+/// Like `adapter_for_wire`, for a proxied request: `caller` (the credential's
+/// id) scopes the Codex prompt cache so callers never share one.
+pub fn adapter_for_caller(
+    provider: &Provider,
+    http: reqwest::Client,
+    client_wire: WireFormat,
+    caller: Option<&str>,
+) -> Box<dyn ProviderAdapter> {
+    match provider.kind {
+        ProviderKind::OauthCodex => Box::new(
+            codex::CodexAdapter::new(provider.clone(), http, client_wire)
+                .with_cache_scope(caller.unwrap_or_default()),
+        ),
+        _ => adapter_for_wire(provider, http, client_wire),
+    }
+}
+
 pub fn adapter_for_wire(
     provider: &Provider,
     http: reqwest::Client,

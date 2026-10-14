@@ -286,6 +286,9 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
             out.insert(k.into(), v.clone());
         }
     }
+    if let Some(k) = req.get("prompt_cache_key").filter(|k| k.is_string()) {
+        out.insert("prompt_cache_key".into(), k.clone());
+    }
     if let Some(e) = crate::core::reasoning::effort_from_responses(req) {
         out.insert("reasoning_effort".into(), json!(e));
     }

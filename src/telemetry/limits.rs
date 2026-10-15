@@ -31,7 +31,7 @@ use dashmap::DashMap;
 use serde_json::{json, Value};
 
 use crate::core::model::Modality;
-use crate::core::runtime::{runtime_key, worst_provider_state, ProviderRuntimeState, RuntimeStateMap};
+use crate::core::runtime::{runtime_key, runtime_key_prefix, ProviderRuntimeState, RuntimeStateMap};
 use crate::core::state::AppState;
 
 /// Most limit headers kept per provider, and the longest value kept - a
@@ -96,23 +96,48 @@ pub fn snapshot(provider_id: &str) -> Option<LimitSnapshot> {
     store().get(provider_id).map(|r| r.value().clone())
 }
 
-/// One provider's entry: its worst runtime state across models + last seen
-/// limit headers.
+/// The state to show for a provider: the worst entry that is still
+/// unavailable at `now`. An entry whose cooldown has passed is not a
+/// problem any more, so it must not mask a model that is still cooling.
+fn worst_unavailable_state(
+    runtime: &RuntimeStateMap,
+    provider_id: &str,
+    now: Instant,
+) -> Option<ProviderRuntimeState> {
+    let prefix = runtime_key_prefix(provider_id);
+    runtime
+        .iter()
+        .filter(|e| e.key().starts_with(&prefix))
+        .map(|e| e.value().clone())
+        .filter(|st| !st.is_available(now))
+        .max_by_key(|st| (st.status as u8, st.backoff_level))
+}
+
+/// One provider's entry: its worst current runtime state + last seen limit
+/// headers.
 pub fn provider_report(runtime: &RuntimeStateMap, provider_id: &str, now: Instant) -> Value {
-    report(worst_provider_state(runtime, provider_id), provider_id, now)
+    let mut v = state_fields(worst_unavailable_state(runtime, provider_id, now), now);
+    let snap = snapshot(provider_id);
+    v["rate_limits"] = snap.as_ref().map(|s| json!(s.values)).unwrap_or(Value::Null);
+    v["observed_at"] = json!(snap.as_ref().map(|s| s.observed_at.to_rfc3339()));
+    v
 }
 
 /// One pool member's entry: the runtime state of exactly the
 /// `(provider, effective model)` pair failover uses for it, so a sibling
 /// model cooling down on the same credential doesn't show here.
+///
+/// Deliberately carries no `rate_limits` / `observed_at`: those are
+/// identical to the provider's own entry, so a caller could match a numbered
+/// member to a named provider and learn the pool topology (SEC-11).
 pub fn member_report(runtime: &RuntimeStateMap, provider_id: &str, effective_model: &str, now: Instant) -> Value {
     let state = runtime.get(&runtime_key(provider_id, effective_model)).map(|r| r.value().clone());
-    report(state, provider_id, now)
+    state_fields(state, now)
 }
 
 /// A state whose cooldown has passed is reported as healthy: the next
 /// request goes through, and `status` only resets on a success.
-fn report(state: Option<ProviderRuntimeState>, provider_id: &str, now: Instant) -> Value {
+fn state_fields(state: Option<ProviderRuntimeState>, now: Instant) -> Value {
     let (available, status, retry_in_seconds) = match state {
         Some(st) if !st.is_available(now) => {
             let retry = st
@@ -123,13 +148,10 @@ fn report(state: Option<ProviderRuntimeState>, provider_id: &str, now: Instant) 
         }
         _ => (true, json!("healthy"), None),
     };
-    let snap = snapshot(provider_id);
     json!({
         "available": available,
         "status": status,
         "retry_in_seconds": retry_in_seconds,
-        "rate_limits": snap.as_ref().map(|s| json!(s.values)).unwrap_or(Value::Null),
-        "observed_at": snap.as_ref().map(|s| s.observed_at.to_rfc3339()),
     })
 }
 
@@ -287,5 +309,34 @@ mod tests {
         assert_eq!(v["status"], json!("healthy"));
         assert!(v["retry_in_seconds"].is_null());
         assert!(v["rate_limits"].is_null());
+    }
+
+    #[test]
+    fn expired_entry_does_not_mask_a_model_that_is_still_cooling() {
+        let runtime: RuntimeStateMap = Arc::new(DashMap::new());
+        let id = "limits-test-mask";
+        let now = Instant::now();
+        let mut old = ProviderRuntimeState::default();
+        old.record_retryable(Duration::from_secs(10), now);
+        old.backoff_level = 5; // would outrank the live entry if expiry were ignored
+        runtime.insert(runtime_key(id, "model-a"), old);
+        let mut live = ProviderRuntimeState::default();
+        live.record_retryable(Duration::from_secs(300), now);
+        runtime.insert(runtime_key(id, "model-b"), live);
+
+        let v = provider_report(&runtime, id, now + Duration::from_secs(60));
+        assert_eq!(v["available"], json!(false));
+        assert_eq!(v["retry_in_seconds"], json!(240));
+    }
+
+    #[test]
+    fn member_report_never_carries_limits_or_timestamps() {
+        let runtime: RuntimeStateMap = Arc::new(DashMap::new());
+        let id = "limits-test-no-leak";
+        capture(id, &headers(&[("x-codex-credits-balance", "12")]));
+        let m = member_report(&runtime, id, "m", Instant::now());
+        assert!(m.get("rate_limits").is_none());
+        assert!(m.get("observed_at").is_none());
+        assert!(provider_report(&runtime, id, Instant::now())["rate_limits"].is_object());
     }
 }

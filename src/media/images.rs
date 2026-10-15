@@ -369,7 +369,7 @@ enum Attempt {
     TimedOut,
 }
 
-async fn attempt(media: &MediaState, creds: &Credentials, body: &Value) -> Attempt {
+async fn attempt(media: &MediaState, provider_id: &str, creds: &Credentials, body: &Value) -> Attempt {
     let req = match build_request(&media.http, &media.config.codex_responses_url, creds, body) {
         Ok(r) => r,
         Err(e) => return Attempt::BuildFailed(e),
@@ -380,6 +380,8 @@ async fn attempt(media: &MediaState, creds: &Credentials, body: &Value) -> Attem
             Err(e) => return Attempt::SendFailed(e.without_url().to_string()),
         };
         let status = resp.status();
+        // Image calls spend the same account quota as chat; keep /v1/limits current.
+        crate::telemetry::limits::capture(provider_id, resp.headers());
         if !status.is_success() {
             let retry_after = backoff::reset_after_from_header(resp.headers());
             let body = read_text_truncated(resp, MAX_ERROR_BODY).await;
@@ -467,7 +469,7 @@ async fn generate(
         let log = AttemptLog::new(state, caller, model, &provider.id);
         let body = build_body(effective_model, &state.media.config.codex_image_host_model, params);
         let creds = credentials_for(state, provider).await;
-        let mut result = attempt(&state.media, &creds, &body).await;
+        let mut result = attempt(&state.media, &provider.id, &creds, &body).await;
 
         if matches!(result, Attempt::Status { status: 401, .. }) {
             if creds.refresh_token.is_none() {
@@ -479,7 +481,7 @@ async fn generate(
             let adapter: std::sync::Arc<dyn ProviderAdapter> = adapter_for(provider, state.http.clone()).into();
             // Detached: a client disconnect mustn't lose the rotated token.
             match refresh_and_persist_detached(state, provider, adapter, &creds).await {
-                Ok(new_creds) => result = attempt(&state.media, &new_creds, &body).await,
+                Ok(new_creds) => result = attempt(&state.media, &provider.id, &new_creds, &body).await,
                 Err(e) => {
                     match e {
                         RefreshError::InvalidGrant => {

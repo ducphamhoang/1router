@@ -128,20 +128,25 @@ curl https://1router.hbstudio.space/v1/limits -H "CF-Access-Client-Id: $CF_ID" -
     "rate_limits": { "x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300",
                      "x-codex-primary-reset-at": "1760503200" },
     "observed_at": "2026-10-15T04:01:12+00:00" } },
-  "pools": [ { "id": "codex", "members": [ { "member": 1, "available": true, "status": "healthy", "...": "..." } ] } ]
+  "pools": [ { "id": "codex", "members": [ { "member": 1, "available": true, "status": "healthy", "retry_in_seconds": null } ] } ]
 }
 ```
 
 - `rate_limits` are the latest quota headers the upstream sent for that
   account (`x-codex-primary-*` / `-secondary-*` / `-credits-*` for ChatGPT
   accounts, `x-ratelimit-*` / `anthropic-ratelimit-*` for API providers),
-  kept in memory since the router started; `null` until a request has gone
-  through that account. `observed_at` says how fresh they are.
+  kept in memory since the router started (chat and image requests both
+  update them); `null` until a request has gone through that account, and
+  for upstreams that never send these headers. `observed_at` says how fresh
+  they are.
 - `status`/`retry_in_seconds` come from the router's own failover state:
   `cooling` = rate limited or failing, skipped for `retry_in_seconds` more;
   `misconfigured` = credential rejected, skipped for `retry_in_seconds` more.
   Once that time has passed the entry reads `healthy` again (the next request
   re-tries it). A pool member reports the state of its own model, a provider
-  entry the worst state across its models.
+  entry the worst state still in effect across its models.
 - `providers` only lists providers already visible in `GET /v1/models`
-  (`<provider_id>/<model>` addressing); pool members are numbered, not named.
+  (`<provider_id>/<model>` addressing); pool members are numbered, not named, and carry only
+  `available` / `status` / `retry_in_seconds` - never quota headers, so they
+  can't be matched to a named provider. A provider that is not set up yet
+  (no credential) has no failover state and reads `healthy`.

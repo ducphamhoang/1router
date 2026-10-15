@@ -283,6 +283,7 @@ async fn handle_proxy_inner(
 
         let status = upstream.status();
         let headers = upstream.headers().clone();
+        crate::telemetry::limits::capture(&provider.id, &headers);
         let class = adapter.classify_error(status, &headers).await;
 
         match class {

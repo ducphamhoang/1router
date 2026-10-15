@@ -25,6 +25,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let proxy = crate::proxy::routes::routes()
         .merge(crate::media::images::routes())
+        .merge(crate::telemetry::limits::routes())
         .route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
         require_bearer,

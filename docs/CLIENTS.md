@@ -110,3 +110,35 @@ provider's configured `default_reasoning_effort`:
 
 With none of these, the provider default applies (Codex providers fall back
 to `medium`). Models that take no reasoning parameter ignore the setting.
+
+## Quota and account status: `GET /v1/limits`
+
+Any `/v1` credential can read how much quota the accounts behind the router
+have left, e.g. to warn before a long agent run or to notify when an
+exhausted pool comes back:
+
+```
+curl https://1router.hbstudio.space/v1/limits -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET"
+```
+
+```json
+{
+  "object": "limits",
+  "providers": { "codex": { "available": false, "status": "cooling", "retry_in_seconds": 840,
+    "rate_limits": { "x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300",
+                     "x-codex-primary-reset-at": "1760503200" },
+    "observed_at": "2026-10-15T04:01:12+00:00" } },
+  "pools": [ { "id": "codex", "members": [ { "member": 1, "available": true, "status": "healthy", "...": "..." } ] } ]
+}
+```
+
+- `rate_limits` are the latest quota headers the upstream sent for that
+  account (`x-codex-primary-*` / `-secondary-*` / `-credits-*` for ChatGPT
+  accounts, `x-ratelimit-*` / `anthropic-ratelimit-*` for API providers),
+  kept in memory since the router started; `null` until a request has gone
+  through that account. `observed_at` says how fresh they are.
+- `status`/`retry_in_seconds` come from the router's own failover state:
+  `cooling` = rate limited or failing, retried after `retry_in_seconds`;
+  `misconfigured` = credential rejected.
+- `providers` only lists providers already visible in `GET /v1/models`
+  (`<provider_id>/<model>` addressing); pool members are numbered, not named.

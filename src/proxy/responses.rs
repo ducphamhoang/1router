@@ -297,12 +297,18 @@ pub fn request_to_chat(req: &Value) -> Result<Value, String> {
 
 // --------------------------------------------------------- buffered reply
 
+/// Chat `usage` -> Responses `usage`. `prompt_tokens_details.cached_tokens`
+/// becomes `input_tokens_details.cached_tokens` (always present, 0 when the
+/// upstream reported none, as the Responses API does): without it Codex CLI and
+/// any Responses client read every prompt-cache hit as a miss.
 fn usage_of(chat: &Value) -> Value {
     let u = &chat["usage"];
     let i = u["prompt_tokens"].as_i64().unwrap_or(0);
     let o = u["completion_tokens"].as_i64().unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_i64().unwrap_or(0);
     json!({
         "input_tokens": i,
+        "input_tokens_details": { "cached_tokens": cached },
         "output_tokens": o,
         "total_tokens": u["total_tokens"].as_i64().unwrap_or(i + o),
     })
@@ -809,6 +815,19 @@ mod tests {
         assert_eq!(r["output"][1]["type"], "function_call");
         assert_eq!(r["output"][1]["call_id"], "t1");
         assert_eq!(r["usage"]["total_tokens"], 7);
+        assert_eq!(r["usage"]["input_tokens_details"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn cached_prompt_tokens_reach_the_responses_usage() {
+        let chat = json!({
+            "model": "up",
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 896}},
+            "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]
+        });
+        let r = chat_to_response(&chat, "m", &NamespaceMap::new());
+        assert_eq!(r["usage"]["input_tokens"], 1000);
+        assert_eq!(r["usage"]["input_tokens_details"]["cached_tokens"], 896);
     }
 
     #[test]

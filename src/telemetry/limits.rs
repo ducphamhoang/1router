@@ -31,7 +31,7 @@ use dashmap::DashMap;
 use serde_json::{json, Value};
 
 use crate::core::model::Modality;
-use crate::core::runtime::{worst_provider_state, RuntimeStateMap};
+use crate::core::runtime::{runtime_key, worst_provider_state, ProviderRuntimeState, RuntimeStateMap};
 use crate::core::state::AppState;
 
 /// Most limit headers kept per provider, and the longest value kept - a
@@ -96,21 +96,32 @@ pub fn snapshot(provider_id: &str) -> Option<LimitSnapshot> {
     store().get(provider_id).map(|r| r.value().clone())
 }
 
-/// One provider's entry: runtime state + last seen limit headers.
+/// One provider's entry: its worst runtime state across models + last seen
+/// limit headers.
 pub fn provider_report(runtime: &RuntimeStateMap, provider_id: &str, now: Instant) -> Value {
-    let (available, status, retry_in_seconds) = match worst_provider_state(runtime, provider_id) {
-        Some(st) => {
+    report(worst_provider_state(runtime, provider_id), provider_id, now)
+}
+
+/// One pool member's entry: the runtime state of exactly the
+/// `(provider, effective model)` pair failover uses for it, so a sibling
+/// model cooling down on the same credential doesn't show here.
+pub fn member_report(runtime: &RuntimeStateMap, provider_id: &str, effective_model: &str, now: Instant) -> Value {
+    let state = runtime.get(&runtime_key(provider_id, effective_model)).map(|r| r.value().clone());
+    report(state, provider_id, now)
+}
+
+/// A state whose cooldown has passed is reported as healthy: the next
+/// request goes through, and `status` only resets on a success.
+fn report(state: Option<ProviderRuntimeState>, provider_id: &str, now: Instant) -> Value {
+    let (available, status, retry_in_seconds) = match state {
+        Some(st) if !st.is_available(now) => {
             let retry = st
                 .unavailable_until
                 .and_then(|until| until.checked_duration_since(now))
                 .map(|d| d.as_secs());
-            (
-                st.is_available(now),
-                serde_json::to_value(st.status).unwrap_or(Value::Null),
-                retry,
-            )
+            (false, serde_json::to_value(st.status).unwrap_or(Value::Null), retry)
         }
-        None => (true, json!("healthy"), None),
+        _ => (true, json!("healthy"), None),
     };
     let snap = snapshot(provider_id);
     json!({
@@ -132,6 +143,10 @@ async fn limits(State(s): State<AppState>) -> Json<Value> {
 
     let mut providers = serde_json::Map::new();
     for entry in s.discovered_models.iter() {
+        // An empty list isn't shown by /v1/models either - don't reveal the id here.
+        if entry.value().is_empty() {
+            continue;
+        }
         providers.insert(entry.key().clone(), provider_report(&s.runtime, entry.key(), now));
     }
 
@@ -145,7 +160,16 @@ async fn limits(State(s): State<AppState>) -> Json<Value> {
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let mut v = provider_report(&s.runtime, &m.provider_id, now);
+                    let effective = m.model_override.clone().or_else(|| {
+                        snap.providers
+                            .iter()
+                            .find(|p| p.id == m.provider_id)
+                            .map(|p| p.upstream_model.clone())
+                    });
+                    let mut v = match effective {
+                        Some(model) => member_report(&s.runtime, &m.provider_id, &model, now),
+                        None => provider_report(&s.runtime, &m.provider_id, now),
+                    };
                     v["member"] = json!(i + 1);
                     v
                 })
@@ -160,7 +184,6 @@ async fn limits(State(s): State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::runtime::{runtime_key, ProviderRuntimeState};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -231,6 +254,29 @@ mod tests {
         assert_eq!(v["retry_in_seconds"], json!(120));
         assert_eq!(v["rate_limits"]["x-codex-primary-used-percent"], json!("100"));
         assert!(v["observed_at"].is_string());
+    }
+
+    #[test]
+    fn expired_cooldown_reads_healthy_and_member_report_is_per_model() {
+        let runtime: RuntimeStateMap = Arc::new(DashMap::new());
+        let id = "limits-test-member";
+        let now = Instant::now();
+        let mut cooling = ProviderRuntimeState::default();
+        cooling.record_retryable(Duration::from_secs(60), now);
+        runtime.insert(runtime_key(id, "model-a"), cooling);
+
+        // model-a is cooling; model-b on the same credential is not.
+        assert_eq!(member_report(&runtime, id, "model-a", now)["available"], json!(false));
+        let b = member_report(&runtime, id, "model-b", now);
+        assert_eq!(b["available"], json!(true));
+        assert_eq!(b["status"], json!("healthy"));
+
+        // Once the cooldown has passed the entry reads healthy, not "cooling".
+        let later = now + Duration::from_secs(61);
+        let a = member_report(&runtime, id, "model-a", later);
+        assert_eq!(a["available"], json!(true));
+        assert_eq!(a["status"], json!("healthy"));
+        assert!(a["retry_in_seconds"].is_null());
     }
 
     #[test]

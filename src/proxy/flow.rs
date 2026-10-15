@@ -428,6 +428,7 @@ async fn handle_proxy_inner(
                         let lat2 = start2.elapsed().as_millis() as i64;
                         let retry_status = resp2.status();
                         let retry_headers = resp2.headers().clone();
+                        crate::telemetry::limits::capture(&provider.id, &retry_headers);
                         let retry_class = adapter
                             .classify_error(retry_status, &retry_headers)
                             .await;
@@ -625,6 +626,7 @@ async fn handle_proxy_inner(
                     let lat2 = start2.elapsed().as_millis() as i64;
                     let retry_status = resp2.status();
                     let retry_headers = resp2.headers().clone();
+                    crate::telemetry::limits::capture(&provider.id, &retry_headers);
                     let retry_class = adapter
                         .classify_error(retry_status, &retry_headers)
                         .await;

@@ -138,7 +138,10 @@ curl https://1router.hbstudio.space/v1/limits -H "CF-Access-Client-Id: $CF_ID" -
   kept in memory since the router started; `null` until a request has gone
   through that account. `observed_at` says how fresh they are.
 - `status`/`retry_in_seconds` come from the router's own failover state:
-  `cooling` = rate limited or failing, retried after `retry_in_seconds`;
-  `misconfigured` = credential rejected.
+  `cooling` = rate limited or failing, skipped for `retry_in_seconds` more;
+  `misconfigured` = credential rejected, skipped for `retry_in_seconds` more.
+  Once that time has passed the entry reads `healthy` again (the next request
+  re-tries it). A pool member reports the state of its own model, a provider
+  entry the worst state across its models.
 - `providers` only lists providers already visible in `GET /v1/models`
   (`<provider_id>/<model>` addressing); pool members are numbered, not named.

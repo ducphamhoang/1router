@@ -256,6 +256,14 @@ fn cost_usd(u: Usage, p: &Price) -> f64 {
     (fresh * p.input + cached + u.output as f64 * p.output) / 1_000_000.0
 }
 
+/// Cached share of input tokens, in percent to one decimal; null with no input.
+fn cache_hit_pct(u: Usage) -> Value {
+    if u.input <= 0 {
+        return Value::Null;
+    }
+    json!((u.cached as f64 / u.input as f64 * 1000.0).round() / 10.0)
+}
+
 pub async fn build_report(
     db: &SqlitePool,
     from: Option<&str>,
@@ -330,6 +338,7 @@ pub async fn build_report(
         rows_out.push(json!({
             "person": person, "model": model, "requests": a.requests,
             "input_tokens": a.u.input, "output_tokens": a.u.output, "cached_tokens": a.u.cached,
+            "cache_hit_pct": cache_hit_pct(a.u),
             "cost_usd": if a.unpriced { Value::Null } else { json!(a.cost) },
         }));
     }
@@ -339,6 +348,7 @@ pub async fn build_report(
             json!({
                 "person": p, "requests": a.requests,
                 "input_tokens": a.u.input, "output_tokens": a.u.output, "cached_tokens": a.u.cached,
+                "cache_hit_pct": cache_hit_pct(a.u),
                 // Cost of the priced models only; `partial` says some usage had no price.
                 "cost_usd": a.cost, "partial": a.unpriced,
             })
@@ -551,6 +561,11 @@ mod tests {
         let want = (600_000.0 * 2.0 + 400_000.0 * 0.5 + 500_000.0 * 10.0 + 1_000_000.0 * 2.0) / 1e6;
         assert!((p["cost_usd"].as_f64().unwrap() - want).abs() < 1e-9);
         assert_eq!(p["partial"], true);
+        // 400k cached of 2_000_010 input
+        assert_eq!(p["cache_hit_pct"], 20.0);
+        let sol = r["rows"].as_array().unwrap().iter()
+            .find(|x| x["model"] == "gpt-5.6-sol").unwrap();
+        assert_eq!(sol["cache_hit_pct"], 20.0);
         assert_eq!(r["unpriced_models"], json!(["mystery"]));
         let only = build_report(&db, None, None, Some("nobody")).await.unwrap();
         assert!(only["people"].as_array().unwrap().is_empty());

@@ -164,6 +164,12 @@ impl ProviderAdapter for CodexAdapter {
         if !account_id.is_empty() {
             builder = builder.header("ChatGPT-Account-ID", account_id);
         }
+        // Codex CLI sends its conversation id as a `session_id` header as well
+        // as `prompt_cache_key`; the backend appears to use it to keep a
+        // conversation on one cache replica.
+        if reqwest::header::HeaderValue::from_str(&session_id).is_ok() {
+            builder = builder.header("session_id", session_id.as_str());
+        }
         builder
             .build()
             .map_err(|e| AppError::Internal(format!("codex request build failed: {e}")))
@@ -340,6 +346,11 @@ mod tests {
         let sent: serde_json::Value =
             serde_json::from_slice(req.body().unwrap().as_bytes().unwrap()).unwrap();
         assert_eq!(sent["prompt_cache_key"], "1router-cx-gpt-5.6-sol-openai");
+        assert_eq!(
+            req.headers().get("session_id").and_then(|v| v.to_str().ok()),
+            Some("1router-cx-gpt-5.6-sol-openai"),
+            "session_id header mirrors prompt_cache_key"
+        );
 
         // Same provider id, same pool alias, but the Anthropic-facing wire
         // format - must get a distinct key so Claude Code's and OpenAI-SDK

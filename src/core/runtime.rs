@@ -20,6 +20,9 @@ pub struct ProviderRuntimeState {
     pub backoff_level: u8,
     pub unavailable_until: Option<Instant>,
     pub status: ProviderStatus,
+    /// Short text of the failure that put this entry into cooldown, so a
+    /// later request that skips it can say *why* instead of a bare 503.
+    pub last_error: Option<String>,
 }
 
 impl Default for ProviderRuntimeState {
@@ -28,6 +31,7 @@ impl Default for ProviderRuntimeState {
             backoff_level: 0,
             unavailable_until: None,
             status: ProviderStatus::Healthy,
+            last_error: None,
         }
     }
 }
@@ -44,6 +48,17 @@ impl ProviderRuntimeState {
         self.backoff_level = 0;
         self.unavailable_until = None;
         self.status = ProviderStatus::Healthy;
+        self.last_error = None;
+    }
+
+    /// Time left before this entry is tried again (`None` when available).
+    pub fn retry_in(&self, now: Instant) -> Option<Duration> {
+        self.unavailable_until.and_then(|u| u.checked_duration_since(now))
+    }
+
+    /// Remember why this entry is unavailable (truncated, one line).
+    pub fn note_error(&mut self, msg: &str) {
+        self.last_error = Some(msg.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect());
     }
 
     /// Force a provider back to healthy - used when an admin action
@@ -54,6 +69,7 @@ impl ProviderRuntimeState {
         self.backoff_level = 0;
         self.unavailable_until = None;
         self.status = ProviderStatus::Healthy;
+        self.last_error = None;
     }
 
     pub fn record_retryable(&mut self, cooldown: Duration, now: Instant) {

@@ -207,19 +207,37 @@ async fn handle_proxy_inner(
     let mut tried: Vec<String> = Vec::new();
     let mut last_error_body = String::from("no provider produced a response");
     let mut last_provider = String::new();
+    // Members skipped because they were still cooling down from an earlier
+    // failure: (provider, model, status, retry-in, why it cooled).
+    let mut skipped: Vec<SkippedMember> = Vec::new();
+    // `last_error_body` is overwritten by whichever member failed last; when
+    // it changes between iterations the previous member caused it, so pin
+    // that text on its runtime entry (only if one exists - SEC-03) for later
+    // requests that skip it.
+    let mut prev_key: Option<String> = None;
+    let mut seen_error = last_error_body.clone();
 
     for member in &selection.providers {
         let provider = member.provider;
         let effective_model = &member.effective_model;
         let member_override = &member.dataset_logging_override;
         let now = Instant::now();
+        attribute_error(&state, &mut prev_key, &mut seen_error, &last_error_body);
         // `get`, not `entry`: an untried (provider, model) has no state yet
         // and mustn't gain an entry just for being looked up (SEC-03).
         if let Some(st) = state.runtime.get(&runtime_key(&provider.id, effective_model)) {
             if !st.is_available(now) {
+                skipped.push(SkippedMember {
+                    provider: provider.id.clone(),
+                    model: effective_model.clone(),
+                    status: st.status,
+                    retry_in: st.retry_in(now).unwrap_or_default(),
+                    reason: st.last_error.clone(),
+                });
                 continue;
             }
         }
+        prev_key = Some(runtime_key(&provider.id, effective_model));
         let creds = credentials_for(&state, provider).await;
         let has_token = creds.access_token.is_some() || creds.refresh_token.is_some();
         if !is_ready(provider, has_token) {
@@ -749,6 +767,15 @@ async fn handle_proxy_inner(
                     continue;
                 }
 
+                // ChatGPT's usage-limit 429 carries no Retry-After header but
+                // says when the window reopens in its body; honour it so a
+                // spent 5h/weekly quota isn't re-probed every few minutes.
+                let retry_after = retry_after.or_else(|| {
+                    (status == StatusCode::TOO_MANY_REQUESTS)
+                        .then(|| serde_json::from_str::<serde_json::Value>(&error_text).ok())
+                        .flatten()
+                        .and_then(|v| crate::media::codex_images::usage_limit_cooldown(&v))
+                });
                 let cooldown = retry_after.unwrap_or_else(|| {
                     if status.is_server_error()
                         || status == StatusCode::TOO_MANY_REQUESTS
@@ -779,9 +806,107 @@ async fn handle_proxy_inner(
         }
     }
 
-    let mut resp = wire_error(wire, StatusCode::SERVICE_UNAVAILABLE, &last_error_body);
+    attribute_error(&state, &mut prev_key, &mut seen_error, &last_error_body);
+    let admin = caller.is_admin();
+    let message = unavailable_message(&pool_id, &tried, &skipped, &last_error_body, admin);
+    tracing::warn!(
+        pool = %pool_id,
+        user = caller.user_id.as_deref().unwrap_or("-"),
+        tried = %tried.join(","),
+        skipped = %skipped.iter().map(SkippedMember::describe).collect::<Vec<_>>().join("; "),
+        last_error = %last_error_body.chars().take(300).collect::<String>(),
+        "no provider could serve the request (503)"
+    );
+    let mut resp = wire_error(wire, StatusCode::SERVICE_UNAVAILABLE, &message);
+    // Only a pure "everything is cooling" outcome has a meaningful wait; a
+    // live failure just now has none to suggest.
+    if tried.is_empty() {
+        if let Some(wait) = skipped.iter().map(|m| m.retry_in).min() {
+            let secs = wait.as_secs().max(1) + u64::from(wait.subsec_nanos() > 0);
+            resp.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from(secs));
+        }
+    }
     insert_debug_headers(resp.headers_mut(), &tried, &last_provider, &last_error_body);
     resp
+}
+
+pub(crate) struct SkippedMember {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) status: crate::core::runtime::ProviderStatus,
+    pub(crate) retry_in: Duration,
+    pub(crate) reason: Option<String>,
+}
+
+impl SkippedMember {
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "{}/{} {} (retry in {}){}",
+            self.provider,
+            self.model,
+            match self.status {
+                crate::core::runtime::ProviderStatus::Misconfigured => "misconfigured",
+                _ => "cooling",
+            },
+            fmt_wait(self.retry_in),
+            self.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default(),
+        )
+    }
+}
+
+fn fmt_wait(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=89 => format!("{s}s"),
+        90..=5399 => format!("{}m", (s + 30) / 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// Pin the failure text that `last_error_body` gained since the previous
+/// check on the runtime entry of the member that produced it.
+pub(crate) fn attribute_error(state: &AppState, prev_key: &mut Option<String>, seen: &mut String, current: &str) {
+    if current != seen.as_str() {
+        if let Some(key) = prev_key.take() {
+            if let Some(mut st) = state.runtime.get_mut(&key) {
+                st.note_error(current);
+            }
+        }
+        *seen = current.to_string();
+    }
+}
+
+/// The 503 body. Callers who are not the admin get no provider ids
+/// (SEC-11); the admin gets the full per-member picture.
+pub(crate) fn unavailable_message(
+    pool_id: &str,
+    tried: &[String],
+    skipped: &[SkippedMember],
+    last_error: &str,
+    admin: bool,
+) -> String {
+    if skipped.is_empty() {
+        return last_error.to_string();
+    }
+    let wait = skipped.iter().map(|m| m.retry_in).min().unwrap_or_default();
+    let why = skipped.iter().find_map(|m| m.reason.clone());
+    let mut msg = if tried.is_empty() {
+        format!(
+            "no upstream provider available for '{pool_id}': all {} are cooling down after earlier failures (next retry in ~{}).",
+            skipped.len(),
+            fmt_wait(wait)
+        )
+    } else {
+        format!("{last_error} ({} more upstream member(s) skipped while cooling down.)", skipped.len())
+    };
+    if tried.is_empty() {
+        if admin {
+            msg.push_str(&format!(" Members: {}.", skipped.iter().map(SkippedMember::describe).collect::<Vec<_>>().join("; ")));
+        } else if let Some(why) = why {
+            msg.push_str(&format!(" Last upstream error: {why}"));
+        }
+    }
+    msg
 }
 
 fn build_error_passthrough(
@@ -834,6 +959,37 @@ fn insert_debug_headers(headers: &mut HeaderMap, tried: &[String], provider: &st
 mod tests {
     use crate::core::runtime::{ProviderRuntimeState, ProviderStatus};
     use std::time::Instant;
+
+    use super::{unavailable_message, SkippedMember};
+    use std::time::Duration;
+
+    fn skipped(reason: Option<&str>) -> SkippedMember {
+        SkippedMember {
+            provider: "codex".into(),
+            model: "gpt-6-luna".into(),
+            status: ProviderStatus::Cooling,
+            retry_in: Duration::from_secs(3 * 3600 + 120),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn all_cooling_message_explains_why_and_hides_ids_from_non_admin() {
+        let why = Some("usage_limit_reached: resets in 3h");
+        let user = unavailable_message("codex", &[], &[skipped(why)], "no provider produced a response", false);
+        assert!(user.contains("cooling down") && user.contains("3h02m"), "{user}");
+        assert!(user.contains("usage_limit_reached"), "{user}");
+        assert!(!user.contains("gpt-6-luna"), "{user}");
+        let admin = unavailable_message("codex", &[], &[skipped(why)], "x", true);
+        assert!(admin.contains("codex/gpt-6-luna cooling"), "{admin}");
+    }
+
+    #[test]
+    fn live_failure_keeps_its_own_error() {
+        let m = unavailable_message("p", &["a".into()], &[skipped(None)], "upstream 500", false);
+        assert!(m.starts_with("upstream 500"), "{m}");
+        assert_eq!(unavailable_message("p", &["a".into()], &[], "upstream 500", false), "upstream 500");
+    }
 
     #[test]
     fn misconfigured_is_skipped() {

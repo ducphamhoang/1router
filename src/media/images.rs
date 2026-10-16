@@ -39,7 +39,7 @@ use crate::providers::adapter::{adapter_for, Credentials, ProviderAdapter};
 use crate::providers::refresh_lock::refresh_and_persist_detached;
 use crate::proxy::backoff;
 use crate::proxy::body::buffer_body;
-use crate::proxy::flow::credentials_for;
+use crate::proxy::flow::{attribute_error, credentials_for, unavailable_message, SkippedMember};
 use crate::users::Caller;
 
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
@@ -456,15 +456,30 @@ async fn generate(
     };
 
     let mut last_error = String::from("no image provider available");
+    // See `proxy::flow`: why members were skipped, and which member each
+    // `last_error` belongs to, so a 503 can say what is cooling and why.
+    let mut skipped: Vec<SkippedMember> = Vec::new();
+    let mut prev_key: Option<String> = None;
+    let mut seen_error = last_error.clone();
     for member in &selection.providers {
         let provider = member.provider;
         let effective_model = member.effective_model.as_str();
+        attribute_error(state, &mut prev_key, &mut seen_error, &last_error);
         // `get`, not `entry`: never create state just by looking (SEC-03).
         if let Some(st) = state.runtime.get(&runtime_key(&provider.id, effective_model)) {
-            if !st.is_available(Instant::now()) {
+            let now = Instant::now();
+            if !st.is_available(now) {
+                skipped.push(SkippedMember {
+                    provider: provider.id.clone(),
+                    model: effective_model.to_string(),
+                    status: st.status,
+                    retry_in: st.retry_in(now).unwrap_or_default(),
+                    reason: st.last_error.clone(),
+                });
                 continue;
             }
         }
+        prev_key = Some(runtime_key(&provider.id, effective_model));
         tried.push(provider.id.clone());
         let log = AttemptLog::new(state, caller, model, &provider.id);
         let body = build_body(effective_model, &state.media.config.codex_image_host_model, params);
@@ -589,7 +604,24 @@ async fn generate(
             },
         }
     }
-    image_error(StatusCode::SERVICE_UNAVAILABLE, "no_provider_available", &last_error)
+    attribute_error(state, &mut prev_key, &mut seen_error, &last_error);
+    let message = unavailable_message(model, tried, &skipped, &last_error, caller.is_admin());
+    tracing::warn!(
+        pool = %model,
+        user = caller.user_id.as_deref().unwrap_or("-"),
+        tried = %tried.join(","),
+        skipped = %skipped.iter().map(SkippedMember::describe).collect::<Vec<_>>().join("; "),
+        last_error = %last_error.chars().take(300).collect::<String>(),
+        "no image provider could serve the request (503)"
+    );
+    let mut resp = image_error(StatusCode::SERVICE_UNAVAILABLE, "no_provider_available", &message);
+    if tried.is_empty() {
+        if let Some(wait) = skipped.iter().map(|m| m.retry_in).min() {
+            let secs = wait.as_secs().max(1) + u64::from(wait.subsec_nanos() > 0);
+            resp.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from(secs));
+        }
+    }
+    resp
 }
 
 #[cfg(test)]

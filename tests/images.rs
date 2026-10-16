@@ -178,7 +178,7 @@ async fn happy_path_returns_b64_and_sends_the_codex_body() {
     let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(reqs[0].headers["authorization"], "Bearer at-cx1");
     assert_eq!(reqs[0].headers["originator"], "codex_cli_rs");
-    assert_eq!(sent["model"], "gpt-5.5");
+    assert_eq!(sent["model"], "gpt-6-luna");
     assert_eq!(sent["tool_choice"], json!({"type": "image_generation"}));
     assert_eq!(sent["tools"][0]["type"], "image_generation");
     assert_eq!(sent["tools"][0]["size"], "1024x1024");
@@ -273,14 +273,18 @@ async fn sse_usage_limit_error_fails_over() {
 
 #[tokio::test]
 async fn server_errors_404_and_unsupported_host_model_fail_over() {
-    for resp in [
-        ResponseTemplate::new(503),
-        ResponseTemplate::new(404),
-        ResponseTemplate::new(400).set_body_json(json!({
-            "detail": "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."})),
+    for (resp, hits) in [
+        (ResponseTemplate::new(503), 1),
+        (ResponseTemplate::new(404), 1),
+        // Every configured host model is tried before the member fails over.
+        (
+            ResponseTemplate::new(400).set_body_json(json!({
+                "detail": "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."})),
+            2,
+        ),
     ] {
         let upstream = MockServer::start().await;
-        mount(&upstream, "cx1", resp, 1).await;
+        mount(&upstream, "cx1", resp, hits).await;
         mount(&upstream, "cx2", sse(HAPPY), 1).await;
         let app = two_account_app(&upstream).await;
         assert_eq!(generate_img(&app).await.status(), 200);
@@ -653,4 +657,32 @@ async fn export_import_keeps_modality_and_old_exports_import_as_chat() {
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT id, modality FROM pools ORDER BY id").fetch_all(&app.db).await.unwrap();
     assert_eq!(rows, vec![("img".into(), "image".into()), ("legacy".into(), "chat".into())]);
+}
+
+#[tokio::test]
+async fn unsupported_host_model_falls_back_to_the_next_host_and_sticks() {
+    use wiremock::matchers::body_partial_json;
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(body_partial_json(json!({"model": "gpt-6-luna"})))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "detail": "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(body_partial_json(json!({"model": "gpt-5.6-luna"})))
+        .respond_with(sse(HAPPY))
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let app = two_account_app(&upstream).await;
+    // First call discovers the dead host; the second goes straight to the working one.
+    for _ in 0..2 {
+        let resp = generate_img(&app).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["x-1router-provider"], "cx1", "no failover to another account");
+    }
 }

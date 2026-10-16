@@ -24,6 +24,9 @@ pub struct MediaState {
     /// Global cap on in-flight image requests (memory guard: each can
     /// buffer up to `config.max_response_bytes`).
     pub permits: tokio::sync::Semaphore,
+    /// Index into `config.codex_image_host_models` of the host that last
+    /// worked; advanced when upstream rejects the current one.
+    pub host_idx: std::sync::atomic::AtomicUsize,
 }
 
 impl MediaState {
@@ -50,6 +53,7 @@ impl MediaState {
             permits: tokio::sync::Semaphore::new(config.max_concurrency.max(1)),
             config,
             images_enabled: AtomicBool::new(images_enabled),
+            host_idx: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

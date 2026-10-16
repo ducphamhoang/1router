@@ -31,7 +31,7 @@ use crate::core::runtime::runtime_key;
 use crate::core::state::AppState;
 use crate::media::codex_images::{
     build_body, build_request, classify_status, error_message, parse_stream, FailureKind,
-    ImageParams, PreStream, StreamOutcome,
+    ImageParams, PreStream, StreamOutcome, UNSUPPORTED_HOST_MODEL,
 };
 use crate::media::MediaState;
 use crate::pools::select::select_image;
@@ -369,6 +369,56 @@ enum Attempt {
     TimedOut,
 }
 
+/// Run one image call, moving to the next configured host model when
+/// upstream says the current one is no longer supported. That rejection
+/// happens before any generation, so retrying costs no quota. The working
+/// host is remembered so later requests skip the dead ones.
+async fn attempt_hosts(
+    media: &MediaState,
+    provider_id: &str,
+    creds: &Credentials,
+    model: &str,
+    params: &ImageParams,
+) -> Attempt {
+    use std::sync::atomic::Ordering;
+    let hosts = &media.config.codex_image_host_models;
+    let start = media.host_idx.load(Ordering::Relaxed).min(hosts.len().saturating_sub(1));
+    let mut tried = Vec::new();
+    for (i, host) in hosts.iter().enumerate().skip(start) {
+        let body = build_body(model, host, params);
+        let result = attempt(media, provider_id, creds, &body).await;
+        match &result {
+            Attempt::Status { status: 400, body, .. } if body.contains(UNSUPPORTED_HOST_MODEL) => {
+                tried.push(host.clone());
+                if i + 1 < hosts.len() {
+                    tracing::warn!(
+                        host = %host,
+                        next = %hosts[i + 1],
+                        "image host model no longer supported by upstream, trying the next one"
+                    );
+                    continue;
+                }
+                return Attempt::Status {
+                    status: 400,
+                    retry_after: None,
+                    body: format!(
+                        "no usable image host model ({UNSUPPORTED_HOST_MODEL}): tried {} - set ROUTER_CODEX_IMAGE_HOST_MODEL to a model the account supports",
+                        tried.join(", ")
+                    ),
+                };
+            }
+            _ => {
+                if i != start && matches!(result, Attempt::Sse(_)) {
+                    media.host_idx.store(i, Ordering::Relaxed);
+                    tracing::warn!(host = %host, "image host model switched");
+                }
+                return result;
+            }
+        }
+    }
+    Attempt::BuildFailed("no image host model configured".into())
+}
+
 async fn attempt(media: &MediaState, provider_id: &str, creds: &Credentials, body: &Value) -> Attempt {
     let req = match build_request(&media.http, &media.config.codex_responses_url, creds, body) {
         Ok(r) => r,
@@ -482,9 +532,8 @@ async fn generate(
         prev_key = Some(runtime_key(&provider.id, effective_model));
         tried.push(provider.id.clone());
         let log = AttemptLog::new(state, caller, model, &provider.id);
-        let body = build_body(effective_model, &state.media.config.codex_image_host_model, params);
         let creds = credentials_for(state, provider).await;
-        let mut result = attempt(&state.media, &provider.id, &creds, &body).await;
+        let mut result = attempt_hosts(&state.media, &provider.id, &creds, effective_model, params).await;
 
         if matches!(result, Attempt::Status { status: 401, .. }) {
             if creds.refresh_token.is_none() {
@@ -496,7 +545,7 @@ async fn generate(
             let adapter: std::sync::Arc<dyn ProviderAdapter> = adapter_for(provider, state.http.clone()).into();
             // Detached: a client disconnect mustn't lose the rotated token.
             match refresh_and_persist_detached(state, provider, adapter, &creds).await {
-                Ok(new_creds) => result = attempt(&state.media, &provider.id, &new_creds, &body).await,
+                Ok(new_creds) => result = attempt_hosts(&state.media, &provider.id, &new_creds, effective_model, params).await,
                 Err(e) => {
                     match e {
                         RefreshError::InvalidGrant => {

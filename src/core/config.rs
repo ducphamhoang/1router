@@ -34,8 +34,10 @@ pub struct MediaConfig {
     pub max_response_bytes: usize,
     /// Concurrent image requests; each can buffer `max_response_bytes`.
     pub max_concurrency: usize,
-    /// Responses `model` that hosts the image tool for `gpt-image-*` models.
-    pub codex_image_host_model: String,
+    /// Responses `model`s that can host the image tool for `gpt-image-*`
+    /// models, in preference order: when upstream stops supporting one the
+    /// next is tried (see `media::images`).
+    pub codex_image_host_models: Vec<String>,
 }
 
 impl Default for MediaConfig {
@@ -46,7 +48,7 @@ impl Default for MediaConfig {
             idle_timeout: Duration::from_secs(300),
             max_response_bytes: 64 * 1024 * 1024,
             max_concurrency: 4,
-            codex_image_host_model: "gpt-5.5".to_string(),
+            codex_image_host_models: vec!["gpt-6-luna".to_string(), "gpt-5.6-luna".to_string()],
         }
     }
 }
@@ -67,11 +69,28 @@ impl MediaConfig {
             idle_timeout: env_secs("ROUTER_MEDIA_IDLE_TIMEOUT", 300),
             max_response_bytes: env_usize("ROUTER_MEDIA_MAX_RESPONSE_BYTES", d.max_response_bytes),
             max_concurrency: env_usize("ROUTER_MEDIA_MAX_CONCURRENCY", d.max_concurrency),
-            codex_image_host_model: std::env::var("ROUTER_CODEX_IMAGE_HOST_MODEL")
+            codex_image_host_models: std::env::var("ROUTER_CODEX_IMAGE_HOST_MODEL")
                 .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(d.codex_image_host_model),
+                .map(|v| parse_host_models(&v))
+                .filter(|v| !v.is_empty())
+                .unwrap_or(d.codex_image_host_models),
         }
+    }
+}
+
+/// Comma-separated preference list; blanks dropped.
+fn parse_host_models(v: &str) -> Vec<String> {
+    v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+}
+
+#[cfg(test)]
+mod host_model_tests {
+    use super::parse_host_models;
+
+    #[test]
+    fn host_models_split_on_commas_and_drop_blanks() {
+        assert_eq!(parse_host_models(" a, b ,,c "), ["a", "b", "c"]);
+        assert!(parse_host_models(" , ").is_empty());
     }
 }
 

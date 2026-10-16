@@ -901,7 +901,8 @@ pub(crate) fn unavailable_message(
     };
     if tried.is_empty() {
         if admin {
-            msg.push_str(&format!(" Members: {}.", skipped.iter().map(SkippedMember::describe).collect::<Vec<_>>().join("; ")));
+            let members = skipped.iter().map(SkippedMember::describe).collect::<Vec<_>>().join("; ");
+            msg.push_str(&format!(" Members: {}.", members.trim_end_matches('.')));
         } else if let Some(why) = why {
             msg.push_str(&format!(" Last upstream error: {why}"));
         }

@@ -245,7 +245,7 @@ buffered request rather than a stream.
 | `ROUTER_MEDIA_IDLE_TIMEOUT` | `300` (seconds) | Read idle timeout of the image HTTP client |
 | `ROUTER_MEDIA_MAX_RESPONSE_BYTES` | `67108864` (64 MiB) | Max buffered upstream response per image call |
 | `ROUTER_MEDIA_MAX_CONCURRENCY` | `4` | Concurrent image calls (extra requests get 429) |
-| `ROUTER_CODEX_IMAGE_HOST_MODEL` | `gpt-5.5` | Responses model that hosts the image tool for `gpt-image-*` members |
+| `ROUTER_CODEX_IMAGE_HOST_MODEL` | `gpt-6-luna,gpt-5.6-luna` | Comma-separated preference list of Responses models that host the image tool for `gpt-image-*` members; the next is tried when upstream rejects one with "model is not supported when using Codex" |
 
 ## Request path end to end
 

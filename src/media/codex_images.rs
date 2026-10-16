@@ -24,7 +24,7 @@ pub const MAX_USAGE_LIMIT_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 /// accepted for SDK compatibility without pretending they select anything.
 const TOOL_MODEL: &str = "gpt-image-2";
 
-const UNSUPPORTED_HOST_MODEL: &str = "model is not supported when using Codex";
+pub const UNSUPPORTED_HOST_MODEL: &str = "model is not supported when using Codex";
 
 /// Validated client parameters (`media::images` does the validation).
 #[derive(Clone, Debug, Default)]

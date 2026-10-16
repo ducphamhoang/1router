@@ -125,7 +125,7 @@ pub fn select<'a>(
 }
 
 /// Image models a Codex provider can serve through the `image_generation`
-/// tool: `gpt-image-*` (hosted by `MediaConfig::codex_image_host_model`) or
+/// tool: `gpt-image-*` (hosted by `MediaConfig::codex_image_host_models`) or
 /// `<chat-model>-image` (hosted by `<chat-model>` itself).
 pub fn is_image_model(model: &str) -> bool {
     let valid = |s: &str| !s.is_empty() && s.len() <= MAX_DIRECT_MODEL_LEN

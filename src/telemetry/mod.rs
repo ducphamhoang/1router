@@ -1,3 +1,4 @@
+pub mod cache_trace;
 pub mod dataset_log;
 pub mod health;
 pub mod limits;

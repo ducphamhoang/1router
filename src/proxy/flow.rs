@@ -82,6 +82,7 @@ fn maybe_log_dataset(
     body: &Bytes,
     total_start: Instant,
     ttfb_ms: Option<i64>,
+    cache_trace: Option<crate::telemetry::cache_trace::CacheTrace>,
 ) -> Response {
     // Token accounting: always on, independent of dataset logging.
     let resp = {
@@ -92,10 +93,22 @@ fn maybe_log_dataset(
             provider_id.clone(),
             model.clone(),
         );
+        let cache_trace = cache_trace.clone();
         let (parts, b) = resp.into_parts();
         let b = crate::telemetry::usage::tap(b, move |u| {
             if u.is_empty() {
                 return;
+            }
+            if let Some(t) = &cache_trace {
+                tracing::debug!(
+                    pool = pid.as_deref().unwrap_or("-"),
+                    model = %mdl,
+                    key = %t.key,
+                    gap_secs = t.gap_secs.map(|g| g as i64).unwrap_or(-1),
+                    input = u.input,
+                    cached = u.cached,
+                    "codex prompt-cache result"
+                );
             }
             tokio::spawn(async move {
                 crate::telemetry::usage::record(&db, uid.as_deref(), pid.as_deref(), &prov, &mdl, u).await;
@@ -280,6 +293,9 @@ async fn handle_proxy_inner(
             }
         };
 
+        let cache_trace = (provider.kind == crate::core::model::ProviderKind::OauthCodex)
+            .then(|| req.headers().get("session_id").and_then(|v| v.to_str().ok()).map(crate::telemetry::cache_trace::note))
+            .flatten();
         let start = Instant::now();
         let sent = state.http.execute(req).await;
         let latency_ms = start.elapsed().as_millis() as i64;
@@ -302,6 +318,7 @@ async fn handle_proxy_inner(
         let status = upstream.status();
         let headers = upstream.headers().clone();
         crate::telemetry::limits::capture(&provider.id, &headers);
+        log_codex_cache_headers(provider, &headers);
         let class = adapter.classify_error(status, &headers).await;
 
         match class {
@@ -338,6 +355,7 @@ async fn handle_proxy_inner(
                             &body,
                             total_start,
                             Some(latency_ms),
+                            cache_trace.clone(),
                         );
                     }
                     Err(e) => {
@@ -487,6 +505,7 @@ async fn handle_proxy_inner(
                                             &body,
                                             total_start,
                                             Some(lat2),
+                                            cache_trace.clone(),
                                         );
                                     }
                                     Err(e) => {
@@ -684,6 +703,7 @@ async fn handle_proxy_inner(
                                         &body,
                                         total_start,
                                         Some(lat2),
+                                        cache_trace.clone(),
                                     );
                                 }
                                 Err(e) => {
@@ -1000,4 +1020,23 @@ mod tests {
         assert!(!st.is_available(now));
         assert!(matches!(st.status, ProviderStatus::Misconfigured));
     }
+}
+
+/// Diagnostic for prompt-cache routing: does Codex return a sticky-routing
+/// token (`x-codex-turn-state`) and which `x-codex-*`/`openai-*` headers
+/// come back? Names only, plus a short hash of the token (never its value).
+fn log_codex_cache_headers(provider: &Provider, headers: &HeaderMap) {
+    if provider.kind != crate::core::model::ProviderKind::OauthCodex {
+        return;
+    }
+    let names: Vec<&str> = headers
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| k.starts_with("x-codex") || k.starts_with("openai-") || k.contains("cache") || k.contains("turn"))
+        .collect();
+    let turn_state = headers.get("x-codex-turn-state").and_then(|v| v.to_str().ok()).map(|v| {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(v.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect::<String>()
+    });
+    tracing::debug!(provider = %provider.id, turn_state = turn_state.as_deref().unwrap_or("-"), headers = %names.join(","), "codex response cache headers");
 }

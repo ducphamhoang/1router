@@ -375,6 +375,11 @@ pub struct SseChunkState {
     id: String,
     created: i64,
     saw_tool_call: bool,
+    /// `output_index` values whose arguments were already forwarded, so the
+    /// `.done` fallback below doesn't duplicate them. Some models (gpt-6-sol)
+    /// send no `function_call_arguments.delta` events at all - the complete
+    /// arguments only appear in the `.done` / `output_item.done` events.
+    args_sent: std::collections::HashSet<u64>,
 }
 
 impl SseChunkState {
@@ -432,6 +437,10 @@ pub fn chat_chunk_for_event(
             let index = data["output_index"].as_u64().unwrap_or(0);
             let call_id = item["call_id"].as_str().unwrap_or_default();
             let name = item["name"].as_str().unwrap_or_default();
+            let arguments = item["arguments"].as_str().unwrap_or_default();
+            if !arguments.is_empty() {
+                state.args_sent.insert(index);
+            }
             Some(chat_chunk(
                 state,
                 model,
@@ -440,7 +449,33 @@ pub fn chat_chunk_for_event(
                         "index": index,
                         "id": call_id,
                         "type": "function",
-                        "function": { "name": name, "arguments": "" }
+                        "function": { "name": name, "arguments": arguments }
+                    }]
+                }),
+                None,
+            ))
+        }
+        "response.function_call_arguments.done" | "response.output_item.done" => {
+            let (arguments, is_call) = if event == "response.output_item.done" {
+                (
+                    data["item"]["arguments"].as_str(),
+                    data["item"]["type"].as_str() == Some("function_call"),
+                )
+            } else {
+                (data["arguments"].as_str(), true)
+            };
+            let index = data["output_index"].as_u64().unwrap_or(0);
+            let arguments = arguments.unwrap_or_default();
+            if !is_call || arguments.is_empty() || !state.args_sent.insert(index) {
+                return None;
+            }
+            Some(chat_chunk(
+                state,
+                model,
+                json!({
+                    "tool_calls": [{
+                        "index": index,
+                        "function": { "arguments": arguments }
                     }]
                 }),
                 None,
@@ -449,6 +484,7 @@ pub fn chat_chunk_for_event(
         "response.function_call_arguments.delta" => {
             let index = data["output_index"].as_u64().unwrap_or(0);
             let delta = data["delta"].as_str().unwrap_or_default();
+            state.args_sent.insert(index);
             Some(chat_chunk(
                 state,
                 model,
@@ -906,6 +942,40 @@ mod tests {
         assert_eq!(tc["index"], 2);
         assert_eq!(tc["function"]["arguments"], "{\"loc");
         assert!(tc.get("id").is_none());
+    }
+
+    #[test]
+    fn chat_chunk_for_arguments_done_fills_in_when_no_deltas_were_streamed() {
+        let mut state = SseChunkState::new();
+        let done = json!({"output_index": 1, "arguments": "{\"path\":\"a\"}"});
+        let chunk =
+            chat_chunk_for_event(&mut state, "response.function_call_arguments.done", &done, "m")
+                .unwrap();
+        let tc = &chunk["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["index"], 1);
+        assert_eq!(tc["function"]["arguments"], "{\"path\":\"a\"}");
+        // output_item.done for the same call must not repeat them.
+        let item_done = json!({"output_index": 1, "item": {"type": "function_call", "arguments": "{\"path\":\"a\"}"}});
+        assert!(chat_chunk_for_event(&mut state, "response.output_item.done", &item_done, "m")
+            .is_none());
+    }
+
+    #[test]
+    fn chat_chunk_for_item_done_fills_in_arguments_and_skips_streamed_calls() {
+        let mut state = SseChunkState::new();
+        let item_done = json!({"output_index": 2, "item": {"type": "function_call", "arguments": "{\"p\":1}"}});
+        let chunk = chat_chunk_for_event(&mut state, "response.output_item.done", &item_done, "m")
+            .unwrap();
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"p\":1}");
+        // A call whose arguments were streamed as deltas is not repeated.
+        let delta = json!({"output_index": 3, "delta": "{}"});
+        chat_chunk_for_event(&mut state, "response.function_call_arguments.delta", &delta, "m");
+        let done = json!({"output_index": 3, "arguments": "{}"});
+        assert!(chat_chunk_for_event(&mut state, "response.function_call_arguments.done", &done, "m")
+            .is_none());
+        // Non-call items are ignored.
+        let msg = json!({"output_index": 0, "item": {"type": "message"}});
+        assert!(chat_chunk_for_event(&mut state, "response.output_item.done", &msg, "m").is_none());
     }
 
     #[test]

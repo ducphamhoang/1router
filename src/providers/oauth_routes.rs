@@ -45,6 +45,7 @@ async fn start(State(s): State<AppState>, Path(id): Path<String>) -> Result<Json
     let pkce = oauth::generate_pkce();
     let state_tok = Uuid::new_v4().to_string();
     queries::store_pkce(&s.db, &id, &pkce.verifier, &state_tok).await?;
+    tracing::info!(provider_id = %id, state_prefix = %&state_tok[..8], "codex oauth: browser login started");
     let url = oauth::build_authorize_url(&state_tok, &pkce.challenge);
     Ok(Json(json!({ "authorize_url": url })))
 }
@@ -70,9 +71,11 @@ pub async fn complete_oauth_exchange(
     code: &str,
     state: &str,
 ) -> Result<(), AppError> {
+    tracing::info!(provider_id, code_len = code.len(), "codex oauth: complete received");
     let os = queries::get_oauth_state(db, provider_id)
         .await?
         .ok_or_else(|| {
+            tracing::warn!(provider_id, "codex oauth: complete rejected, no flow in progress");
             AppError::BadRequest("no oauth flow in progress; call start first".into())
         })?;
     let verifier = os
@@ -82,14 +85,24 @@ pub async fn complete_oauth_exchange(
         .oauth_state
         .ok_or_else(|| AppError::BadRequest("missing oauth state; call start first".into()))?;
     if state != expected_state {
+        tracing::warn!(
+            provider_id,
+            got_prefix = %state.chars().take(8).collect::<String>(),
+            expected_prefix = %expected_state.chars().take(8).collect::<String>(),
+            "codex oauth: complete rejected, state mismatch (a newer start probably replaced this one)"
+        );
         return Err(AppError::BadRequest("state mismatch".into()));
     }
 
     let tokens = oauth::exchange_code(http, code, &verifier)
         .await
-        .map_err(|e| AppError::BadRequest(format!("code exchange failed: {e}")))?;
+        .map_err(|e| {
+            tracing::warn!(provider_id, error = %e, "codex oauth: code exchange failed");
+            AppError::BadRequest(format!("code exchange failed: {e}"))
+        })?;
     store_codex_tokens(db, provider_id, &tokens).await?;
     queries::clear_pkce(db, provider_id).await?;
+    tracing::info!(provider_id, has_refresh = tokens.refresh_token.is_some(), "codex oauth: connected, tokens stored");
     Ok(())
 }
 
@@ -174,6 +187,7 @@ async fn start_device_login(State(s): State<AppState>, Path(id): Path<String>) -
     }
     let code = oauth::request_device_code(&s.http).await.map_err(AppError::BadRequest)?;
     let attempt = Uuid::new_v4();
+    tracing::info!(provider_id = %id, %attempt, "codex oauth: device login started");
     device_logins().insert(id.clone(), DeviceLoginStatus::Pending { attempt });
 
     let body = json!({
@@ -190,8 +204,14 @@ async fn start_device_login(State(s): State<AppState>, Path(id): Path<String>) -
             return;
         }
         let status = match outcome {
-            Ok(()) => DeviceLoginStatus::Success,
-            Err(message) => DeviceLoginStatus::Error(message),
+            Ok(()) => {
+                tracing::info!(provider_id = %id, "codex oauth: device login connected");
+                DeviceLoginStatus::Success
+            }
+            Err(message) => {
+                tracing::warn!(provider_id = %id, error = %message, "codex oauth: device login failed");
+                DeviceLoginStatus::Error(message)
+            }
         };
         device_logins().insert(id, status);
     });

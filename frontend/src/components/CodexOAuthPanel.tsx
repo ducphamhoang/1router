@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiJson } from "../lib/apiClient";
 
 type StartResponse = {
@@ -80,11 +80,21 @@ export function CodexOAuthPanel({
 
   async function startOAuth() {
     setError(null);
-    const body = await apiJson<StartResponse>(
-      `/admin/providers/${providerId}/oauth/start`,
-      { method: "POST" },
-    );
-    window.open(body.authorize_url, "_blank", "noopener,noreferrer");
+    setMessage(null);
+    try {
+      const body = await apiJson<StartResponse>(
+        `/admin/providers/${providerId}/oauth/start`,
+        { method: "POST" },
+      );
+      window.open(body.authorize_url, "_blank", "noopener,noreferrer");
+      setMessage(
+        "Login page opened. After approving, paste the localhost:1455 address below and click Complete (use only the most recent login window).",
+      );
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Could not start Codex OAuth.",
+      );
+    }
   }
 
   async function startDeviceLogin() {
@@ -132,18 +142,22 @@ export function CodexOAuthPanel({
     }
   }
 
-  async function completeOAuth(event: FormEvent) {
+  async function completeOAuth(
+    event?: { preventDefault(): void; stopPropagation(): void },
+    pasted?: string,
+  ) {
     // stopPropagation matters here, not just style: this form is nested
     // inside the provider form (invalid HTML, but React's DOM API builds it
     // that way regardless), so the native submit event bubbles to the outer
     // form's onSubmit too - without this, completing OAuth also submits
     // "Save provider" and closes the whole modal.
-    event.preventDefault();
-    event.stopPropagation();
+    event?.preventDefault();
+    event?.stopPropagation();
     setError(null);
-    setMessage(null);
-    const parsed = parseRedirect(redirect);
+    setMessage("Completing login…");
+    const parsed = parseRedirect(pasted ?? redirect);
     if (!parsed) {
+      setMessage(null);
       setError(
         "Couldn't find code and state in that — paste the whole localhost:1455 address.",
       );
@@ -157,6 +171,7 @@ export function CodexOAuthPanel({
       });
       markConnected();
     } catch (error) {
+      setMessage(null);
       setError(error instanceof Error ? error.message : "Codex OAuth failed.");
     }
   }
@@ -164,6 +179,8 @@ export function CodexOAuthPanel({
   return (
     <section aria-labelledby="codex-oauth-title">
       <h2 id="codex-oauth-title">Codex OAuth</h2>
+      {message ? <p role="status">{message}</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
 
       {isConnected && !showLogin ? (
         <>
@@ -226,21 +243,36 @@ export function CodexOAuthPanel({
           <button type="button" onClick={startOAuth}>
             Start Codex OAuth
           </button>
-          <form onSubmit={completeOAuth}>
+          <div>
             <label>
               Redirect URL
               <input
                 value={redirect}
                 placeholder="http://localhost:1455/auth/callback?code=…&state=…"
                 onChange={(event) => setRedirect(event.target.value)}
+                onPaste={(event) => {
+                  // A pasted redirect with code+state completes the login
+                  // right away - there is no second button to forget.
+                  const text = event.clipboardData.getData("text");
+                  if (parseRedirect(text)) {
+                    event.preventDefault();
+                    setRedirect(text);
+                    void completeOAuth(undefined, text);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void completeOAuth(event);
+                  }
+                }}
               />
             </label>
-            <button type="submit">Complete Codex OAuth</button>
-          </form>
+            <button type="button" onClick={() => void completeOAuth()}>
+              Complete Codex OAuth
+            </button>
+          </div>
         </>
       ) : null}
-      {message ? <p role="status">{message}</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
     </section>
   );
 }

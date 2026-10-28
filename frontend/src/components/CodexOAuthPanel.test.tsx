@@ -87,6 +87,19 @@ describe("CodexOAuthPanel", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Codex OAuth connected.");
   });
 
+  it("auto_completes_when_a_redirect_url_is_pasted", async () => {
+    render(<CodexOAuthPanel providerId="prov_1" />);
+
+    await userEvent.click(screen.getByLabelText("Redirect URL"));
+    await userEvent.paste("http://localhost:1455/auth/callback?code=abc123&state=csrf-state");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/providers/prov_1/oauth/complete",
+      expect.objectContaining({ body: JSON.stringify({ code: "abc123", state: "csrf-state" }) })
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent("Codex OAuth connected.");
+  });
+
   it("rejects_a_paste_without_code_and_state", async () => {
     render(<CodexOAuthPanel providerId="prov_1" />);
     await userEvent.type(screen.getByLabelText("Redirect URL"), "http://localhost:1455/auth/callback");

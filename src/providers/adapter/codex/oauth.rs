@@ -191,7 +191,9 @@ pub async fn exchange_code_with_redirect(
         .map_err(|e| RefreshError::Transient(format!("token request failed: {e}")))?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
         let body = crate::core::http_client::read_text_truncated(resp, crate::core::http_client::MAX_ERROR_BODY).await;
+        tracing::warn!(%status, redirect_uri, body = %body, "codex oauth: token endpoint rejected code exchange");
         if body.contains("invalid_grant") {
             return Err(RefreshError::InvalidGrant);
         }

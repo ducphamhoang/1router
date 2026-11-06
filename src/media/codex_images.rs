@@ -60,7 +60,7 @@ pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
             (host_model.to_string(), json!({ "type": "image_generation" }))
         }
     };
-    let mut body = json!({
+    let body = json!({
         "model": host,
         "instructions": "",
         "input": [{
@@ -76,9 +76,10 @@ pub fn build_body(model: &str, host_model: &str, p: &ImageParams) -> Value {
         "stream": true,
         "store": false,
     });
-    if alias_host.is_none() {
-        body["reasoning"] = json!({ "effort": "medium", "summary": "auto" });
-    }
+    // No `reasoning` field: upstream's image models reject every effort value
+    // ("Complexity 'medium'/'high' is not supported for this image model",
+    // param=complexity) while omitting it generates normally (verified
+    // 2026-11-06 against the Codex Responses endpoint).
     body
 }
 
@@ -382,7 +383,7 @@ mod tests {
         assert_eq!(b["tools"][0]["action"], "generate");
         assert_eq!(b["input"][0]["content"].as_array().unwrap().len(), 1, "text only");
         assert_eq!(b["tools"][0]["size"], "1024x1024");
-        assert_eq!(b["reasoning"]["effort"], "medium");
+        assert!(b.get("reasoning").is_none(), "upstream rejects any reasoning effort for image models");
         assert_eq!(b["stream"], true);
         assert_eq!(b["store"], false);
         let text = b["input"][0]["content"][0]["text"].as_str().unwrap();

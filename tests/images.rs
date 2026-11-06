@@ -182,7 +182,7 @@ async fn happy_path_returns_b64_and_sends_the_codex_body() {
     assert_eq!(sent["tool_choice"], json!({"type": "image_generation"}));
     assert_eq!(sent["tools"][0]["type"], "image_generation");
     assert_eq!(sent["tools"][0]["size"], "1024x1024");
-    assert_eq!(sent["reasoning"]["effort"], "medium");
+    assert!(sent.get("reasoning").is_none(), "upstream rejects any reasoning effort for image models");
     assert_eq!(sent["stream"], true);
     assert!(sent["input"][0]["content"][0]["text"].as_str().unwrap().contains("size: 1024x1024"));
 
